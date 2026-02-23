@@ -642,24 +642,35 @@ struct MiGraphXBackend::Impl {
             }
         }
 
-        // ── G8: InteropBridge hook point ─────────────────────────
-        // Gold standard: at this point the GPU tensor buffer should be
-        // imported from Vulkan-exported VkDeviceMemory via:
-        //   InteropBridge::importMemory(vkExport, &hipPtr, error)
-        //   MiGraphX argument = {shape, hipPtr}   (GPU pointer, no copy)
-        // Current status: VulkanRuntime not yet integrated → CPU staging.
-        // This path is explicitly logged as degraded mode.
-        std::cout << "[interop-bridge] degraded: using CPU staging for model='"
-                  << modelId << "' (Vulkan↔HIP external memory not yet active)"
-                  << std::endl;
+        // ── Allocate GPU memory and copy input to VRAM ─────────
+        // MiGraphX .mxr programs execute on GPU and expect device-resident
+        // buffers.  Passing a CPU pointer causes the GPU kernels to stall.
+#ifdef AVE_HAVE_HIP
+        void* d_input = nullptr;
+        const std::size_t bytesIn = inputElements * sizeof(float);
 
-        // ── Build parameter map ──────────────────────────────────
+        if (hipMalloc(&d_input, bytesIn) != hipSuccess) {
+            error = InferenceError::runtimeFailure(
+                "hipMalloc failed for input tensor (" + std::to_string(bytesIn) + " bytes).").format();
+            return false;
+        }
+
+        if (hipMemcpy(d_input, inputData, bytesIn, hipMemcpyHostToDevice) != hipSuccess) {
+            (void)hipFree(d_input);
+            error = InferenceError::runtimeFailure(
+                "hipMemcpy Host→Device failed.").format();
+            return false;
+        }
+#else
+        // Fallback: pass CPU pointer directly (will only work if the
+        // program was compiled for CPU target, which is unusual).
+        void* d_input = const_cast<void*>(static_cast<const void*>(inputData));
+#endif
+
+        // ── Build parameter map with GPU buffer ──────────────────
         try {
             const auto inShape = mp.prog.get_parameter_shapes()[inName.c_str()];
-
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-            migraphx::argument inArg(inShape, const_cast<void*>(
-                static_cast<const void*>(inputData)));
+            migraphx::argument inArg(inShape, d_input);
 
             migraphx::program_parameters pp;
             pp.add(inName.c_str(), inArg);
@@ -667,15 +678,16 @@ struct MiGraphXBackend::Impl {
             // ── Eval ─────────────────────────────────────────────
             AVE_ROCTX_RANGE("migraphx:eval");
             const auto results = mp.prog.eval(pp);
+#ifdef AVE_HAVE_HIP
+            (void)hipDeviceSynchronize();
+#endif
             AVE_ROCTX_RANGE_END();
-
-            // ── G5: synchronisation ─────────────────────────────
-            // The eval() call is synchronous in CPU-staging mode.
-            // When Vulkan↔HIP interop is active, use
-            // program.experimental_get_context().finish() instead.
 
             // ── G4: Assert output shapes per frame ───────────────
             if (results.empty()) {
+#ifdef AVE_HAVE_HIP
+                (void)hipFree(d_input);
+#endif
                 error = InferenceError::runtimeFailure(
                     "program::eval returned no outputs for '" + modelId + "'.").format();
                 return false;
@@ -689,6 +701,9 @@ struct MiGraphXBackend::Impl {
                         "MiGraphXBackend::runInference (output gate)",
                         mp.outputContracts[0].format(),
                         "actual elements=" + std::to_string(outShape.elements()));
+#ifdef AVE_HAVE_HIP
+                    (void)hipFree(d_input);
+#endif
                     error = InferenceError::runtimeFailure(
                         "Output shape mismatch for '" + modelId + "': expected "
                         + std::to_string(expectedElems) + " elements, got "
@@ -697,11 +712,26 @@ struct MiGraphXBackend::Impl {
                 }
             }
 
+            // ── Retrieve output: copy VRAM → CPU ────────────────
             const std::size_t n = outShape.elements();
             outputData.resize(n);
+#ifdef AVE_HAVE_HIP
+            if (hipMemcpy(outputData.data(), results[0].data(),
+                          n * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+                (void)hipFree(d_input);
+                error = InferenceError::runtimeFailure(
+                    "hipMemcpy Device→Host failed.").format();
+                return false;
+            }
+            (void)hipFree(d_input);
+#else
             std::memcpy(outputData.data(), results[0].data(), n * sizeof(float));
+#endif
 
         } catch (const std::exception& ex) {
+#ifdef AVE_HAVE_HIP
+            (void)hipFree(d_input);
+#endif
             error = InferenceError::runtimeFailure(
                 std::string("MiGraphX eval: ") + ex.what(),
                 "model='" + modelId + "'").format();
