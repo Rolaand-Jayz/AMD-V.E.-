@@ -1,0 +1,464 @@
+#include "ave/model_catalog.hpp"
+
+#include <algorithm>
+
+namespace ave {
+
+// ─────────────────────────────────────────────────────────────────
+// Built-in model catalog
+// ─────────────────────────────────────────────────────────────────
+// Covers the same model families supported by the upstream
+// reference application (compression restore, artifact removal,
+// denoise, deblur, dehalo, color fix, upscale, sharpen,
+// interpolate) while relying solely on AMD ROCm / MiGraphX and
+// NCNN-Vulkan runtimes.
+// ─────────────────────────────────────────────────────────────────
+
+static const std::vector<ModelEntry> kCatalog = {
+
+    // ════════════════════════════════════════════════════════════
+    // Compression Restore / DeBlock / DeH264
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "nomos2-otf-x4",
+        /* displayName */ "4xNomos2 OTF ESRGAN (compression artifact removal)",
+        /* stage       */ StageKind::RestoreCompression,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4xNomos2_otf_esrgan.onnx",
+        /* filename    */ "4xNomos2_otf_esrgan.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "ESRGAN trained with on-the-fly (OTF) JPEG/video compression degradations; simultaneous artifact removal and x4 upscale.",
+        /* isDefault   */ true,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "realesrgan-x4-restore",
+        /* displayName */ "Real-ESRGAN x4 (restoration + upscale)",
+        /* stage       */ StageKind::RestoreCompression,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/RealESRGAN_x4.onnx",
+        /* filename    */ "RealESRGAN_x4.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Real-ESRGAN x4plus general-purpose restoration and upscale; handles JPEG, H.264, and mixed degradations.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "nmkd-siax-x4",
+        /* displayName */ "NMKD Siax 200k (versatile restoration + upscale)",
+        /* stage       */ StageKind::RestoreCompression,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x_NMKD-Siax_200k.onnx",
+        /* filename    */ "4x_NMKD-Siax_200k.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "NMKD Siax 200k – versatile general enhancement model handling noise, blur, and compression at x4.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Artifact Removal (blocking, ringing, banding)
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "ultrasharp-x4",
+        /* displayName */ "4x-UltraSharp (universal artifact removal + upscale)",
+        /* stage       */ StageKind::RemoveArtifacts,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-UltraSharp.onnx",
+        /* filename    */ "4x-UltraSharp.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "4x-UltraSharp ESRGAN – removes blocking, ringing, and banding while producing crisp x4 output.",
+        /* isDefault   */ true,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "wtp-uds-esrgan-x4",
+        /* displayName */ "4x WTP-UDS-ESRGAN (detail-preserving restoration)",
+        /* stage       */ StageKind::RemoveArtifacts,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-WTP-UDS-Esrgan.onnx",
+        /* filename    */ "4x-WTP-UDS-Esrgan.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "WTP-UDS ESRGAN x4 – excellent edge and texture fidelity for blocking and ringing artifact removal.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Denoise
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "nafnet-denoise",
+        /* displayName */ "NAFNet Blind Restoration (denoising)",
+        /* stage       */ StageKind::Denoise,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/opencv/deblurring_nafnet/resolve/main/deblurring_nafnet_2025may.onnx",
+        /* filename    */ "deblurring_nafnet_2025may.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "NAFNet nonlinear activation-free network – effective against motion blur, compression noise, and film grain at native resolution.",
+        /* isDefault   */ true,
+        /* minVram     */ 1024
+    },
+    {
+        /* id          */ "clearreality-x4-denoise",
+        /* displayName */ "4x-ClearRealityV1 (lightweight denoising + upscale)",
+        /* stage       */ StageKind::Denoise,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-ClearRealityV1.onnx",
+        /* filename    */ "4x-ClearRealityV1.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Very compact (1.9 MB) 4x upscaler with built-in denoising – fast and VRAM-efficient.",
+        /* isDefault   */ false,
+        /* minVram     */ 512
+    },
+    {
+        /* id          */ "remacri-x4",
+        /* displayName */ "4x Remacri (smooth-texture denoising + upscale)",
+        /* stage       */ StageKind::Denoise,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x_foolhardy_Remacri.onnx",
+        /* filename    */ "4x_foolhardy_Remacri.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Foolhardy Remacri x4 – cinematic smooth textures with strong noise suppression.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Deblur
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "nafnet-deblur-gopro",
+        /* displayName */ "NAFNet GoPro Motion Deblur (ONNX)",
+        /* stage       */ StageKind::Deblur,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/opencv/deblurring_nafnet/resolve/main/deblurring_nafnet_2025may.onnx",
+        /* filename    */ "deblurring_nafnet_2025may.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "NAFNet trained on GoPro – strong motion blur removal at native resolution. Official OpenCV Zoo model.",
+        /* isDefault   */ true,
+        /* minVram     */ 1024
+    },
+    {
+        /* id          */ "ultrasharpv2-deblur",
+        /* displayName */ "4x-UltraSharpV2 (deblur + upscale)",
+        /* stage       */ StageKind::Deblur,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-UltraSharpV2.onnx",
+        /* filename    */ "4x-UltraSharpV2.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "4x-UltraSharpV2 – second-generation UltraSharp with improved deblurring and sharpness recovery.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Dehalo
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "nafnet-dehalo",
+        /* displayName */ "NAFNet Halo Suppression (blind restoration)",
+        /* stage       */ StageKind::Dehalo,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/opencv/deblurring_nafnet/resolve/main/deblurring_nafnet_2025may.onnx",
+        /* filename    */ "deblurring_nafnet_2025may.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "NAFNet blind restoration suppresses high-frequency ringing and halos at native resolution.",
+        /* isDefault   */ true,
+        /* minVram     */ 1024
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Color Fix
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "iqa-color-enhance",
+        /* displayName */ "Color Correction (parametric)",
+        /* stage       */ StageKind::ColorFix,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "",
+        /* filename    */ "",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Parametric color correction using tunable contrast, brightness, saturation, gamma, and vibrance sliders.",
+        /* isDefault   */ true,
+        /* minVram     */ 0
+    },
+    {
+        /* id          */ "swinir-color",
+        /* displayName */ "SwinIR x4 Color Enhancement (ONNX)",
+        /* stage       */ StageKind::ColorFix,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/rocca/swin-ir-onnx/resolve/main/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.onnx",
+        /* filename    */ "003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "SwinIR-M real super-resolution (BSRGAN degradation) – x4 color restoration and fidelity enhancement.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Upscale
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "realesrgan-x4-general",
+        /* displayName */ "Real-ESRGAN x4 General (ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/RealESRGAN_x4.onnx",
+        /* filename    */ "RealESRGAN_x4.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Real-ESRGAN x4plus upscaling for general real-world photography and video.",
+        /* isDefault   */ true,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "animesharp-x4",
+        /* displayName */ "4x-AnimeSharp (anime + CGI upscale)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-AnimeSharp.onnx",
+        /* filename    */ "4x-AnimeSharp.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "AnimeSharp x4 – fine-tuned for anime, cartoon, and CGI content with crisp line detail.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "ultrasharpv2-x4",
+        /* displayName */ "4x-UltraSharpV2 (photo / video upscale)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-UltraSharpV2.onnx",
+        /* filename    */ "4x-UltraSharpV2.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "4x-UltraSharpV2 – highly rated general-purpose 4x upscaler with excellent sharpness.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "realesrgan-x4-axera",
+        /* displayName */ "Real-ESRGAN x4 (AXERA-TECH ONNX export)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/AXERA-TECH/Real-ESRGAN/resolve/main/onnx/realesrgan-x4.onnx",
+        /* filename    */ "realesrgan-x4-axera.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Official AXERA-TECH dynamic-resolution ONNX export of Real-ESRGAN x4plus.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "swinir-x4-general",
+        /* displayName */ "SwinIR x4 General (Transformer SR, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/rocca/swin-ir-onnx/resolve/main/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.onnx",
+        /* filename    */ "003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Swin Transformer-based x4 super-resolution with BSRGAN degradation training.",
+        /* isDefault   */ false,
+        /* minVram     */ 4096
+    },
+    {
+        /* id          */ "modernspanimation-x2",
+        /* displayName */ "ModernSpanimation v2 x2 (anime, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
+        /* filename    */ "2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "ModernSpanimation v2 slim ONNX – optimised for anime and animated video at x2.",
+        /* isDefault   */ false,
+        /* minVram     */ 512
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Sharpen
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "sharpen-cas",
+        /* displayName */ "Contrast-Adaptive Sharpening (CAS)",
+        /* stage       */ StageKind::Sharpen,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "",
+        /* filename    */ "",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "AMD FidelityFX CAS + unsharp mask pipeline via FFmpeg – no model download needed.",
+        /* isDefault   */ true,
+        /* minVram     */ 0
+    },
+
+    // ════════════════════════════════════════════════════════════
+    // Interpolate (Frame Interpolation)
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "rife-v4-7",
+        /* displayName */ "RIFE v4.7 (2x frame interpolation, ONNX)",
+        /* stage       */ StageKind::Interpolate,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 2.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife47_ensemble_True_scale_1_sim.onnx",
+        /* filename    */ "rife47_ensemble_True_scale_1_sim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "RIFE v4.7 optical-flow frame interpolation – ensemble mode for smoother results.",
+        /* isDefault   */ true,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "rife-v4-8",
+        /* displayName */ "RIFE v4.8 (2x frame interpolation, ONNX)",
+        /* stage       */ StageKind::Interpolate,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 2.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife48_ensemble_True_scale_1_sim.onnx",
+        /* filename    */ "rife48_ensemble_True_scale_1_sim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "RIFE v4.8 optical-flow frame interpolation – incremental quality improvement over v4.7.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "rife-v4-9",
+        /* displayName */ "RIFE v4.9 (2x frame interpolation, ONNX)",
+        /* stage       */ StageKind::Interpolate,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 2.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife49_ensemble_True_scale_1_sim.onnx",
+        /* filename    */ "rife49_ensemble_True_scale_1_sim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "RIFE v4.9 optical-flow frame interpolation – latest stable ensemble version.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
+        /* id          */ "interp-ffmpeg",
+        /* displayName */ "FFmpeg minterpolate (CPU fallback)",
+        /* stage       */ StageKind::Interpolate,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 2.0,
+        /* downloadUrl */ "",
+        /* filename    */ "",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Software motion-compensated interpolation via FFmpeg minterpolate – no GPU needed.",
+        /* isDefault   */ false,
+        /* minVram     */ 0
+    }
+};
+// ─────────────────────────────────────────────────────────────────
+
+const std::vector<ModelEntry>& builtinModelCatalog() {
+    return kCatalog;
+}
+
+std::vector<const ModelEntry*> catalogEntriesForStage(StageKind stage) {
+    std::vector<const ModelEntry*> result;
+    for (const auto& entry : kCatalog) {
+        if (entry.stage == stage) {
+            result.push_back(&entry);
+        }
+    }
+    return result;
+}
+
+const ModelEntry* catalogEntryById(const std::string& id) {
+    for (const auto& entry : kCatalog) {
+        if (entry.id == id) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace ave

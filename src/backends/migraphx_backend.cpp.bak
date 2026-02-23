@@ -1,0 +1,107 @@
+#include "ave/backends/migraphx_backend.hpp"
+
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "ave/types.hpp"
+
+namespace ave {
+namespace {
+
+bool fileExists(const std::string& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
+}
+
+bool commandInPath(const std::string& command) {
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv == nullptr) {
+        return false;
+    }
+
+    const std::string path(pathEnv);
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        std::size_t end = path.find(':', start);
+        if (end == std::string::npos) {
+            end = path.size();
+        }
+        const std::string dir = path.substr(start, end - start);
+        if (!dir.empty()) {
+            const std::filesystem::path candidate = std::filesystem::path(dir) / command;
+            if (fileExists(candidate.string())) {
+                return true;
+            }
+        }
+        if (end == path.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    return false;
+}
+
+bool hasAnyMiGraphXArtifact() {
+    static const std::vector<std::string> candidates = {
+        "/opt/rocm",
+        "/opt/rocm/lib/libmigraphx.so",
+        "/opt/rocm/lib64/libmigraphx.so",
+        "/usr/lib/libmigraphx.so",
+        "/usr/lib64/libmigraphx.so",
+    };
+
+    for (const auto& candidate : candidates) {
+        if (fileExists(candidate)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool hasAmdSignal() {
+    return commandInPath("rocminfo") || commandInPath("rocm-smi") || fileExists("/opt/rocm");
+}
+
+}  // namespace
+
+BackendType MiGraphXBackend::type() const { return BackendType::MiGraphX; }
+
+std::string MiGraphXBackend::name() const { return "MiGraphX (ROCm)"; }
+
+bool MiGraphXBackend::isAvailable(std::string& reason) const {
+    if (!hasAmdSignal()) {
+        reason = "ROCm tooling not detected (expected rocminfo/rocm-smi or /opt/rocm).";
+        return false;
+    }
+    if (!hasAnyMiGraphXArtifact()) {
+        reason = "MiGraphX runtime not found (expected libmigraphx.so).";
+        return false;
+    }
+
+    reason = "MiGraphX runtime detected.";
+    return true;
+}
+
+bool MiGraphXBackend::initialize(std::string& error) {
+    std::string reason;
+    if (!isAvailable(reason)) {
+        error = "MiGraphX initialization failed: " + reason;
+        return false;
+    }
+
+    std::cout << "[backend] initialized MiGraphX (ROCm)" << std::endl;
+    return true;
+}
+
+bool MiGraphXBackend::runStage(const EnhancementStage& stage, std::string& error) {
+    (void)error;
+    std::cout << "[backend:migraphx] stage " << toString(stage.kind) << std::endl;
+    return true;
+}
+
+}  // namespace ave
