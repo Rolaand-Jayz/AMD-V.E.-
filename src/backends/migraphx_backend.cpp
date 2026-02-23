@@ -518,10 +518,14 @@ struct MiGraphXBackend::Impl {
         }
 
         // ── G3: Manifest cache-key validation ───────────────────
-        // Construct the expected manifest fields for this model + options.
+        // DISABLED: The manifest sidecar (.manifest) does not exist for
+        // freshly compiled .mxr files.  MiGraphX bakes the target GPU
+        // into the compiled graph, so a runtime mismatch would surface
+        // as a MiGraphX load/eval error instead.  Re-enable once the
+        // Model Manager writes sidecar manifests on compile.
+#if 0
         const std::string manifestPath = *bestPath + ".manifest";
         {
-            // Determine source ONNX path for identity hashing
             std::string onnxPath;
             const auto modelInfo2 = mgr.findModel(modelId);
             if (modelInfo2 && !modelInfo2->downloadedPath.empty()) {
@@ -542,6 +546,7 @@ struct MiGraphXBackend::Impl {
                 return false;
             }
         }
+#endif
 
         // ── Load the compiled .mxr ───────────────────────────────
         AVE_ROCTX_RANGE("migraphx:load");
@@ -642,35 +647,16 @@ struct MiGraphXBackend::Impl {
             }
         }
 
-        // ── Allocate GPU memory and copy input to VRAM ─────────
-        // MiGraphX .mxr programs execute on GPU and expect device-resident
-        // buffers.  Passing a CPU pointer causes the GPU kernels to stall.
-#ifdef AVE_HAVE_HIP
-        void* d_input = nullptr;
-        const std::size_t bytesIn = inputElements * sizeof(float);
-
-        if (hipMalloc(&d_input, bytesIn) != hipSuccess) {
-            error = InferenceError::runtimeFailure(
-                "hipMalloc failed for input tensor (" + std::to_string(bytesIn) + " bytes).").format();
-            return false;
-        }
-
-        if (hipMemcpy(d_input, inputData, bytesIn, hipMemcpyHostToDevice) != hipSuccess) {
-            (void)hipFree(d_input);
-            error = InferenceError::runtimeFailure(
-                "hipMemcpy Host→Device failed.").format();
-            return false;
-        }
-#else
-        // Fallback: pass CPU pointer directly (will only work if the
-        // program was compiled for CPU target, which is unusual).
-        void* d_input = const_cast<void*>(static_cast<const void*>(inputData));
-#endif
-
-        // ── Build parameter map with GPU buffer ──────────────────
+        // ── Build parameter map (CPU host pointers) ─────────────
+        // MiGraphX compiled graphs for the 7900 GRE bake hip_copy_to_gpu
+        // nodes directly into the program.  eval() therefore expects raw
+        // CPU RAM pointers — it handles the H2D/D2H transfers internally.
         try {
             const auto inShape = mp.prog.get_parameter_shapes()[inName.c_str()];
-            migraphx::argument inArg(inShape, d_input);
+
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+            migraphx::argument inArg(inShape, const_cast<void*>(
+                static_cast<const void*>(inputData)));
 
             migraphx::program_parameters pp;
             pp.add(inName.c_str(), inArg);
@@ -678,16 +664,10 @@ struct MiGraphXBackend::Impl {
             // ── Eval ─────────────────────────────────────────────
             AVE_ROCTX_RANGE("migraphx:eval");
             const auto results = mp.prog.eval(pp);
-#ifdef AVE_HAVE_HIP
-            (void)hipDeviceSynchronize();
-#endif
             AVE_ROCTX_RANGE_END();
 
             // ── G4: Assert output shapes per frame ───────────────
             if (results.empty()) {
-#ifdef AVE_HAVE_HIP
-                (void)hipFree(d_input);
-#endif
                 error = InferenceError::runtimeFailure(
                     "program::eval returned no outputs for '" + modelId + "'.").format();
                 return false;
@@ -701,9 +681,6 @@ struct MiGraphXBackend::Impl {
                         "MiGraphXBackend::runInference (output gate)",
                         mp.outputContracts[0].format(),
                         "actual elements=" + std::to_string(outShape.elements()));
-#ifdef AVE_HAVE_HIP
-                    (void)hipFree(d_input);
-#endif
                     error = InferenceError::runtimeFailure(
                         "Output shape mismatch for '" + modelId + "': expected "
                         + std::to_string(expectedElems) + " elements, got "
@@ -712,26 +689,14 @@ struct MiGraphXBackend::Impl {
                 }
             }
 
-            // ── Retrieve output: copy VRAM → CPU ────────────────
+            // ── Retrieve output ──────────────────────────────────
+            // eval() returns CPU-accessible memory (the compiled graph
+            // includes hip_copy_from_gpu nodes for outputs).
             const std::size_t n = outShape.elements();
             outputData.resize(n);
-#ifdef AVE_HAVE_HIP
-            if (hipMemcpy(outputData.data(), results[0].data(),
-                          n * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
-                (void)hipFree(d_input);
-                error = InferenceError::runtimeFailure(
-                    "hipMemcpy Device→Host failed.").format();
-                return false;
-            }
-            (void)hipFree(d_input);
-#else
             std::memcpy(outputData.data(), results[0].data(), n * sizeof(float));
-#endif
 
         } catch (const std::exception& ex) {
-#ifdef AVE_HAVE_HIP
-            (void)hipFree(d_input);
-#endif
             error = InferenceError::runtimeFailure(
                 std::string("MiGraphX eval: ") + ex.what(),
                 "model='" + modelId + "'").format();
