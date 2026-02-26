@@ -258,17 +258,12 @@ StageResult NcnnVulkanBackend::runStage(const EnhancementStage& stage, std::stri
 
 
 StageResult NcnnVulkanBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "NCNN backend processVideoFile not implemented.";
-    return StageResult::Error;
+        const EnhancementStage& /*stage*/,
+        const std::string& /*inputVideo*/,
+        const std::string& /*outputVideo*/,
+        const FrameProgressCb& /*progressCb*/,
+        std::string& /*error*/) {
+    return StageResult::Deferred;
 }
 
 }  // namespace ave

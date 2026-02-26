@@ -177,9 +177,25 @@ bool InteropBridge::waitSemaphore(std::uint64_t hipSem, std::string& error) {
 #endif
 }
 
-bool InteropBridge::releaseSemaphore(std::uint64_t /*hipSem*/, std::string& error) {
-    error = "InteropBridge::releaseSemaphore: VulkanRuntime not integrated.";
+bool InteropBridge::releaseSemaphore(std::uint64_t hipSem, std::string& error) {
+#ifdef AVE_HAVE_HIP
+    auto it = impl_->mappedSemaphores.find(hipSem);
+    if (it == impl_->mappedSemaphores.end()) {
+        error = "Semaphore not found.";
+        return false;
+    }
+
+    if (hipDestroyExternalSemaphore(it->second) != hipSuccess) {
+        error = "hipDestroyExternalSemaphore failed.";
+        return false;
+    }
+
+    impl_->mappedSemaphores.erase(it);
+    return true;
+#else
+    error = "InteropBridge::releaseSemaphore: HIP not integrated.";
     return false;
+#endif
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────

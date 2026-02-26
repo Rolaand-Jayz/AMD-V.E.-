@@ -1,3 +1,6 @@
+// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
+#if 0  // ── entire file disabled ──────────────────────────────
+
 // ─────────────────────────────────────────────────────────────────
 // VapourSynth Backend – full implementation
 // Conditionally compiled against AVE_HAVE_VAPOURSYNTH.
@@ -468,114 +471,6 @@ void VapourSynthBackend::setCatalogFilters(
 
 #endif  // AVE_HAVE_VAPOURSYNTH
 
-
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-
-StageResult VapoursynthBackend::processVideoFile(
-        const EnhancementStage& stage,
-        const std::string& inputVideo,
-        const std::string& outputVideo,
-        const FrameProgressCb& progressCb,
-        std::string& error) {
-    (void)stage;
-    (void)inputVideo;
-    (void)outputVideo;
-    (void)progressCb;
-    error = "Vapoursynth backend processVideoFile not implemented.";
-    return StageResult::Error;
-}
-
 }  // namespace ave
+
+#endif // ── entire file disabled ──────────────────────────────
