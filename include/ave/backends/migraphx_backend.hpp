@@ -98,10 +98,10 @@ class MiGraphXBackend final : public IAcceleratorBackend {
     // Process a directory of PNG frames through the loaded MiGraphX
     // program.  Uses CPU staging (degraded mode) until VulkanRuntime
     // integration is complete.
-    StageResult processFrameDir(
+    StageResult processVideoFile(
         const EnhancementStage& stage,
-        const std::string& inputDir,
-        const std::string& outputDir,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
         const FrameProgressCb& progressCb,
         std::string& error) override;
 

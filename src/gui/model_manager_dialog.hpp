@@ -46,6 +46,12 @@ class ModelManagerDialog final : public QDialog {
     void onRefreshClicked();
 
   private:
+    // Prevent the dialog from being closed (OS X button / Escape / accept)
+    // while a download, conversion, or optimisation is still running.
+    // Background threads hold raw 'this' pointers through callbacks and would
+    // dereference a dangling pointer if the dialog were destroyed mid-flight.
+    void closeEvent(QCloseEvent* event) override;
+
     void buildUi();
     void populateList();
     void updateDetailPanel(const QString& modelId);

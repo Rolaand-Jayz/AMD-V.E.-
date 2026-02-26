@@ -3,6 +3,7 @@
 #include <thread>
 
 #include <QApplication>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QHBoxLayout>
@@ -76,6 +77,30 @@ ModelStateCb ModelManagerDialog::makeStateCb(const std::string& modelId) {
 }
 
 // ─── Construction ────────────────────────────────────────────────
+
+// ─── closeEvent ──────────────────────────────────────────────────
+// Block the dialog from closing while any model operation is in progress.
+// Background threads (download inside ModelManager, plus the dialog's own
+// convert/optimize threads) capture `this` through their callbacks.  If the
+// dialog were destroyed while those threads are still running, the callbacks
+// would dereference a dangling pointer, causing undefined behaviour / crash.
+void ModelManagerDialog::closeEvent(QCloseEvent* event) {
+    const auto models = manager_.allModels();
+    for (const auto& m : models) {
+        if (m.state == ModelState::Downloading ||
+            m.state == ModelState::Converting  ||
+            m.state == ModelState::Optimizing) {
+            QMessageBox::information(
+                this,
+                tr("Operation in progress"),
+                tr("Please wait for the current operation to finish before closing.\n\n"
+                   "You can cancel an active download with the Cancel button."));
+            event->ignore();
+            return;
+        }
+    }
+    QDialog::closeEvent(event);
+}
 
 ModelManagerDialog::ModelManagerDialog(ModelManager& manager, AppSettings& settings, QWidget* parent)
     : QDialog(parent), manager_(manager), settings_(settings) {

@@ -14,7 +14,7 @@ namespace ave {
 enum class ModelFormat {
     Onnx,   // ONNX – primary interchange format, directly ingestible by MiGraphX
     NcnnBin, // NCNN .bin/.param pair
-    Pytorch  // raw .pt/.pth – must be exported to ONNX first
+    Pytorch  // raw .pt/.pth – compiled directly via torch-MiGraphX (torch.onnx.export + MiGraphX); no separate pre-export step required
 };
 
 enum class ModelPrecision {

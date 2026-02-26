@@ -72,7 +72,7 @@ void ToggleSwitch::paintEvent(QPaintEvent* /*e*/) {
     track.setRedF(  trackFrom.redF()   + (trackTo.redF()   - trackFrom.redF())   * thumbPos_);
     track.setGreenF(trackFrom.greenF() + (trackTo.greenF() - trackFrom.greenF()) * thumbPos_);
     track.setBlueF( trackFrom.blueF()  + (trackTo.blueF()  - trackFrom.blueF())  * thumbPos_);
-    track.setAlphaF(hovered_ ? 0.95 : 0.85);
+    track.setAlphaF(static_cast<float>(hovered_ ? 0.95 : 0.85));
 
     const QRectF trackRect(0, (height() - kTrackH) / 2.0, kTrackW, kTrackH);
     QPainterPath trackPath;

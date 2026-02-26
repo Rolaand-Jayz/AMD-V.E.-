@@ -333,17 +333,143 @@ static const std::vector<ModelEntry> kCatalog = {
     },
     {
         /* id          */ "modernspanimation-x2",
-        /* displayName */ "ModernSpanimation v2 x2 (anime, ONNX)",
+        /* displayName */ "ModernSpanimation v2 x2 fp16 (anime, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp16,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20_fp16_onnxslim.onnx",
+        /* filename    */ "2x_ModernSpanimationV2_clamp_op20_fp16_onnxslim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "ModernSpanimation v2 fp16 slim ONNX – fp16-quantised export, half the file size and VRAM of fp32; optimised for anime and animated video at x2.",
+        /* isDefault   */ false,
+        /* minVram     */ 256
+    },
+
+    // ── Lightweight / fast-enough 2× general ─────────────────────
+    {
+        /* id          */ "clearreality-x2",
+        /* displayName */ "2x-ClearRealityV1 — Lightweight General (ONNX)",
         /* stage       */ StageKind::Upscale,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
-        /* filename    */ "2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/2x_ClearRealityV1.onnx",
+        /* filename    */ "2x_ClearRealityV1.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "ModernSpanimation v2 slim ONNX – optimised for anime and animated video at x2.",
+        /* description */ "ClearRealityV1 x2 – sub-megabyte compact model; ideal for 1080p→1440p or any moderate upscale "
+                          "without heavy VRAM use. Fast enough for near-real-time batch processing.",
+        /* isDefault   */ false,
+        /* minVram     */ 256
+    },
+    {
+        /* id          */ "realesrnet-x2plus",
+        /* displayName */ "RealESRNet x2+ (conservative 2x, no GAN, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_RealESRNet_x2plus_onnxslim.onnx",
+        /* filename    */ "2x_RealESRNet_x2plus_onnxslim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "RealESRNet x2+ without the GAN discriminator – stable, artifact-free x2 upscale at roughly half "
+                          "the VRAM of the full x4plus GAN model. Good choice for 720p→1080p or 1080p→1440p.",
+        /* isDefault   */ false,
+        /* minVram     */ 512
+    },
+
+    // ── Lightweight / fast-enough 4× options ─────────────────────
+    {
+        /* id          */ "clearreality-x4-fast",
+        /* displayName */ "4x-ClearRealityV1 — Ultra-Fast Lightweight (ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-ClearRealityV1.onnx",
+        /* filename    */ "4x-ClearRealityV1.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "ClearRealityV1 x4 – 1.9 MB model file; fastest 4x upscaler in the catalog. Trades some fine "
+                          "texture fidelity for dramatically lower VRAM and inference time. Good for 1080p→4K when "
+                          "\"good enough\" quality is acceptable.",
+        /* isDefault   */ false,
+        /* minVram     */ 256
+    },
+    {
+        /* id          */ "realesrnet-x4plus",
+        /* displayName */ "RealESRNet x4+ (conservative 4x, no GAN, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/RealESRNet_x4plus.onnx",
+        /* filename    */ "RealESRNet_x4plus.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "RealESRNet x4+ trained without a GAN discriminator – produces slightly softer but more stable "
+                          "results than the full GAN-trained x4plus. Lower chance of hallucinated textures on real-world video.",
+        /* isDefault   */ false,
+        /* minVram     */ 1024
+    },
+    {
+        /* id          */ "nmkd-superscale-x4",
+        /* displayName */ "4x NMKD-Superscale-SP (fast general, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x_NMKD-Superscale-SP_178000_G.onnx",
+        /* filename    */ "4x_NMKD-Superscale-SP_178000_G.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "NMKD Superscale-SP x4 – general-purpose model biased towards speed. Lighter than Siax 200k while "
+                          "retaining good detail recovery. Suitable when throughput matters more than maximum fidelity.",
+        /* isDefault   */ false,
+        /* minVram     */ 1024
+    },
+
+    // ── Lightweight 2× anime ──────────────────────────────────────
+    {
+        /* id          */ "modernspanimation-x2-v1compact",
+        /* displayName */ "ModernSpanimation v1 Compact x2 (anime, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV1_Compact_clamp_op20_onnxslim.onnx",
+        /* filename    */ "2x_ModernSpanimationV1_Compact_clamp_op20_onnxslim.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "ModernSpanimation v1 Compact – significantly smaller network than v2 Full for anime x2 upscale. "
+                          "Best pick when speed is the priority for animated content.",
+        /* isDefault   */ false,
+        /* minVram     */ 256
+    },
+    {
+        /* id          */ "animejananai-hd-compact-x2",
+        /* displayName */ "AnimeJaNai HD V3 Compact x2 (anime, ONNX)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/the-database/AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_Compact_s2_490k.onnx",
+        /* filename    */ "2x_AnimeJaNai_HD_V3_Compact_s2_490k.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "AnimeJaNai HD V3 Compact – purpose-built for 1080p anime upscale to 2160p with a compact "
+                          "network. Much lighter than the full V3 while keeping excellent line fidelity.",
         /* isDefault   */ false,
         /* minVram     */ 512
     },

@@ -722,290 +722,6 @@ std::int64_t pickAiScale(const EnhancementStage& upscaleStage,
     return 4;
 }
 
-#if 0  // Superseded by encodeWithAiProcessing — kept for reference.
-
-// Scales a single PNG to 1×1 and returns the average grey value (0–255).
-// Returns -1 if ffmpeg is unavailable or the frame can't be read.
-int sampleFrameLuma(const std::filesystem::path& framePath) {
-    const std::string cmd =
-        "ffmpeg -hide_banner -loglevel quiet -i " + quoteArg(framePath.string()) +
-        " -vf \"scale=1:1,format=gray\" -frames:v 1 -f rawvideo pipe:1 2>/dev/null";
-    FILE* p = popen(cmd.c_str(), "r");
-    if (!p) return -1;
-    unsigned char pixel = 0;
-    [[maybe_unused]] const auto n = fread(&pixel, 1, 1, p);
-    pclose(p);
-    return static_cast<int>(pixel);
-}
-
-bool encodeWithAiUpscale(const VideoJob& job,
-                         const std::vector<EnhancementStage>& orderedStages,
-                         const std::size_t aiUpscaleIdx,
-                         std::string& error) {
-    if (!commandInPath("realesrgan-ncnn-vulkan")) {
-        error = "AI upscale requested but realesrgan-ncnn-vulkan is not available in PATH.";
-        return false;
-    }
-
-    std::string probeError;
-    const std::optional<VideoProbeInfo> probe = probeVideo(job.inputPath, probeError);
-    if (!probe.has_value()) {
-        error = probeError;
-        return false;
-    }
-
-    const EnhancementStage& upscaleStage = orderedStages[aiUpscaleIdx];
-
-    std::int64_t width = 0;
-    std::int64_t height = 0;
-    const std::optional<std::int64_t> targetWidth =
-        (tryGetInt(upscaleStage.params, "width", width) && width > 0) ? std::optional<std::int64_t>{width} : std::nullopt;
-    const std::optional<std::int64_t> targetHeight =
-        (tryGetInt(upscaleStage.params, "height", height) && height > 0) ? std::optional<std::int64_t>{height} : std::nullopt;
-
-    const std::int64_t aiScale = pickAiScale(upscaleStage, probe, targetWidth, targetHeight);
-
-    const std::string modelName = getOptionalStringParam(upscaleStage, "model").value_or("realesr-animevideov3");
-
-    std::string modelDir = getOptionalStringParam(upscaleStage, "model_dir").value_or("");
-    if (modelDir.empty()) {
-        const std::filesystem::path defaultModelDir = "/usr/share/realesrgan-ncnn-vulkan/models";
-        std::error_code ec;
-        if (std::filesystem::exists(defaultModelDir, ec)) {
-            modelDir = defaultModelDir.string();
-        }
-    }
-
-    std::cout << "[ai] using realesrgan-ncnn-vulkan model=" << modelName << " scale=" << aiScale << std::endl;
-
-    TempDirectoryGuard tempGuard;
-    tempGuard.path = createTempJobDir(job.outputPath);
-
-    const std::filesystem::path framesInputDir = tempGuard.path / "frames_input";
-    const std::filesystem::path framesAiDir = tempGuard.path / "frames_ai";
-
-    std::error_code ec;
-    std::filesystem::create_directories(framesInputDir, ec);
-    if (ec) {
-        error = "Failed to create temporary input frame directory.";
-        return false;
-    }
-    std::filesystem::create_directories(framesAiDir, ec);
-    if (ec) {
-        error = "Failed to create temporary AI frame directory.";
-        return false;
-    }
-
-    std::vector<std::string> preFilters;
-    std::vector<std::string> postFilters;
-
-    for (std::size_t i = 0; i < orderedStages.size(); ++i) {
-        if (i < aiUpscaleIdx) {
-            appendFiltersForStage(orderedStages[i], preFilters, false);
-            continue;
-        }
-
-        if (i == aiUpscaleIdx) {
-            continue;
-        }
-
-        appendFiltersForStage(orderedStages[i], postFilters, true);
-    }
-
-    if (targetWidth.has_value() && targetHeight.has_value()) {
-        postFilters.insert(postFilters.begin(), "scale=" + std::to_string(*targetWidth) + ":" + std::to_string(*targetHeight));
-    }
-
-    const auto& progressCb = job.progressCb;
-    auto taskReport = [&progressCb](float frac, const std::string& msg) {
-        if (progressCb) progressCb(0, static_cast<int>(frac * 100.0f + 0.5f), msg);
-    };
-    auto extractTaskCb = [&taskReport](float f, const std::string& msg) {
-        taskReport(f * 0.25f, msg);         // 0–25 % of task bar
-    };
-    auto aiTaskCb = [&taskReport](float f, const std::string& msg) {
-        taskReport(0.25f + f * 0.50f, msg); // 25–75 %
-    };
-    auto encodeTaskCb = [&taskReport](float f, const std::string& msg) {
-        taskReport(0.75f + f * 0.25f, msg); // 75–100 %
-    };
-
-    if (progressCb) progressCb(0, 0, "Probing input video for frame count\u2026");
-    const std::int64_t totalInputFrames = countFrames(job.inputPath);
-    if (!preFilters.empty()) {
-        const std::string preChain = joinFilters(preFilters);
-        if (progressCb) progressCb(0, 0,
-            std::to_string(preFilters.size()) + " pre-upscale filter(s): " + preChain);
-        std::cout << "[ai] pre-upscale filters: " << preChain << std::endl;
-    } else {
-        if (progressCb) progressCb(0, 0, "No pre-upscale filters.");
-    }
-
-    const std::string inputPattern = (framesInputDir / "%08d.png").string();
-    std::ostringstream extractCmd;
-    extractCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-               << "-i " << quoteArg(job.inputPath) << ' ';
-    if (!preFilters.empty()) {
-        extractCmd << "-vf " << quoteArg(joinFilters(preFilters)) << ' ';
-    }
-    // Force RGB24 so realesrgan-ncnn-vulkan always receives a plain RGB PNG
-    // (avoids alpha-channel or YUV-packed PNGs that confuse the tool).
-    extractCmd << "-pix_fmt rgb24 -vsync 0 -start_number 0 " << quoteArg(inputPattern);
-
-    if (!runFfmpegWithProgress(extractCmd.str(), "extract-frames", totalInputFrames, extractTaskCb, error)) {
-        return false;
-    }
-
-    std::ostringstream aiCmd;
-    aiCmd << "realesrgan-ncnn-vulkan"
-          << " -i " << quoteArg(framesInputDir.string())
-          << " -o " << quoteArg(framesAiDir.string())
-          << " -s " << aiScale
-          << " -n " << modelName
-          << " -f png";
-
-    if (!modelDir.empty()) {
-        aiCmd << " -m " << quoteArg(modelDir);
-    }
-
-    if (const std::optional<std::int64_t> gpu = getOptionalIntParam(upscaleStage, "gpu_id"); gpu.has_value()) {
-        aiCmd << " -g " << *gpu;
-    }
-
-    if (const std::optional<std::int64_t> tile = getOptionalIntParam(upscaleStage, "tile"); tile.has_value()) {
-        aiCmd << " -t " << clampInt(*tile, 0, 4096);
-    } else {
-        // Default tile size: process frame in 256-px tiles so the entire super-
-        // resolution frame is never loaded into GPU VRAM at once.  Without this
-        // realesrgan easily OOMs on AMD GPUs, exits 0 and writes black PNG files
-        // for unfinished frames — producing the "93 % hang + black output" bug.
-        aiCmd << " -t 256";
-    }
-
-    if (const std::optional<std::string> jobs = getOptionalStringParam(upscaleStage, "jobs"); jobs.has_value() && !jobs->empty()) {
-        aiCmd << " -j " << *jobs;
-    }
-
-    if (getOptionalBoolParam(upscaleStage, "tta").value_or(false)) {
-        aiCmd << " -x";
-    }
-
-    if (progressCb) progressCb(0, 25, "Running AI upscale model " + modelName +
-        " ×" + std::to_string(aiScale) + " on " + std::to_string(totalInputFrames) + " frames…");
-    if (!runRealEsrganWithProgress(aiCmd.str(), aiTaskCb, error)) {
-        return false;
-    }
-
-    // ── Post-realesrgan validation ──────────────────────────────────────
-    // 1. Renumber output frames sequentially so FFmpeg always gets a clean
-    //    %08d.png sequence regardless of how realesrgan names its output.
-    {
-        std::string renameErr;
-        if (!renumberFramesSequentially(framesAiDir, renameErr)) {
-            error = "Could not renumber AI output frames: " + renameErr;
-            return false;
-        }
-    }
-
-    // 2. Compare output frame count to input frame count.
-    const std::size_t outputValidFrames = countValidFrames(framesAiDir);
-    const std::size_t inputFrameCount   = countValidFrames(framesInputDir);
-    if (outputValidFrames == 0) {
-        error = "AI upscale produced no valid output frames.\n"
-                "Check GPU/Vulkan access and that the model '" + modelName + "' is installed.";
-        return false;
-    }
-    if (inputFrameCount > 0 && outputValidFrames < inputFrameCount * 8 / 10) {
-        // More than 20% of frames missing: almost certainly a GPU OOM or crash.
-        error = "AI upscale only completed " + std::to_string(outputValidFrames) +
-                " of " + std::to_string(inputFrameCount) + " frames (" +
-                std::to_string(outputValidFrames * 100 / inputFrameCount) + "%).\n"
-                "This indicates the GPU ran out of memory.  Try adding a stage parameter\n"
-                "  tile=128  (or tile=64 for large 4K sources) to reduce VRAM usage.";
-        return false;
-    }
-    if (inputFrameCount > 0 && outputValidFrames < inputFrameCount) {
-        std::cerr << "[ai] WARNING: " << (inputFrameCount - outputValidFrames)
-                  << " frames missing from AI output (" << outputValidFrames
-                  << "/" << inputFrameCount << "); those frames will be black.\n";
-    }
-
-    // 3. Sample-check the first, middle, and last output frames for black content.
-    //    realesrgan can exit 0 and write valid-sized PNGs that are still all-black
-    //    when a Vulkan compute shader silently fails.
-    {
-        std::vector<std::filesystem::path> sampleFiles;
-        std::vector<std::filesystem::path> allFiles;
-        std::error_code iterEc;
-        for (const auto& e : std::filesystem::directory_iterator(framesAiDir, iterEc))
-            if (!iterEc && e.is_regular_file() && e.path().extension() == ".png")
-                allFiles.push_back(e.path());
-        std::sort(allFiles.begin(), allFiles.end());
-        if (!allFiles.empty()) {
-            sampleFiles.push_back(allFiles.front());
-            if (allFiles.size() > 2) sampleFiles.push_back(allFiles[allFiles.size() / 2]);
-            if (allFiles.size() > 1) sampleFiles.push_back(allFiles.back());
-        }
-        int brightCount = 0;
-        for (const auto& f : sampleFiles) {
-            const int luma = sampleFrameLuma(f);
-            if (luma > 8) ++brightCount;  // luma > 8/255 = not black
-            std::cout << "[ai] brightness check " << f.filename().string()
-                      << " luma=" << luma << std::endl;
-        }
-        if (!sampleFiles.empty() && brightCount == 0) {
-            error = "AI upscale frames appear to be all-black (luma ≤ 8 across all sampled frames).\n"
-                    "This is a Vulkan compute failure — the GPU driver processed the workload\n"
-                    "but the shader produced zero output.  Common causes on AMD:\n"
-                    "  • ROCm/AMDGPU-PRO driver version mismatch with the realesrgan Vulkan shaders\n"
-                    "  • Insufficient VRAM — try adding  tile=128  to the upscale stage\n"
-                    "  • Run 'vulkaninfo | grep deviceName' to confirm the GPU is being used";
-            return false;
-        }
-    }
-
-    const std::string aiPattern = (framesAiDir / "%08d.png").string();
-
-    if (progressCb) progressCb(0, 75,
-        "Encoding " + std::to_string(outputValidFrames) + " upscaled frames with FFmpeg…");
-    std::ostringstream encodeCmd;
-    encodeCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-              << "-framerate " << probe->fps << " -start_number 0 -i "
-              << quoteArg(aiPattern) << " -i " << quoteArg(job.inputPath) << ' ';
-
-    // Always force yuv420p so libx264/libx265 receive a compatible pixel format.
-    // Without this, RGBA or RGB24 PNGs from realesrgan cause all-black output
-    // because the encoder either rejects the format or silently mis-converts it.
-    std::vector<std::string> finalPostFilters = postFilters;
-    finalPostFilters.push_back("format=yuv420p");
-
-    {
-        const std::string chain = joinFilters(finalPostFilters);
-        if (!postFilters.empty()) {
-            std::cout << "[ai] post-upscale filters: " << chain << std::endl;
-        }
-        encodeCmd << "-vf " << quoteArg(chain) << ' ';
-    }
-
-    // -r sets the output frame rate explicitly; relying only on -framerate (input
-    // demuxer option) can leave the encoder with an undefined/mismatched rate.
-    encodeCmd << "-r " << probe->fps << ' '
-              << "-map 0:v:0 -map 1:a? -c:v " << job.encode.codec << ' '
-              << "-crf " << job.encode.crf << ' '
-              << "-preset " << job.encode.preset << ' '
-              << "-c:a copy -shortest "
-              << quoteArg(job.outputPath);
-
-    if (!runFfmpegWithProgress(encodeCmd.str(), "encode-video",
-                               static_cast<std::int64_t>(outputValidFrames),
-                               encodeTaskCb, error)) {
-        return false;
-    }
-
-    return true;
-}
-#endif  // encodeWithAiUpscale disabled
-
 // ─────────────────────────────────────────────────────────────────
 // encodeWithAiProcessing — generalised AI frame-processing pipeline
 //
@@ -1040,28 +756,16 @@ bool encodeWithAiProcessing(const VideoJob& job,
     const auto& progressCb = job.progressCb;
     const std::int64_t totalInputFrames = countFrames(job.inputPath);
 
-    // ── Build the pipeline: categorise each stage ────────────────
-    // We track which stages are AI-processable and which are FFmpeg-only.
-    // Between AI stages, any FFmpeg-only stages become intermediate
-    // filter passes applied to the frame directory.
+    std::string currentVideoPath = job.inputPath;
+    int fileIndex = 0;
 
-    bool framesExtracted = false;
-    std::filesystem::path currentFramesDir;
-    int dirIndex = 0;
-
-    auto makeFrameDir = [&]() -> std::filesystem::path {
-        auto dir = tempGuard.path / ("frames_" + std::to_string(dirIndex++));
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-        return dir;
+    auto makeTempVideo = [&]() -> std::string {
+        return (tempGuard.path / ("temp_" + std::to_string(fileIndex++) + ".mkv")).string();
     };
 
-    // Pending FFmpeg filters that accumulate between AI stages.
     std::vector<std::string> pendingFilters;
-    // Post-AI FFmpeg filters (stages after the last AI stage).
     std::vector<std::string> postFilters;
 
-    // First pass: find the index of the last AI-processable stage.
     std::size_t lastAiIdx = 0;
     bool hasAnyAi = false;
     for (std::size_t i = 0; i < orderedStages.size(); ++i) {
@@ -1071,188 +775,52 @@ bool encodeWithAiProcessing(const VideoJob& job,
         }
     }
     if (!hasAnyAi) {
-        // Shouldn't reach here (caller should check), but fallback gracefully.
         error = "No AI-processable stages found.";
         return false;
     }
 
-    // Progress allocation:
-    //   0–15%:   frame extraction
-    //   15–85%:  AI processing (divided equally among AI stages)
-    //   85–100%: final encoding
     int aiStageCount = 0;
     for (std::size_t i = 0; i < orderedStages.size(); ++i)
         if (isAiProcessable(orderedStages[i], backend)) ++aiStageCount;
     int aiStagesDone = 0;
 
-    // ── Process each stage ───────────────────────────────────────
     for (std::size_t i = 0; i < orderedStages.size(); ++i) {
         const auto& stage = orderedStages[i];
         const bool isAi = isAiProcessable(stage, backend);
 
         if (i > lastAiIdx) {
-            // Past the last AI stage → all remaining are post-AI filters.
             appendFiltersForStage(stage, postFilters, true);
             continue;
         }
 
         if (!isAi) {
-            // FFmpeg-only stage before/between AI stages → accumulate filter.
             appendFiltersForStage(stage, pendingFilters, true);
             continue;
         }
 
-        // ── This is an AI-processable stage ─────────────────────
-
-        // Step 1: Extract frames if not yet done.
-        if (!framesExtracted) {
-            currentFramesDir = makeFrameDir();
-            const std::string inputPattern =
-                (currentFramesDir / "%08d.png").string();
-
-            std::ostringstream extractCmd;
-            extractCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                       << "-i " << quoteArg(job.inputPath) << ' ';
-            if (!pendingFilters.empty()) {
-                const std::string chain = joinFilters(pendingFilters);
-                extractCmd << "-vf " << quoteArg(chain) << ' ';
-                std::cout << "[ai-pipeline] pre-AI filters: " << chain << std::endl;
-            }
-            extractCmd << "-pix_fmt rgb24 -vsync 0 -start_number 0 "
-                       << quoteArg(inputPattern);
-
-            auto extractCb = [&progressCb](float f, const std::string& msg) {
-                if (progressCb) progressCb(0, static_cast<int>(f * 15.0f), msg);
-            };
-
-            if (progressCb) progressCb(0, 0, "Extracting frames for AI processing\u2026");
-            if (!runFfmpegWithProgress(extractCmd.str(), "extract-frames",
-                                       totalInputFrames, extractCb, error))
-                return false;
-
-            framesExtracted = true;
-            pendingFilters.clear();
-        }
-
-        // Step 2: Apply any pending intermediate FFmpeg filters.
+        // Apply pending filters before AI stage
         if (!pendingFilters.empty()) {
-            auto nextDir = makeFrameDir();
-            const std::string inPat = (currentFramesDir / "%08d.png").string();
-            const std::string outPat = (nextDir / "%08d.png").string();
-
+            std::string nextVideo = makeTempVideo();
             std::ostringstream filterCmd;
             filterCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                      << "-framerate " << probe->fps << " -start_number 0 "
-                      << "-i " << quoteArg(inPat) << ' '
+                      << "-i " << quoteArg(currentVideoPath) << ' '
                       << "-vf " << quoteArg(joinFilters(pendingFilters)) << ' '
-                      << "-pix_fmt rgb24 -start_number 0 "
-                      << quoteArg(outPat);
-
-            std::cout << "[ai-pipeline] intermediate filters: "
-                      << joinFilters(pendingFilters) << std::endl;
+                      << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
+                      << quoteArg(nextVideo);
 
             if (!runFfmpegWithProgress(filterCmd.str(), "apply-intermediate-filters",
                                        totalInputFrames, nullptr, error))
                 return false;
 
-            currentFramesDir = nextDir;
+            currentVideoPath = nextVideo;
             pendingFilters.clear();
         }
 
-        // Step 3: Run AI inference on frames.
-        auto aiOutputDir = makeFrameDir();
+        // Run AI inference
+        std::string aiOutputVideo = makeTempVideo();
+        bool aiHandled = false;
 
-        if (shouldUseAiUpscale(stage)) {
-            // ── AI Upscale via realesrgan-ncnn-vulkan ────────────
-            if (!commandInPath("realesrgan-ncnn-vulkan")) {
-                error = "AI upscale requested but realesrgan-ncnn-vulkan "
-                        "is not available in PATH.";
-                return false;
-            }
-
-            std::int64_t width = 0, height = 0;
-            const auto tw = (tryGetInt(stage.params, "width", width) && width > 0)
-                            ? std::optional<std::int64_t>{width} : std::nullopt;
-            const auto th = (tryGetInt(stage.params, "height", height) && height > 0)
-                            ? std::optional<std::int64_t>{height} : std::nullopt;
-
-            const std::int64_t aiScale = pickAiScale(stage, probe, tw, th);
-            const std::string modelName =
-                getOptionalStringParam(stage, "model").value_or("realesr-animevideov3");
-
-            std::string modelDir = getOptionalStringParam(stage, "model_dir").value_or("");
-            if (modelDir.empty()) {
-                const std::filesystem::path defDir =
-                    "/usr/share/realesrgan-ncnn-vulkan/models";
-                std::error_code ec;
-                if (std::filesystem::exists(defDir, ec)) modelDir = defDir.string();
-            }
-
-            std::cout << "[ai-pipeline] realesrgan model=" << modelName
-                      << " scale=" << aiScale << std::endl;
-
-            std::ostringstream aiCmd;
-            aiCmd << "realesrgan-ncnn-vulkan"
-                  << " -i " << quoteArg(currentFramesDir.string())
-                  << " -o " << quoteArg(aiOutputDir.string())
-                  << " -s " << aiScale
-                  << " -n " << modelName
-                  << " -f png";
-            if (!modelDir.empty())
-                aiCmd << " -m " << quoteArg(modelDir);
-            if (const auto gpu = getOptionalIntParam(stage, "gpu_id"); gpu.has_value())
-                aiCmd << " -g " << *gpu;
-            if (const auto tile = getOptionalIntParam(stage, "tile"); tile.has_value())
-                aiCmd << " -t " << clampInt(*tile, 0, 4096);
-            else
-                aiCmd << " -t 256";
-            if (const auto jobs = getOptionalStringParam(stage, "jobs");
-                jobs.has_value() && !jobs->empty())
-                aiCmd << " -j " << *jobs;
-            if (getOptionalBoolParam(stage, "tta").value_or(false))
-                aiCmd << " -x";
-
-            const float aiBase = 15.0f + (70.0f * static_cast<float>(aiStagesDone) /
-                                                   static_cast<float>(aiStageCount));
-            const float aiSpan = 70.0f / static_cast<float>(aiStageCount);
-            auto aiCb = [&progressCb, aiBase, aiSpan](float f, const std::string& msg) {
-                if (progressCb) progressCb(0, static_cast<int>(aiBase + f * aiSpan), msg);
-            };
-
-            if (progressCb) progressCb(0, static_cast<int>(aiBase),
-                "Running AI upscale " + modelName + " \u00d7" + std::to_string(aiScale) + "\u2026");
-            if (!runRealEsrganWithProgress(aiCmd.str(), aiCb, error))
-                return false;
-
-            // Post-validation: renumber + count + brightness check.
-            {
-                std::string renErr;
-                if (!renumberFramesSequentially(aiOutputDir, renErr)) {
-                    error = "Could not renumber AI frames: " + renErr;
-                    return false;
-                }
-            }
-            const std::size_t outValid = countValidFrames(aiOutputDir);
-            const std::size_t inValid  = countValidFrames(currentFramesDir);
-            if (outValid == 0) {
-                error = "AI upscale produced no valid output frames.";
-                return false;
-            }
-            if (inValid > 0 && outValid < inValid * 8 / 10) {
-                error = "AI upscale only completed " + std::to_string(outValid) +
-                        " of " + std::to_string(inValid) + " frames.";
-                return false;
-            }
-
-            // If target dimensions differ from realesrgan output, add a scale
-            // filter as a pending filter for the next pass or final encode.
-            if (tw.has_value() && th.has_value()) {
-                postFilters.insert(postFilters.begin(),
-                    "scale=" + std::to_string(*tw) + ":" + std::to_string(*th));
-            }
-
-        } else if (backend) {
-            // ── Non-upscale AI stage via backend ────────────────
+        if (backend) {
             const float aiBase = 15.0f + (70.0f * static_cast<float>(aiStagesDone) /
                                                    static_cast<float>(aiStageCount));
             const float aiSpan = 70.0f / static_cast<float>(aiStageCount);
@@ -1264,88 +832,85 @@ bool encodeWithAiProcessing(const VideoJob& job,
                 "Running AI " + toString(stage.kind) + " via " + backend->name() + "\u2026");
 
             std::string backendError;
-            const StageResult result = backend->processFrameDir(
-                stage, currentFramesDir.string(), aiOutputDir.string(),
+            const StageResult result = backend->processVideoFile(
+                stage, currentVideoPath, aiOutputVideo,
                 frameCb, backendError);
 
             if (result == StageResult::Processed) {
                 std::cout << "[ai-pipeline] " << toString(stage.kind)
                           << " → AI complete via " << backend->name() << std::endl;
+                aiHandled = true;
             } else if (result == StageResult::Error) {
                 error = "AI inference failed for " + toString(stage.kind) +
                         ": " + backendError;
                 return false;
             } else {
-                // Deferred: backend couldn't process. Apply FFmpeg filter instead.
                 std::cout << "[ai-pipeline] " << toString(stage.kind)
                           << " → deferred to FFmpeg filter." << std::endl;
-                // Apply the filter to the current frames via an FFmpeg pass.
-                std::vector<std::string> fallbackFilter;
-                appendFiltersForStage(stage, fallbackFilter, true);
-                if (!fallbackFilter.empty()) {
-                    const std::string inPat = (currentFramesDir / "%08d.png").string();
-                    const std::string outPat = (aiOutputDir / "%08d.png").string();
-
-                    std::ostringstream fbCmd;
-                    fbCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                          << "-framerate " << probe->fps << " -start_number 0 "
-                          << "-i " << quoteArg(inPat) << ' '
-                          << "-vf " << quoteArg(joinFilters(fallbackFilter)) << ' '
-                          << "-pix_fmt rgb24 -start_number 0 "
-                          << quoteArg(outPat);
-                    if (!runFfmpegWithProgress(fbCmd.str(), "fallback-filter",
-                                               totalInputFrames, nullptr, error))
-                        return false;
-                } else {
-                    // No filter fallback and no AI: just copy frames.
-                    aiOutputDir = currentFramesDir;
-                }
             }
         }
 
-        currentFramesDir = aiOutputDir;
+        // Fallback: backend is null or deferred — apply FFmpeg filter
+        if (!aiHandled) {
+            std::vector<std::string> fallbackFilter;
+            appendFiltersForStage(stage, fallbackFilter, true);
+            if (!fallbackFilter.empty()) {
+                std::ostringstream fbCmd;
+                fbCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
+                      << "-i " << quoteArg(currentVideoPath) << ' '
+                      << "-vf " << quoteArg(joinFilters(fallbackFilter)) << ' '
+                      << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
+                      << quoteArg(aiOutputVideo);
+                if (!runFfmpegWithProgress(fbCmd.str(), "fallback-filter",
+                                           totalInputFrames, nullptr, error))
+                    return false;
+            } else {
+                aiOutputVideo = currentVideoPath;
+            }
+        }
+
+        currentVideoPath = aiOutputVideo;
         ++aiStagesDone;
     }
 
-    // ── Final encode: frame directory → output video ─────────────
-    // Always add format=yuv420p to ensure encoder compatibility.
+    // Final encode
     postFilters.push_back("format=yuv420p");
-
-    if (!postFilters.empty()) {
-        std::cout << "[ai-pipeline] post-AI filters: "
-                  << joinFilters(postFilters) << std::endl;
-    }
-
-    const std::size_t finalFrameCount = countValidFrames(currentFramesDir);
-    const std::string aiPattern = (currentFramesDir / "%08d.png").string();
 
     auto encodeCb = [&progressCb](float f, const std::string& msg) {
         if (progressCb) progressCb(0, static_cast<int>(85.0f + f * 15.0f), msg);
     };
 
-    if (progressCb) progressCb(0, 85,
-        "Encoding " + std::to_string(finalFrameCount) + " AI-processed frames\u2026");
+    if (progressCb) progressCb(0, 85, "Encoding final video\u2026");
 
     std::ostringstream encCmd;
     encCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-           << "-framerate " << probe->fps << " -start_number 0 -i "
-           << quoteArg(aiPattern) << " -i " << quoteArg(job.inputPath) << ' ';
+           << "-i " << quoteArg(currentVideoPath) << ' ';
+
+    if (currentVideoPath != job.inputPath) {
+        encCmd << "-i " << quoteArg(job.inputPath) << ' ';
+    }
 
     const std::string postChain = joinFilters(postFilters);
     encCmd << "-vf " << quoteArg(postChain) << ' ';
 
-    encCmd << "-r " << probe->fps << ' '
-           << "-map 0:v:0 -map 1:a? -c:v " << job.encode.codec << ' '
+    encCmd << "-r " << probe->fps << ' ';
+    
+    if (currentVideoPath != job.inputPath) {
+        encCmd << "-map 0:v:0 -map 1:a? ";
+    } else {
+        encCmd << "-map 0:v:0 -map 0:a? ";
+    }
+    
+    encCmd << "-c:v " << job.encode.codec << ' '
            << "-crf " << job.encode.crf << ' '
            << "-preset " << job.encode.preset << ' '
            << "-c:a copy -shortest "
            << quoteArg(job.outputPath);
 
     return runFfmpegWithProgress(encCmd.str(), "encode-video",
-                                  static_cast<std::int64_t>(finalFrameCount),
+                                  totalInputFrames,
                                   encodeCb, error);
 }
-
 }  // namespace
 
 bool FfmpegRunner::isAvailable(std::string& error) const {

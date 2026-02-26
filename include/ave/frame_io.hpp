@@ -5,38 +5,66 @@
 // Provides functions to load/save PNG frames as raw RGB24 data
 // and convert between RGB24 pixel buffers and fp32 NCHW tensors.
 //
-// PNG I/O uses FFmpeg CLI (always available at runtime) so no
-// additional image-loading library is required.
+// Also provides VulkanVideoReader and VulkanVideoWriter for direct
+// FFmpeg Vulkan hardware frame (AVVkFrame) extraction and encoding.
 // ─────────────────────────────────────────────────────────────────
 
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <memory>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vulkan.h>
+#include <libavutil/pixdesc.h>
+}
 
 namespace ave {
 namespace frame_io {
+
+// ── Vulkan Hardware Frame I/O ───────────────────────────────────
+
+class VulkanVideoReader {
+public:
+    VulkanVideoReader();
+    ~VulkanVideoReader();
+
+    bool open(const std::string& path, std::string& error);
+    bool readFrame(AVFrame*& outFrame, std::string& error);
+    void close();
+
+    int width() const;
+    int height() const;
+    AVRational frameRate() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+class VulkanVideoWriter {
+public:
+    VulkanVideoWriter();
+    ~VulkanVideoWriter();
+
+    bool open(const std::string& path, int width, int height, AVRational fps, std::string& error);
+    bool writeFrame(AVFrame* frame, std::string& error);
+    void close();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // ── PNG dimension probe ─────────────────────────────────────────
 // Reads width/height directly from the PNG IHDR chunk (no process
 // spawn).  Returns false if the file cannot be opened or the IHDR
 // is malformed.
 bool readPngDimensions(const std::string& path, int& width, int& height);
-
-// ── PNG → raw RGB24 ─────────────────────────────────────────────
-// Loads a PNG file to an interleaved RGB24 byte buffer using FFmpeg.
-// Sets width/height and fills data (size = width * height * 3).
-bool loadPngRgb24(const std::string& path,
-                  int& width, int& height,
-                  std::vector<std::uint8_t>& data,
-                  std::string& error);
-
-// ── raw RGB24 → PNG ─────────────────────────────────────────────
-// Saves an interleaved RGB24 byte buffer as a PNG file using FFmpeg.
-bool saveRgb24ToPng(const std::string& path,
-                    int width, int height,
-                    const std::uint8_t* data,
-                    std::string& error);
 
 // ── RGB24 → fp32 NCHW tensor ────────────────────────────────────
 // Converts interleaved RGB24 uint8 [H,W,3] to a contiguous fp32

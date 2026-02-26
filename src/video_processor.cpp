@@ -5,6 +5,7 @@
 #include <sstream>
 #include <variant>
 
+#include "ave/model_catalog.hpp"
 #include "ave/stage.hpp"
 #include "ave/types.hpp"
 
@@ -14,15 +15,34 @@ namespace ave {
 // If the stage carries a "model" parameter (a model catalog id),
 // look it up in ModelManager and inject the best on-disk path as
 // "model_path" so backends can load it directly.
+//
+// When no explicit "model" parameter is present, fall back to the
+// default model for the stage kind from the built-in catalog.  This
+// ensures AI inference is attempted for all backend-eligible stages,
+// not only those where the user manually specified a model.
 EnhancementStage VideoProcessor::resolveModelPath(const EnhancementStage& stage) const {
     EnhancementStage out = stage;
 
+    // Determine the model ID: explicit param → catalog default.
+    std::string modelId;
     auto it = stage.params.find("model");
-    if (it == stage.params.end()) return out;
-    if (!std::holds_alternative<std::string>(it->second)) return out;
-
-    const std::string modelId = std::get<std::string>(it->second);
+    if (it != stage.params.end() && std::holds_alternative<std::string>(it->second)) {
+        modelId = std::get<std::string>(it->second);
+    }
+    if (modelId.empty()) {
+        // Fall back to the default model for this stage kind.
+        const auto entries = catalogEntriesForStage(stage.kind);
+        for (const auto* e : entries) {
+            if (e->isDefault) { modelId = e->id; break; }
+        }
+        if (modelId.empty() && !entries.empty()) {
+            modelId = entries.front()->id;
+        }
+    }
     if (modelId.empty()) return out;
+
+    // Inject the model ID so downstream code can find it.
+    out.params["model"] = modelId;
 
     auto bestPath = modelManager_.bestPathForModel(modelId);
     if (bestPath) {
@@ -68,13 +88,11 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     std::filesystem::create_directories(outputDir, ec);
 
     // ── Identify which stages are backend-eligible ────────────────
-    // Upscale uses realesrgan-ncnn-vulkan (separate tool, not the
-    // backend interface).  Sharpen and Interpolate are FFmpeg-only.
-    // All other stages are candidates for AI backend inference.
+    // Interpolate and Sharpen are FFmpeg-only.
+    // All other stages (including Upscale) are candidates for AI backend inference.
     int backendEligibleCount = 0;
     for (const auto& s : ordered) {
         if (s.kind != StageKind::Interpolate &&
-            s.kind != StageKind::Upscale      &&
             s.kind != StageKind::Sharpen)
             ++backendEligibleCount;
     }
@@ -156,7 +174,6 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
 
     for (EnhancementStage& stage : resolvedOrdered) {
         if (stage.kind == StageKind::Interpolate ||
-            stage.kind == StageKind::Upscale      ||
             stage.kind == StageKind::Sharpen)       continue;
 
         const std::string stageName = toString(stage.kind);

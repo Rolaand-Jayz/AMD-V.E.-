@@ -327,6 +327,25 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
     if (precision == ModelPrecision::Fp16) { cmd << " --fp16"; }
     if (precision == ModelPrecision::Int8) { cmd << " --int8"; }
 
+    // For gold-standard interop, we do NOT want offload-copy.
+    // We want MiGraphX to expect GPU pointers so we can pass
+    // Vulkan-imported HIP pointers directly.
+    // cmd << " --enable-offload-copy";
+
+    // ── Symbolic dimension defaults ──────────────────────────────
+    // ONNX models typically declare spatial dimensions as symbolic
+    // (e.g. "batch_size", "width", "height", "h", "w").  MiGraphX
+    // defaults them to 1 which produces a compiled program that can
+    // only process 1×1 tiles.  We force sensible defaults here.
+    // Extra dim-params for names that don't exist in the graph are
+    // silently ignored by migraphx-driver.
+    constexpr int kDefaultTileSize = 256;
+    cmd << " --dim-param @batch_size 1"
+        << " --dim-param @width "  << kDefaultTileSize
+        << " --dim-param @height " << kDefaultTileSize
+        << " --dim-param @w "      << kDefaultTileSize
+        << " --dim-param @h "      << kDefaultTileSize;
+
     const std::string cmdStr = cmd.str();
 
     // Shared state between compile thread and heartbeat ticker.
@@ -401,6 +420,73 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
     }
 
     if (progressCb) { progressCb(modelId, 1.0f, "Compilation complete."); }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// torchExportToOnnx — convert a TorchScript .pt / .pth model to ONNX
+// using the ambient Python + torch environment (torch-MiGraphX stack).
+//
+// Writes a dynamic-axes ONNX (opset 17, NCHW 1×3×H×W) to onnxDest.
+// Tries torch.jit.load() first; falls back to torch.load() for plain
+// state-dict / nn.Module checkpoints.
+// ─────────────────────────────────────────────────────────────────
+bool torchExportToOnnx(const std::filesystem::path& pthPath,
+                       const std::filesystem::path& onnxDest,
+                       std::string& error) {
+    if (!commandInPath("python3")) {
+        error = "python3 not found in PATH; cannot convert PyTorch model. "
+                "Install Python + torch: pip install torch";
+        return false;
+    }
+
+    // Inline Python that handles both TorchScript and nn.Module checkpoints.
+    const std::string pyScript =
+        "import sys, torch\n"
+        "pth, out = sys.argv[1], sys.argv[2]\n"
+        "try:\n"
+        "    model = torch.jit.load(pth, map_location='cpu')\n"
+        "except Exception:\n"
+        "    ckpt = torch.load(pth, map_location='cpu', weights_only=False)\n"
+        "    model = ckpt['model'] if isinstance(ckpt, dict) and 'model' in ckpt else ckpt\n"
+        "if hasattr(model, 'eval'): model.eval()\n"
+        "dummy = torch.zeros(1, 3, 256, 256)\n"
+        "torch.onnx.export(\n"
+        "    model, dummy, out,\n"
+        "    input_names=['input'], output_names=['output'],\n"
+        "    dynamic_axes={'input':{0:'b',2:'h',3:'w'},'output':{0:'b',2:'h',3:'w'}},\n"
+        "    opset_version=17)\n"
+        "print('OK: exported to', out)\n";
+
+    const auto scriptPath = std::filesystem::temp_directory_path()
+                          / "ave_torch_export.py";
+    {
+        std::ofstream sf(scriptPath);
+        if (!sf) {
+            error = "Cannot write temp export script to " + scriptPath.string();
+            return false;
+        }
+        sf << pyScript;
+    }
+
+    std::ostringstream cmd;
+    cmd << "python3 " << scriptPath.string()
+        << " \"" << pthPath.string()  << "\""
+        << " \"" << onnxDest.string() << "\"";
+    const int rc = std::system(cmd.str().c_str());
+
+    std::error_code ec2;
+    std::filesystem::remove(scriptPath, ec2);
+
+    if (rc != 0) {
+        error = "torch.onnx.export() failed (exit " + std::to_string(rc)
+              + ").  Ensure torch is installed: pip install torch torch_migraphx";
+        return false;
+    }
+    if (!fileExists(onnxDest)) {
+        error = "Export ran but ONNX output not found: " + onnxDest.string();
+        return false;
+    }
     return true;
 }
 
@@ -501,7 +587,7 @@ struct ModelManager::Impl {
 // ─────────────────────────────────────────────────────────────────
 // ModelManager public interface
 // ─────────────────────────────────────────────────────────────────
-ModelManager::ModelManager() : impl_(std::make_unique<Impl>()) {
+ModelManager::ModelManager() : impl_(std::make_shared<Impl>()) {
     impl_->modelsDir = defaultModelsDir();
     ensureDir(impl_->downloadedDir());
     ensureDir(impl_->convertedDir());
@@ -631,7 +717,11 @@ bool ModelManager::startDownload(const std::string& modelId,
         cancelFlag = impl_->cancelFlags.at(modelId);
     }
 
-    std::thread([this, entry, dlDir, progressCb, stateCb, modelId, cancelFlag]() mutable {
+    // Capture impl_ as a shared_ptr so the background thread keeps
+    // the Impl alive even if ModelManager is destroyed before the
+    // download thread finishes.
+    std::shared_ptr<Impl> implPtr = impl_;
+    std::thread([implPtr, entry, dlDir, progressCb, stateCb, modelId, cancelFlag]() mutable {
         std::string err;
 
         const bool isZipArchive = !entry.archiveSubPath.empty();
@@ -665,10 +755,10 @@ bool ModelManager::startDownload(const std::string& modelId,
 
         ModelState finalState = ModelState::Error;
         {
-            std::lock_guard<std::mutex> lock(impl_->mtx);
-            auto& m = impl_->records[modelId];
+            std::lock_guard<std::mutex> lock(implPtr->mtx);
+            auto& m = implPtr->records[modelId];
             if (ok) {
-                impl_->scanAndUpdate(m);
+                implPtr->scanAndUpdate(m);
             } else {
                 m.state        = ModelState::Error;
                 m.errorMessage = err;
@@ -698,7 +788,8 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
                                       const ModelStateCb&    stateCb,
                                       std::string&           error,
                                       std::optional<ModelPrecision> precisionOverride) {
-    std::string onnxPath;
+    std::string modelPath;
+    ModelFormat sourceFormat = ModelFormat::Onnx;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
         auto it = impl_->records.find(modelId);
@@ -711,14 +802,41 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
             error = "Model not yet downloaded – cannot compile.";
             return false;
         }
-        if (m.entry.sourceFormat != ModelFormat::Onnx) {
-            error = "Only ONNX models can be compiled with MiGraphX.";
+        if (m.entry.sourceFormat != ModelFormat::Onnx &&
+            m.entry.sourceFormat != ModelFormat::Pytorch) {
+            error = "MiGraphX compilation requires ONNX or PyTorch (.pth/.pt) format.";
             return false;
         }
-        onnxPath = m.downloadedPath;
+        sourceFormat = m.entry.sourceFormat;
+        modelPath    = m.downloadedPath;
         impl_->records[modelId].state = ModelState::Converting;
     }
     if (stateCb) { stateCb(modelId, ModelState::Converting); }
+
+    // If the model is a PyTorch checkpoint, export it to a temporary ONNX via
+    // torch-MiGraphX (torch.onnx.export, opset 17) before calling migraphx-driver.
+    std::string onnxPath = modelPath;
+    std::filesystem::path tempOnnxPath;
+    if (sourceFormat == ModelFormat::Pytorch) {
+        if (progressCb) { progressCb(modelId, 0.02f, "Exporting PyTorch model to ONNX…"); }
+        tempOnnxPath = std::filesystem::temp_directory_path()
+                     / (modelId + "_torch_export.onnx");
+        std::string exportErr;
+        if (!torchExportToOnnx(modelPath, tempOnnxPath, exportErr)) {
+            error = "PyTorch → ONNX export failed: " + exportErr;
+            ModelState finalState = ModelState::Error;
+            {
+                std::lock_guard<std::mutex> lockErr(impl_->mtx);
+                auto& mErr        = impl_->records[modelId];
+                mErr.state        = ModelState::Error;
+                mErr.errorMessage = error;
+                finalState        = mErr.state;
+            }
+            if (stateCb) { stateCb(modelId, finalState); }
+            return false;
+        }
+        onnxPath = tempOnnxPath.string();
+    }
 
     // Precision: caller override → entry catalog value.
     // (Global setting applied by caller before passing precisionOverride.)
@@ -756,7 +874,8 @@ bool ModelManager::optimizeForHardware(const std::string& modelId,
                                         const ModelStateCb&    stateCb,
                                         std::string&           error,
                                         std::optional<ModelPrecision> precisionOverride) {
-    std::string onnxPath;
+    std::string modelPath;
+    ModelFormat sourceFormat = ModelFormat::Onnx;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
         auto it = impl_->records.find(modelId);
@@ -769,14 +888,40 @@ bool ModelManager::optimizeForHardware(const std::string& modelId,
             error = "Model not yet downloaded – cannot optimise.";
             return false;
         }
-        if (m.entry.sourceFormat != ModelFormat::Onnx) {
-            error = "Only ONNX models can be optimised with MiGraphX.";
+        if (m.entry.sourceFormat != ModelFormat::Onnx &&
+            m.entry.sourceFormat != ModelFormat::Pytorch) {
+            error = "MiGraphX optimisation requires ONNX or PyTorch (.pth/.pt) format.";
             return false;
         }
-        onnxPath = m.downloadedPath;
+        sourceFormat = m.entry.sourceFormat;
+        modelPath    = m.downloadedPath;
         impl_->records[modelId].state = ModelState::Optimizing;
     }
     if (stateCb) { stateCb(modelId, ModelState::Optimizing); }
+
+    // PyTorch → ONNX export step (mirrors convertToMiGraphX).
+    std::string onnxPath = modelPath;
+    std::filesystem::path tempOnnxPath;
+    if (sourceFormat == ModelFormat::Pytorch) {
+        if (progressCb) { progressCb(modelId, 0.02f, "Exporting PyTorch model to ONNX…"); }
+        tempOnnxPath = std::filesystem::temp_directory_path()
+                     / (modelId + "_torch_export.onnx");
+        std::string exportErr;
+        if (!torchExportToOnnx(modelPath, tempOnnxPath, exportErr)) {
+            error = "PyTorch → ONNX export failed: " + exportErr;
+            ModelState finalState = ModelState::Error;
+            {
+                std::lock_guard<std::mutex> lockErr(impl_->mtx);
+                auto& mErr        = impl_->records[modelId];
+                mErr.state        = ModelState::Error;
+                mErr.errorMessage = error;
+                finalState        = mErr.state;
+            }
+            if (stateCb) { stateCb(modelId, finalState); }
+            return false;
+        }
+        onnxPath = tempOnnxPath.string();
+    }
 
     ModelPrecision precision = ModelPrecision::Fp32;
     {

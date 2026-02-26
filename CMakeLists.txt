@@ -15,9 +15,16 @@ option(AVE_HAVE_CURL         "Enable libcurl for model downloads"    ON)
 option(AVE_HAVE_MIGRAPHX     "Enable MiGraphX ROCm runtime"          OFF)
 option(AVE_HAVE_HIP          "Enable HIP GPU headers (ROCm)"         OFF)
 option(AVE_HAVE_NCNN         "Enable NCNN Vulkan runtime"            OFF)
+option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # ROCTx: zero-overhead stage markers for rocprof --roctx-trace integration.
 # Requires roctracer-dev package: sudo apt install roctracer-dev
 option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
+
+# ─────────────────────────────────────────────────────────────────
+# FFmpeg (Required for Vulkan hardware frame extraction)
+# ─────────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libavfilter)
 
 # ─────────────────────────────────────────────────────────────────
 # Optional: libcurl
@@ -75,6 +82,17 @@ if(AVE_HAVE_NCNN)
 endif()
 
 # ─────────────────────────────────────────────────────────────────
+# Optional: Vulkan (for Interop)
+# ─────────────────────────────────────────────────────────────────
+if(AVE_HAVE_VULKAN)
+    find_package(Vulkan QUIET)
+    if(NOT Vulkan_FOUND)
+        message(WARNING "AVE_HAVE_VULKAN=ON but Vulkan not found; disabling.")
+        set(AVE_HAVE_VULKAN OFF)
+    endif()
+endif()
+
+# ─────────────────────────────────────────────────────────────────
 # Optional: ROCTx (part of roctracer; required for rocprof integration)
 # ─────────────────────────────────────────────────────────────────
 if(AVE_HAVE_ROCTX)
@@ -106,6 +124,9 @@ endif()
 if(AVE_HAVE_NCNN)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_NCNN)
 endif()
+if(AVE_HAVE_VULKAN)
+    list(APPEND AVE_COMPILE_DEFS AVE_HAVE_VULKAN)
+endif()
 if(AVE_HAVE_ROCTX)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_ROCTX)
 endif()
@@ -135,6 +156,7 @@ add_library(ave_core
     src/error_taxonomy.cpp
     src/ffmpeg_runner.cpp
     src/frame_io.cpp
+    src/frame_io_vulkan.cpp
     src/interop_bridge.cpp
     src/model_catalog.cpp
     src/model_manager.cpp
@@ -145,15 +167,17 @@ add_library(ave_core
     src/tensor_contract.cpp
     src/types.cpp
     src/video_processor.cpp
+    src/vulkan_runtime.cpp
     src/backends/migraphx_backend.cpp
     src/backends/ncnn_vulkan_backend.cpp
 )
 
-target_include_directories(ave_core PUBLIC include)
+target_include_directories(ave_core PUBLIC include ${FFMPEG_INCLUDE_DIRS})
 target_compile_definitions(ave_core PUBLIC ${AVE_COMPILE_DEFS})
 ave_add_warnings(ave_core)
 
 # Link optional libraries to ave_core
+target_link_libraries(ave_core PUBLIC ${FFMPEG_LIBRARIES})
 if(AVE_HAVE_CURL AND CURL_FOUND)
     target_link_libraries(ave_core PUBLIC CURL::libcurl)
 endif()
@@ -170,6 +194,9 @@ if(AVE_HAVE_HIP AND hip_FOUND)
 endif()
 if(AVE_HAVE_NCNN AND ncnn_FOUND)
     target_link_libraries(ave_core PUBLIC ncnn)
+endif()
+if(AVE_HAVE_VULKAN AND Vulkan_FOUND)
+    target_link_libraries(ave_core PUBLIC Vulkan::Vulkan)
 endif()
 if(AVE_HAVE_ROCTX)
     target_include_directories(ave_core PUBLIC ${ROCTX_INCLUDE_DIR})

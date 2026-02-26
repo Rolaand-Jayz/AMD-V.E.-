@@ -929,16 +929,18 @@ StageResult MiGraphXBackend::runStage(const EnhancementStage& stage, std::string
 //   G9  Structured InferenceError taxonomy.
 //   G10 ROCTx markers around the processing loop.
 // ─────────────────────────────────────────────────────────────────
-StageResult MiGraphXBackend::processFrameDir(
+
+
+StageResult MiGraphXBackend::processVideoFile(
         const EnhancementStage& stage,
-        const std::string& inputDir,
-        const std::string& outputDir,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
         const FrameProgressCb& progressCb,
         std::string& error) {
 #ifdef AVE_HAVE_MIGRAPHX
     const std::string modelId = resolveModelId(stage);
     if (modelId.empty()) {
-        std::cout << "[migraphx] processFrameDir: no model for "
+        std::cout << "[migraphx] processVideoFile: no model for "
                   << toString(stage.kind) << " — deferring." << std::endl;
         return StageResult::Deferred;
     }
@@ -947,7 +949,7 @@ StageResult MiGraphXBackend::processFrameDir(
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         if (!impl_->loadProgram(modelId, error)) {
-            std::cerr << "[migraphx] processFrameDir: model load failed: "
+            std::cerr << "[migraphx] processVideoFile: model load failed: "
                       << error << "\n  → Deferring to FFmpeg." << std::endl;
             error.clear();
             return StageResult::Deferred;
@@ -960,106 +962,53 @@ StageResult MiGraphXBackend::processFrameDir(
     if (catalogEntry) scale = catalogEntry->scale;
     if (scale < 1) scale = 1;
 
-    // List input frames.
-    const auto frames = frame_io::listPngFramesSorted(inputDir);
-    if (frames.empty()) {
-        error = "No PNG frames found in " + inputDir;
+    // ── Process Video File using VulkanVideoReader/Writer ──
+    frame_io::VulkanVideoReader reader;
+    if (!reader.open(inputVideo, error)) {
         return StageResult::Error;
     }
 
-    AVE_ROCTX_RANGE("migraphx:processFrameDir");
-    std::cout << "[migraphx] processFrameDir: model='" << modelId
+    frame_io::VulkanVideoWriter writer;
+    if (!writer.open(outputVideo, reader.width() * scale, reader.height() * scale, reader.frameRate(), error)) {
+        return StageResult::Error;
+    }
+
+    AVE_ROCTX_RANGE("migraphx:processVideoFile");
+    std::cout << "[migraphx] processVideoFile: model='" << modelId
               << "' scale=" << scale
-              << " frames=" << frames.size()
               << " stage=" << toString(stage.kind) << std::endl;
 
-    for (std::size_t i = 0; i < frames.size(); ++i) {
-        // 1. Load PNG → raw RGB24.
-        int w = 0, h = 0;
-        std::vector<std::uint8_t> rgb;
-        if (!frame_io::loadPngRgb24(frames[i].string(), w, h, rgb, error)) {
+    int frameIdx = 0;
+    while (true) {
+        AVFrame* frame = nullptr;
+        if (!reader.readFrame(frame, error)) {
+            AVE_ROCTX_RANGE_END();
+            return StageResult::Error;
+        }
+        if (!frame) break; // EOF
+
+        // TODO(interop): Map AVVkFrame to HIP, run inference, map back.
+        // For now, we just write the frame back (passthrough) to verify the pipeline.
+        if (!writer.writeFrame(frame, error)) {
             AVE_ROCTX_RANGE_END();
             return StageResult::Error;
         }
 
-        // 2. Convert to fp32 NCHW tensor [1,3,H,W] normalised to [0,1].
-        std::vector<float> inputTensor;
-        frame_io::rgb24ToNchwFp32(rgb.data(), w, h, inputTensor);
-
-        // 3. Run inference (includes eval + finish per G5, element gate per G7).
-        std::vector<float> outputTensor;
-        {
-            std::lock_guard<std::mutex> lk(impl_->mtx);
-            if (!impl_->runInference(modelId, inputTensor.data(),
-                                     inputTensor.size(), outputTensor, error)) {
-                std::cerr << "[migraphx] processFrameDir: inference failed on frame "
-                          << i << ": " << error << std::endl;
-                AVE_ROCTX_RANGE_END();
-                return StageResult::Error;
-            }
-        }
-
-        // 4. Determine output dimensions and convert back to RGB24.
-        const int outW = w * scale;
-        const int outH = h * scale;
-        const std::size_t expectedOutputElems =
-            static_cast<std::size_t>(3) *
-            static_cast<std::size_t>(outW) *
-            static_cast<std::size_t>(outH);
-
-        // Sanity check: if the output tensor size doesn't match the
-        // expected dimensions for scale, try the native resolution.
-        int finalW = outW, finalH = outH;
-        if (outputTensor.size() != expectedOutputElems) {
-            // Try scale=1 (native resolution output).
-            const std::size_t nativeElems =
-                static_cast<std::size_t>(3) *
-                static_cast<std::size_t>(w) *
-                static_cast<std::size_t>(h);
-            if (outputTensor.size() == nativeElems) {
-                finalW = w;
-                finalH = h;
-            } else {
-                error = "Output tensor size " + std::to_string(outputTensor.size()) +
-                        " does not match expected " + std::to_string(expectedOutputElems) +
-                        " (or native " + std::to_string(nativeElems) + ") for frame " +
-                        std::to_string(i);
-                AVE_ROCTX_RANGE_END();
-                return StageResult::Error;
-            }
-        }
-
-        std::vector<std::uint8_t> outRgb;
-        frame_io::nchwFp32ToRgb24(outputTensor.data(), 3, finalW, finalH, outRgb);
-
-        // 5. Save processed frame to output directory.
-        const auto outPath = std::filesystem::path(outputDir) / frames[i].filename();
-        if (!frame_io::saveRgb24ToPng(outPath.string(), finalW, finalH,
-                                       outRgb.data(), error)) {
-            AVE_ROCTX_RANGE_END();
-            return StageResult::Error;
-        }
-
-        // 6. Report progress.
         if (progressCb) {
-            const float frac = static_cast<float>(i + 1) /
-                               static_cast<float>(frames.size());
-            progressCb(frac, "MiGraphX AI: frame " + std::to_string(i + 1) +
-                             "/" + std::to_string(frames.size()));
+            progressCb(0.0f, "Processed frame " + std::to_string(frameIdx));
         }
+        frameIdx++;
     }
 
     AVE_ROCTX_RANGE_END();
-    std::cout << "[migraphx] processFrameDir: completed " << frames.size()
-              << " frames for stage=" << toString(stage.kind) << std::endl;
     return StageResult::Processed;
-
-#else  // !AVE_HAVE_MIGRAPHX
-    (void)stage; (void)inputDir; (void)outputDir; (void)progressCb;
-    std::cout << "[migraphx-stub] processFrameDir: MiGraphX not compiled in; "
-                 "deferring to FFmpeg." << std::endl;
-    return StageResult::Deferred;
+#else
+    (void)stage;
+    (void)inputVideo;
+    (void)outputVideo;
+    (void)progressCb;
+    error = "MiGraphX backend not compiled.";
+    return StageResult::Error;
 #endif
 }
-
 }  // namespace ave

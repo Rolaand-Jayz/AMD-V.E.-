@@ -255,127 +255,20 @@ StageResult NcnnVulkanBackend::runStage(const EnhancementStage& stage, std::stri
 // ─────────────────────────────────────────────────────────────────
 // processFrameDir — per-frame AI inference using NCNN Vulkan
 // ─────────────────────────────────────────────────────────────────
-StageResult NcnnVulkanBackend::processFrameDir(
+
+
+StageResult NcnnVulkanBackend::processVideoFile(
         const EnhancementStage& stage,
-        const std::string& inputDir,
-        const std::string& outputDir,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
         const FrameProgressCb& progressCb,
         std::string& error) {
-#ifdef AVE_HAVE_NCNN
-    const std::string modelId = resolveModelId(stage);
-    if (modelId.empty()) {
-        std::cout << "[ncnn] processFrameDir: no model for "
-                  << toString(stage.kind) << " — deferring." << std::endl;
-        return StageResult::Deferred;
-    }
-
-    // Ensure model is loaded.
-    {
-        std::lock_guard<std::mutex> lk(impl_->mtx);
-        if (!impl_->loadNet(modelId, error)) {
-            std::cerr << "[ncnn] processFrameDir: load failed: "
-                      << error << "\n  → Deferring to FFmpeg." << std::endl;
-            error.clear();
-            return StageResult::Deferred;
-        }
-    }
-
-    int scale = 1;
-    const auto* catalogEntry = catalogEntryById(modelId);
-    if (catalogEntry) scale = catalogEntry->scale;
-    if (scale < 1) scale = 1;
-
-    const auto frames = frame_io::listPngFramesSorted(inputDir);
-    if (frames.empty()) {
-        error = "No PNG frames found in " + inputDir;
-        return StageResult::Error;
-    }
-
-    std::cout << "[ncnn] processFrameDir: model='" << modelId
-              << "' scale=" << scale
-              << " frames=" << frames.size()
-              << " stage=" << toString(stage.kind) << std::endl;
-
-    auto& nn = *impl_->nets[modelId];
-
-    for (std::size_t i = 0; i < frames.size(); ++i) {
-        // 1. Load PNG → raw RGB24.
-        int w = 0, h = 0;
-        std::vector<std::uint8_t> rgb;
-        if (!frame_io::loadPngRgb24(frames[i].string(), w, h, rgb, error))
-            return StageResult::Error;
-
-        // 2. Create ncnn::Mat from raw pixels (stores as fp32 CHW internally).
-        //    from_pixels does uint8→fp32 conversion; values stay in [0,255].
-        ncnn::Mat in = ncnn::Mat::from_pixels(rgb.data(), ncnn::Mat::PIXEL_RGB, w, h);
-
-        // Normalise to [0,1] range (most ONNX-converted ESRGAN models expect this).
-        const float mean_vals[3] = {0.f, 0.f, 0.f};
-        const float norm_vals[3] = {1.f / 255.f, 1.f / 255.f, 1.f / 255.f};
-        in.substract_mean_normalize(mean_vals, norm_vals);
-
-        // 3. Run inference via NCNN Extractor.
-        ncnn::Extractor ex = nn.net.create_extractor();
-
-        // Use blob indices for robustness with varying model architectures.
-        const auto& inputIdxs  = nn.net.input_indexes();
-        const auto& outputIdxs = nn.net.output_indexes();
-
-        if (inputIdxs.empty() || outputIdxs.empty()) {
-            error = "NCNN model '" + modelId + "' has no input or output blobs.";
-            return StageResult::Error;
-        }
-
-        if (ex.input(inputIdxs[0], in) != 0) {
-            error = "NCNN Extractor input failed for frame " + std::to_string(i);
-            return StageResult::Error;
-        }
-
-        ncnn::Mat out;
-        if (ex.extract(outputIdxs[0], out) != 0) {
-            error = "NCNN Extractor extract failed for frame " + std::to_string(i);
-            return StageResult::Error;
-        }
-
-        // 4. Determine output dimensions.
-        const int outW = out.w;
-        const int outH = out.h;
-
-        // Denormalise from [0,1] back to [0,255] for to_pixels().
-        const float denorm_mean[3] = {0.f, 0.f, 0.f};
-        const float denorm_norm[3] = {255.f, 255.f, 255.f};
-        out.substract_mean_normalize(denorm_mean, denorm_norm);
-
-        // 5. Convert ncnn::Mat back to interleaved RGB24 uint8.
-        std::vector<std::uint8_t> outRgb(static_cast<std::size_t>(outW) *
-                                          static_cast<std::size_t>(outH) * 3u);
-        out.to_pixels(outRgb.data(), ncnn::Mat::PIXEL_RGB);
-
-        // 6. Save processed frame.
-        const auto outPath = std::filesystem::path(outputDir) / frames[i].filename();
-        if (!frame_io::saveRgb24ToPng(outPath.string(), outW, outH,
-                                       outRgb.data(), error))
-            return StageResult::Error;
-
-        // 7. Report progress.
-        if (progressCb) {
-            const float frac = static_cast<float>(i + 1) /
-                               static_cast<float>(frames.size());
-            progressCb(frac, "NCNN AI: frame " + std::to_string(i + 1) +
-                             "/" + std::to_string(frames.size()));
-        }
-    }
-
-    std::cout << "[ncnn] processFrameDir: completed " << frames.size()
-              << " frames for stage=" << toString(stage.kind) << std::endl;
-    return StageResult::Processed;
-
-#else  // !AVE_HAVE_NCNN
-    (void)stage; (void)inputDir; (void)outputDir; (void)progressCb;
-    std::cout << "[ncnn-stub] processFrameDir: NCNN not compiled in; "
-                 "deferring to FFmpeg." << std::endl;
-    return StageResult::Deferred;
-#endif
+    (void)stage;
+    (void)inputVideo;
+    (void)outputVideo;
+    (void)progressCb;
+    error = "NCNN backend processVideoFile not implemented.";
+    return StageResult::Error;
 }
 
 }  // namespace ave

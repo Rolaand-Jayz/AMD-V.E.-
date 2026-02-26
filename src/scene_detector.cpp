@@ -31,12 +31,15 @@ std::optional<std::string> runCapture(const std::string& cmd, int& exitCode) {
 }
 
 std::string quoteArg(const std::string& v) {
-    std::string out = "\"";
+    // POSIX single-quote quoting — safe against ALL shell metacharacters.
+    // Single quotes cannot appear inside single-quoted strings, so we use
+    // the end-quote / escaped-literal / reopen-quote idiom.
+    std::string out = "'";
     for (char ch : v) {
-        if (ch == '\\' || ch == '"') { out.push_back('\\'); }
-        out.push_back(ch);
+        if (ch == '\'') { out += "'\\''"; }
+        else { out.push_back(ch); }
     }
-    out.push_back('"');
+    out.push_back('\'');
     return out;
 }
 

@@ -605,9 +605,11 @@ void MainWindow::wireActions() {
                 const int to   = dst > src ? dst - 1 : dst;
                 if (from == to || from < 0 || to < 0 ||
                     from >= (int)stages_.size() || to >= (int)stages_.size()) return;
-                auto stage = stages_[from];
+                const auto ufrom = static_cast<std::size_t>(from);
+                const auto uto   = static_cast<std::size_t>(to);
+                auto stage = stages_[ufrom];
                 stages_.erase(stages_.begin() + from);
-                stages_.insert(stages_.begin() + to, stage);
+                stages_.insert(stages_.begin() + static_cast<std::ptrdiff_t>(uto), stage);
                 refreshPlannedStages();
                 refreshCommandPreview();
             });
@@ -760,10 +762,10 @@ ave::EnhancementStage MainWindow::buildStageFromEditor() const {
     const QString extra = extraParamsEdit_->text().trimmed();
     if (!extra.isEmpty()) {
         for (const QString& pair : extra.split(',', Qt::SkipEmptyParts)) {
-            int eq = pair.indexOf('=');
+            qsizetype eq = pair.indexOf('=');
             if (eq <= 0) continue;
-            const QString key = pair.left(eq).trimmed();
-            const QString val = pair.mid(eq+1).trimmed();
+            const QString key = pair.left(static_cast<int>(eq)).trimmed();
+            const QString val = pair.mid(static_cast<int>(eq) + 1).trimmed();
             if (!key.isEmpty()) stage.params[key.toStdString()] = parseParameterValue(val);
         }
     }
@@ -795,7 +797,7 @@ void MainWindow::moveSelectedStage(int delta) {
     if (row < 0 || row >= (int)stages_.size()) return;
     const int target = row + delta;
     if (target < 0 || target >= (int)stages_.size()) return;
-    std::swap(stages_[row], stages_[target]);
+    std::swap(stages_[static_cast<std::size_t>(row)], stages_[static_cast<std::size_t>(target)]);
     refreshRequestedStages();
     refreshPlannedStages();
     refreshCommandPreview();

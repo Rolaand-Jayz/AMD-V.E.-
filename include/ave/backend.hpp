@@ -57,12 +57,11 @@ class IAcceleratorBackend {
     //   Error     — a fatal error occurred (details in `error`).
     virtual StageResult runStage(const EnhancementStage& stage, std::string& error) = 0;
 
-    // Process a directory of PNG frames through the model for a
-    // given enhancement stage.
+    // Process a video file through the model for a given enhancement stage.
     //
-    //   inputDir  — directory of %08d.png frames (RGB24, sequential).
-    //   outputDir — destination for processed frames (same naming).
-    //   progressCb — optional per-frame progress callback.
+    //   inputVideo  — path to the input video file.
+    //   outputVideo — destination path for the processed video file.
+    //   progressCb  — optional per-frame progress callback.
     //
     // Returns:
     //   Processed — all frames were enhanced via AI inference.
@@ -70,10 +69,10 @@ class IAcceleratorBackend {
     //               model format mismatch, etc.); caller should fall
     //               back to FFmpeg filters for this stage.
     //   Error     — a fatal error occurred (details in `error`).
-    virtual StageResult processFrameDir(
+    virtual StageResult processVideoFile(
         const EnhancementStage& stage,
-        const std::string& inputDir,
-        const std::string& outputDir,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
         const FrameProgressCb& progressCb,
         std::string& error) = 0;
 };
