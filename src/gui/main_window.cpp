@@ -286,10 +286,83 @@ std::optional<ave::ParameterValue> parameterFromJson(const QJsonObject& o) {
 
 std::optional<ave::BackendType> backendFromString(const QString& s) {
     const QString n = s.trimmed().toLower();
-    if (n == "auto")    return ave::BackendType::Auto;
+    if (n == "auto") return ave::BackendType::Auto;
     if (n == "migraphx") return ave::BackendType::MiGraphX;
     if (n == "ncnn-vulkan" || n == "ncnn") return ave::BackendType::NcnnVulkan;
+    if (n == "vulkan-compute" || n == "vulkan_compute" || n == "vulkan") {
+        return ave::BackendType::VulkanCompute;
+    }
+    if (n == "vapoursynth" || n == "vapourynth" || n == "vs") {
+        return ave::BackendType::VapourSynth;
+    }
+    if (n == "glsl-shader" || n == "glsl_shader" || n == "glsl") {
+        return ave::BackendType::GlslShader;
+    }
     return std::nullopt;
+}
+
+QString backendDisplayName(ave::BackendType backend) {
+    switch (backend) {
+        case ave::BackendType::Auto:          return QStringLiteral("Auto");
+        case ave::BackendType::MiGraphX:      return QStringLiteral("MiGraphX");
+        case ave::BackendType::VulkanCompute: return QStringLiteral("Vulkan Compute");
+        case ave::BackendType::NcnnVulkan:    return QStringLiteral("NCNN Vulkan");
+        case ave::BackendType::VapourSynth:   return QStringLiteral("VapourSynth");
+        case ave::BackendType::GlslShader:    return QStringLiteral("GLSL Shader");
+    }
+    return QStringLiteral("Unknown");
+}
+
+QString filterRuntimeName(ave::FilterRuntime runtime) {
+    switch (runtime) {
+        case ave::FilterRuntime::Glsl:        return QStringLiteral("GLSL");
+        case ave::FilterRuntime::VapourSynth: return QStringLiteral("VapourSynth");
+    }
+    return QStringLiteral("Unknown");
+}
+
+bool backendCanApplyCatalogRuntime(ave::BackendType backend,
+                                   ave::FilterRuntime runtime) {
+    if (backend == ave::BackendType::GlslShader) {
+        return runtime == ave::FilterRuntime::Glsl;
+    }
+    if (backend == ave::BackendType::VapourSynth) {
+        return runtime == ave::FilterRuntime::VapourSynth;
+    }
+    return false;
+}
+
+QJsonObject activeFilterToJson(const ave::ActiveFilter& filter) {
+    QJsonObject obj;
+    obj.insert("id", QString::fromStdString(filter.id));
+    obj.insert("enabled", filter.enabled);
+
+    QJsonObject params;
+    for (const auto& [key, value] : filter.paramValues) {
+        params.insert(QString::fromStdString(key), value);
+    }
+    obj.insert("params", params);
+    return obj;
+}
+
+std::optional<ave::ActiveFilter> activeFilterFromJson(const QJsonObject& obj) {
+    const QString id = obj.value("id").toString().trimmed();
+    if (id.isEmpty()) {
+        return std::nullopt;
+    }
+
+    ave::ActiveFilter filter;
+    filter.id = id.toStdString();
+    filter.enabled = obj.value("enabled").toBool(true);
+
+    const QJsonObject params = obj.value("params").toObject();
+    for (auto it = params.begin(); it != params.end(); ++it) {
+        if (!it.value().isDouble()) {
+            continue;
+        }
+        filter.paramValues[it.key().toStdString()] = it.value().toDouble();
+    }
+    return filter;
 }
 
 QString quoteArg(const QString& s) {
@@ -861,7 +934,7 @@ void MainWindow::buildUi() {
     filtersTabLayout->setContentsMargins(0, 0, 0, 0);
     filtersTabLayout->setSpacing(8);
     auto* filtersHint = new QLabel(
-        "Enable catalog filters on the left. The applied list on the right shows what will be carried into the job.",
+        "Catalog GLSL and VapourSynth filters are separate from the main stage list. The execution plan on the right shows which of them will actually run with the current backend and pipeline.",
         filtersTab);
     filtersHint->setWordWrap(true);
     filtersHint->setStyleSheet("color: #666;");
@@ -877,14 +950,18 @@ void MainWindow::buildUi() {
     filterBrowser_ = new FilterBrowser(filterCatalogPane);
     filterCatalogLayout->addWidget(filterBrowser_, 1);
 
-    auto* activeFiltersGroup = new QGroupBox("Applied Filters", filtersSplit);
+    auto* activeFiltersGroup = new QGroupBox("Execution Plan", filtersSplit);
     auto* activeFiltersLayout = new QVBoxLayout(activeFiltersGroup);
     auto* activeFiltersHint = new QLabel(
-        "Selected filters are listed here so they are visible like the main enhancement stages.",
+        "Each entry is marked as ready to apply, blocked by the current backend, or waiting for a matching stage.",
         activeFiltersGroup);
     activeFiltersHint->setWordWrap(true);
     activeFiltersHint->setStyleSheet("color: #666;");
     activeFiltersLayout->addWidget(activeFiltersHint);
+    filterExecutionSummaryLabel_ = new QLabel(activeFiltersGroup);
+    filterExecutionSummaryLabel_->setWordWrap(true);
+    filterExecutionSummaryLabel_->setStyleSheet("color: #444;");
+    activeFiltersLayout->addWidget(filterExecutionSummaryLabel_);
     activeFiltersView_ = new QListWidget(activeFiltersGroup);
     activeFiltersView_->setAlternatingRowColors(true);
     activeFiltersView_->setSelectionMode(QAbstractItemView::NoSelection);
@@ -919,6 +996,10 @@ void MainWindow::buildUi() {
     commandRow->addWidget(commandPreviewEdit_, 1);
     commandRow->addWidget(copyBtn);
     reviewLayout->addLayout(commandRow);
+    commandFilterNoteLabel_ = new QLabel(reviewGroup);
+    commandFilterNoteLabel_->setWordWrap(true);
+    commandFilterNoteLabel_->setStyleSheet("color: #666;");
+    reviewLayout->addWidget(commandFilterNoteLabel_);
 
     auto* actionRow = new QHBoxLayout;
     runButton_ = new QPushButton("Run Job", reviewGroup);
@@ -1097,7 +1178,6 @@ void MainWindow::wireActions() {
         ref();
     });
     connect(filterBrowser_,  &FilterBrowser::filtersChanged, this, [this]() {
-        refreshActiveFilters();
         refreshCommandPreview();
     });
 
@@ -1434,7 +1514,7 @@ void MainWindow::refreshPlannedStages() {
 }
 
 void MainWindow::refreshActiveFilters() {
-    if (!activeFiltersView_ || !filterBrowser_) {
+    if (!activeFiltersView_ || !filterBrowser_ || !backendCombo_) {
         return;
     }
 
@@ -1445,13 +1525,156 @@ void MainWindow::refreshActiveFilters() {
         return;
     }
 
+    const auto backend =
+        static_cast<ave::BackendType>(backendCombo_->currentData().toInt());
+    std::unordered_set<ave::StageKind> activeStages;
+    for (const auto& stage : stages_) {
+        activeStages.insert(stage.kind);
+    }
+
     for (const auto& filter : filters) {
-        activeFiltersView_->addItem(
-            QString::fromStdString(ave::displayNameForFilter(filter)));
+        const ave::EmbeddedFilter* entry = ave::findFilter(filter.id);
+        auto* item = new QListWidgetItem(activeFiltersView_);
+        if (entry == nullptr) {
+            item->setText(QStringLiteral("Catalog entry missing · %1")
+                              .arg(QString::fromStdString(filter.id)));
+            item->setToolTip(QStringLiteral("This saved filter no longer exists in the embedded catalog."));
+            continue;
+        }
+
+        const bool backendCompatible = backendCanApplyCatalogRuntime(backend, entry->runtime);
+        const bool stagePresent = activeStages.find(entry->stageKind) != activeStages.end();
+
+        QString status;
+        QString reason;
+        if (backendCompatible && stagePresent) {
+            status = QStringLiteral("Will apply");
+            reason = QStringLiteral("%1 will run this %2 filter when the %3 stage executes.")
+                         .arg(backendDisplayName(backend),
+                              filterRuntimeName(entry->runtime),
+                              stageTitle(entry->stageKind));
+        } else if (!backendCompatible) {
+            status = QStringLiteral("Ignored by backend");
+            if (backend == ave::BackendType::Auto) {
+                reason = QStringLiteral("Auto only picks MiGraphX, Vulkan Compute, or NCNN Vulkan. It will not select GLSL Shader or VapourSynth for catalog filters.");
+            } else {
+                reason = QStringLiteral("%1 does not execute %2 catalog filters.")
+                             .arg(backendDisplayName(backend), filterRuntimeName(entry->runtime));
+            }
+        } else {
+            status = QStringLiteral("Waiting for stage");
+            reason = QStringLiteral("Add a %1 stage to the pipeline to run this filter.")
+                         .arg(stageTitle(entry->stageKind));
+        }
+
+        item->setText(QStringLiteral("%1 · [%2] %3 · %4")
+                          .arg(status,
+                               filterRuntimeName(entry->runtime),
+                               stageTitle(entry->stageKind),
+                               QString::fromStdString(ave::displayNameForFilter(filter))));
+        item->setToolTip(reason);
     }
 }
 
+void MainWindow::refreshFilterExecutionSummary() {
+    if (!filterExecutionSummaryLabel_ || !commandFilterNoteLabel_ ||
+        !filterBrowser_ || !backendCombo_) {
+        return;
+    }
+
+    const auto filters = filterBrowser_->activeFilters();
+    const auto backend =
+        static_cast<ave::BackendType>(backendCombo_->currentData().toInt());
+
+    if (filters.empty()) {
+        filterExecutionSummaryLabel_->setText(
+            QStringLiteral("No catalog GLSL/VapourSynth filters are enabled."));
+        commandFilterNoteLabel_->clear();
+        commandFilterNoteLabel_->setVisible(false);
+        return;
+    }
+
+    std::unordered_set<ave::StageKind> activeStages;
+    for (const auto& stage : stages_) {
+        activeStages.insert(stage.kind);
+    }
+
+    int readyCount = 0;
+    int backendBlockedCount = 0;
+    int stageBlockedCount = 0;
+    int missingCount = 0;
+    int glslCount = 0;
+    int vsCount = 0;
+    for (const auto& filter : filters) {
+        const ave::EmbeddedFilter* entry = ave::findFilter(filter.id);
+        if (entry == nullptr) {
+            ++missingCount;
+            continue;
+        }
+        if (entry->runtime == ave::FilterRuntime::Glsl) {
+            ++glslCount;
+        } else if (entry->runtime == ave::FilterRuntime::VapourSynth) {
+            ++vsCount;
+        }
+
+        if (!backendCanApplyCatalogRuntime(backend, entry->runtime)) {
+            ++backendBlockedCount;
+        } else if (activeStages.find(entry->stageKind) == activeStages.end()) {
+            ++stageBlockedCount;
+        } else {
+            ++readyCount;
+        }
+    }
+
+    QStringList stageNames;
+    for (const auto& stage : stages_) {
+        stageNames << stageTitle(stage.kind);
+    }
+    stageNames.removeDuplicates();
+
+    QStringList lines;
+    lines << QStringLiteral("Selected backend: %1. Active catalog filters: %2 GLSL, %3 VapourSynth.")
+                 .arg(backendDisplayName(backend))
+                 .arg(glslCount)
+                 .arg(vsCount);
+    lines << QStringLiteral("Pipeline stages: %1.")
+                 .arg(stageNames.isEmpty()
+                          ? QStringLiteral("none")
+                          : joinStageTitles(stageNames));
+    if (backend == ave::BackendType::Auto) {
+        lines << QStringLiteral("Auto will not choose GLSL Shader or VapourSynth. Select one of those explicitly if you want catalog filters to run.");
+    } else if (backend == ave::BackendType::GlslShader) {
+        lines << QStringLiteral("GLSL filters can run here. VapourSynth filters remain disabled.");
+    } else if (backend == ave::BackendType::VapourSynth) {
+        lines << QStringLiteral("VapourSynth filters can run here. GLSL filters remain disabled.");
+    } else {
+        lines << QStringLiteral("%1 does not consume catalog GLSL/VapourSynth filters.")
+                     .arg(backendDisplayName(backend));
+    }
+    lines << QStringLiteral("Ready now: %1. Blocked by backend: %2. Waiting for matching stage: %3.")
+                 .arg(readyCount)
+                 .arg(backendBlockedCount)
+                 .arg(stageBlockedCount);
+    if (missingCount > 0) {
+        lines << QStringLiteral("Missing catalog entries: %1.").arg(missingCount);
+    }
+    filterExecutionSummaryLabel_->setText(lines.join('\n'));
+
+    QString note = QStringLiteral(
+        "GUI note: catalog filters are stored in the GUI job and saved profiles, but they are not represented in the CLI preview string.");
+    if (backendBlockedCount == static_cast<int>(filters.size())) {
+        note += QStringLiteral(" With the current backend, none of them will run.");
+    } else if (readyCount == 0 && stageBlockedCount > 0) {
+        note += QStringLiteral(" Add the matching stage type to the pipeline to make them active.");
+    }
+    commandFilterNoteLabel_->setText(note);
+    commandFilterNoteLabel_->setVisible(true);
+}
+
 void MainWindow::refreshCommandPreview() {
+    refreshActiveFilters();
+    refreshFilterExecutionSummary();
+
     QStringList args;
     args << "./build/ave";
 
@@ -2304,7 +2527,7 @@ void MainWindow::saveProfile() {
     if (filePath.isEmpty()) return;
 
     QJsonObject root;
-    root.insert("schema_version", 2);
+    root.insert("schema_version", 3);
     root.insert("input",  inputPathEdit_->text().trimmed());
     root.insert("output", outputPathEdit_->text().trimmed());
     root.insert("backend", toQString(ave::toString(
@@ -2329,6 +2552,12 @@ void MainWindow::saveProfile() {
         stagesArr.append(so);
     }
     root.insert("stages", stagesArr);
+
+    QJsonArray filtersArr;
+    for (const auto& filter : filterBrowser_->activeFilters()) {
+        filtersArr.append(activeFilterToJson(filter));
+    }
+    root.insert("catalog_filters", filtersArr);
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -2391,6 +2620,18 @@ void MainWindow::loadProfile() {
         }
         stages_.push_back(stage);
     }
+
+    std::vector<ave::ActiveFilter> loadedFilters;
+    for (const auto& fv : root.value("catalog_filters").toArray()) {
+        if (!fv.isObject()) {
+            continue;
+        }
+        const auto filter = activeFilterFromJson(fv.toObject());
+        if (filter.has_value()) {
+            loadedFilters.push_back(*filter);
+        }
+    }
+    filterBrowser_->setActiveFilters(loadedFilters);
 
     refreshRequestedStages();
     refreshPlannedStages();

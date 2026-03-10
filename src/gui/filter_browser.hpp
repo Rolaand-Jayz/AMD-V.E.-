@@ -21,6 +21,7 @@ class QVBoxLayout;
 // ─────────────────────────────────────────────────────────────────
 struct FilterParamRow {
     std::string      key;
+    double           defaultValue = 0.0;
     QLabel*          label   = nullptr;
     QSlider*         slider  = nullptr;
     QDoubleSpinBox*  spin    = nullptr;
@@ -65,6 +66,12 @@ class FilterBrowser final : public QWidget {
     /// Set a filter's parameter value (programmatic).
     void setFilterParam(const std::string& id,
                         const std::string& key, double value);
+
+    /// Reset all filters to their default disabled state.
+    void clearAllFilters();
+
+    /// Replace the active filter set in one pass.
+    void setActiveFilters(const std::vector<ave::ActiveFilter>& filters);
 
     /// Get count of enabled filters.
     int enabledCount() const;

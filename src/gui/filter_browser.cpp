@@ -3,6 +3,8 @@
 // ─────────────────────────────────────────────────────────────────
 #include "filter_browser.hpp"
 
+#include <algorithm>
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -10,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QVBoxLayout>
 
@@ -54,6 +57,21 @@ QString runtimeBadge(ave::FilterRuntime rt) {
     return {};
 }
 
+QString stageBadge(ave::StageKind kind) {
+    switch (kind) {
+        case ave::StageKind::RestoreCompression: return QStringLiteral("Restore Compression");
+        case ave::StageKind::RemoveArtifacts:    return QStringLiteral("Remove Artifacts");
+        case ave::StageKind::Denoise:            return QStringLiteral("Denoise");
+        case ave::StageKind::Deblur:             return QStringLiteral("Deblur");
+        case ave::StageKind::Dehalo:             return QStringLiteral("Dehalo");
+        case ave::StageKind::ColorFix:           return QStringLiteral("Color Fix");
+        case ave::StageKind::Upscale:            return QStringLiteral("Upscale");
+        case ave::StageKind::Sharpen:            return QStringLiteral("Sharpen");
+        case ave::StageKind::Interpolate:        return QStringLiteral("Interpolate");
+    }
+    return QStringLiteral("Unknown");
+}
+
 }  // namespace
 
 // ═════════════════════════════════════════════════════════════════
@@ -81,7 +99,7 @@ void FilterBrowser::buildUi() {
     topLayout->addLayout(filterRow);
 
     auto* hintLabel = new QLabel(
-        QStringLiteral("Optional catalog filters for cleanup, color work, and utility passes."));
+        QStringLiteral("GUI catalog filters only execute through the GLSL Shader or VapourSynth backends, and only when a matching pipeline stage exists."));
     hintLabel->setWordWrap(true);
     hintLabel->setStyleSheet(QStringLiteral("color: palette(mid);"));
     topLayout->addWidget(hintLabel);
@@ -119,6 +137,10 @@ void FilterBrowser::buildUi() {
         catLabel->setStyleSheet(
             QStringLiteral("color: #888; font-size: 10px;"));
         headerRow->addWidget(catLabel);
+        auto* stageLabel = new QLabel(stageBadge(ef.stageKind));
+        stageLabel->setStyleSheet(
+            QStringLiteral("color: #888; font-size: 10px;"));
+        headerRow->addWidget(stageLabel);
         card->addLayout(headerRow);
 
         // ── Parameter controls ──────────────────────────────────
@@ -132,6 +154,7 @@ void FilterBrowser::buildUi() {
         for (const auto& pd : ef.params) {
             FilterParamRow pr;
             pr.key = pd.key;
+            pr.defaultValue = pd.defVal;
 
             auto* pRow = new QHBoxLayout;
             pr.label = new QLabel(QString::fromStdString(pd.label) +
@@ -268,6 +291,101 @@ void FilterBrowser::setFilterParam(const std::string& id,
             }
         }
     }
+}
+
+void FilterBrowser::clearAllFilters() {
+    for (auto& row : rows_) {
+        if (row.enableBox) {
+            const QSignalBlocker block(row.enableBox);
+            row.enableBox->setChecked(false);
+        }
+        if (row.paramGroup) {
+            row.paramGroup->setVisible(false);
+        }
+        for (auto& pr : row.paramRows) {
+            if (pr.spin) {
+                const QSignalBlocker block(pr.spin);
+                pr.spin->setValue(pr.defaultValue);
+            }
+            if (pr.slider) {
+                const auto* spin = pr.spin;
+                if (spin && spin->maximum() > spin->minimum()) {
+                    const double ratio = (pr.defaultValue - spin->minimum()) /
+                                         (spin->maximum() - spin->minimum());
+                    const int tick = static_cast<int>(ratio * 1000.0);
+                    const QSignalBlocker block(pr.slider);
+                    pr.slider->setValue(std::clamp(tick, 0, 1000));
+                }
+            }
+        }
+    }
+    emit filtersChanged();
+}
+
+void FilterBrowser::setActiveFilters(const std::vector<ave::ActiveFilter>& filters) {
+    for (auto& row : rows_) {
+        if (row.enableBox) {
+            const QSignalBlocker block(row.enableBox);
+            row.enableBox->setChecked(false);
+        }
+        if (row.paramGroup) {
+            row.paramGroup->setVisible(false);
+        }
+        for (auto& pr : row.paramRows) {
+            if (pr.spin) {
+                const QSignalBlocker block(pr.spin);
+                pr.spin->setValue(pr.defaultValue);
+            }
+            if (pr.slider) {
+                const auto* spin = pr.spin;
+                if (spin && spin->maximum() > spin->minimum()) {
+                    const double ratio = (pr.defaultValue - spin->minimum()) /
+                                         (spin->maximum() - spin->minimum());
+                    const int tick = static_cast<int>(ratio * 1000.0);
+                    const QSignalBlocker block(pr.slider);
+                    pr.slider->setValue(std::clamp(tick, 0, 1000));
+                }
+            }
+        }
+    }
+
+    for (const auto& filter : filters) {
+        for (auto& row : rows_) {
+            if (row.filterId != filter.id) {
+                continue;
+            }
+            if (row.enableBox) {
+                const QSignalBlocker block(row.enableBox);
+                row.enableBox->setChecked(filter.enabled);
+            }
+            if (row.paramGroup) {
+                row.paramGroup->setVisible(filter.enabled);
+            }
+            for (auto& pr : row.paramRows) {
+                auto it = filter.paramValues.find(pr.key);
+                if (it == filter.paramValues.end()) {
+                    continue;
+                }
+                if (pr.spin) {
+                    const QSignalBlocker block(pr.spin);
+                    pr.spin->setValue(it->second);
+                }
+                if (pr.slider) {
+                    const auto* spin = pr.spin;
+                    if (spin && spin->maximum() > spin->minimum()) {
+                        const double ratio = (it->second - spin->minimum()) /
+                                             (spin->maximum() - spin->minimum());
+                        const int tick = static_cast<int>(ratio * 1000.0);
+                        const QSignalBlocker block(pr.slider);
+                        pr.slider->setValue(std::clamp(tick, 0, 1000));
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    emit filtersChanged();
 }
 
 int FilterBrowser::enabledCount() const {

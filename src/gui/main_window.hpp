@@ -80,6 +80,7 @@ class MainWindow final : public QMainWindow {
     void refreshRequestedStages();
     void refreshPlannedStages();
     void refreshActiveFilters();
+    void refreshFilterExecutionSummary();
     void refreshCommandPreview();
 
     // ── Stage operations ─────────────────────────────────────────
@@ -185,6 +186,8 @@ class MainWindow final : public QMainWindow {
     QListWidget* requestedStagesView_ = nullptr;   // user-order, drag-reorder
     QListWidget* plannedStagesView_   = nullptr;   // planner order
     QListWidget* activeFiltersView_   = nullptr;   // enabled catalog filters
+    QLabel*      filterExecutionSummaryLabel_ = nullptr;
+    QLabel*      commandFilterNoteLabel_ = nullptr;
 
     // ── Progress ──────────────────────────────────────────────
     QProgressBar* progressBar_     = nullptr;  ///< Overall job progress (0–100)
