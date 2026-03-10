@@ -1,49 +1,32 @@
-# Architecture Overview
+# Parity Plan
 
-This document describes the key subsystems of the AMD Video Enhancer pipeline.
+This document tracks the next cleanup and implementation priorities for the repo.
 
-## 1. Enhancement stage model
+## Current baseline
 
-Each requested enhancement is represented as an `EnhancementStage` with a `StageKind` and a typed parameter map (`std::variant<bool, std::int64_t, double, std::string>`). The `Planner` applies deterministic ordering rules: restoration and cleanup stages run before upscale/sharpen, and interpolation is always last before encode.
+- CLI and GUI both build from the same `ave_core` library
+- MiGraphX is the primary AMD inference backend
+- Vulkan Compute and NCNN Vulkan are available as fallback GPU paths
+- FFmpeg remains the guaranteed fallback when AI backends are unavailable
+- Model download, compile, and cache flows exist in the app today
 
-## 2. Backend selection
+## Near-term priorities
 
-`BackendManager::createBackend()` probes available AMD GPU backends in priority order:
+1. Keep documentation aligned with the actual code and supported workflows
+2. Expand regression coverage beyond planner-only tests
+3. Improve MiGraphX compile-time behavior, cache reuse, and first-run UX
+4. Tighten backend-specific error reporting so failures stay actionable
+5. Reduce gaps between CLI, GUI, and backend capability reporting
 
-1. **MiGraphX (ROCm)** — probed via presence of `/opt/rocm`, `rocminfo`, and `libmigraphx.so` or `migraphx-driver`. Full ONNX load and GPU compile path implemented when compiled with `-DAVE_HAVE_MIGRAPHX=ON -DAVE_HAVE_HIP=ON`. Model path validation runs without the library present.
-2. **Vulkan Compute** — probed via `libvulkan.so` / `vulkaninfo`. GPU stage execution implemented when compiled with `-DAVE_HAVE_VULKAN=ON`.
-3. **NCNN Vulkan** — probed via `libvulkan.so` / `vulkaninfo`. Full model load path implemented when compiled with `-DAVE_HAVE_NCNN=ON`. GPU device selection via `ncnn::get_gpu_count()`.
-4. **FFmpeg filters** — always available; no GPU or model required.
+## MiGraphX-specific focus
 
-## 3. Model management
+- Preserve and reuse compiled `.mxr` artifacts aggressively
+- Prefer fixed-shape tiled compilation where it reduces compile churn
+- Improve compile fallback policy for hard-to-compile models
+- Expose more compile diagnostics without making the default UX noisy
 
-`ModelManager` (backed by the 26-entry `ModelCatalog`) handles:
+## Not planned
 
-- **Download** — HTTP(S) via libcurl with progress callbacks; cancellable.
-- **MiGraphX compilation** — `migraphx-driver compile --onnx <in> --output <out.mxr>` CLI invocation, including fp16 artifact generation.
-- **State tracking** — Per-model `ModelState` enum persisted via JSON sidecar files in `~/.local/share/ave/models/`.
-- **Backend-specific path resolution** — MiGraphX prefers compiled `.mxr` artifacts while other backends use the original downloaded model source.
-
-## 4. Video processing pipeline
-
-`VideoProcessor::process()` orchestrates:
-
-1. `ModelManager::refresh()` — scan model directories for state changes.
-2. `Planner::plan()` — deterministic stage ordering.
-3. Backend initialisation and per-stage `runStage()` calls (non-FFmpeg stages).
-4. Scene cut detection via `ffprobe` for interpolation stages with `scene_detect=true`.
-5. Model path injection into each stage's parameter map.
-6. `FfmpegRunner::encode()` — frame extraction, AI filter application, re-encode.
-
-## 5. FFmpeg integration
-
-`FfmpegRunner` constructs filter graphs from the resolved stage stack. Each `StageKind` maps to one or more FFmpeg filters with parameter-driven arguments. Interpolation stages consume scene cut counts to adapt `minterpolate` threshold.
-
-## 6. GUI architecture
-
-The Qt6 GUI (`ave_gui`) shares the same `ave_core` library as the CLI. Key components:
-
-- `MainWindow` — stage builder, planned-order preview, parameter sliders, drag-reorder `QListWidget`, `ToggleSwitch` widgets.
-- `ModelManagerDialog` — per-model download and MiGraphX compile with thread-safe Qt-queued callbacks.
-- `ToggleSwitch` — custom `QAbstractButton` with `QPropertyAnimation` replacing all `QCheckBox` usage.
-- Profile serialisation — JSON with `schema_version` field for forward compatibility.
+- CUDA / NVIDIA support
+- Windows or macOS ports
+- Reintroducing a Python-first runtime architecture

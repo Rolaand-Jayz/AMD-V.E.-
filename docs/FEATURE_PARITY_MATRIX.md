@@ -1,46 +1,57 @@
 # Feature Parity Matrix
 
-This matrix tracks the implementation status of the AMD C++ video enhancement pipeline.
+Current implementation status for the AMD C++ video enhancement pipeline.
 
 ## Legend
 
-- `Implemented`: Complete and tested.
-- `Removed`: Deliberately unsupported by design.
+- `Implemented`: available in the current tree
+- `Planned`: intended work, not finished
+- `Removed`: intentionally out of scope
 
-## Inference stages
+## Stages
 
-| Stage | Status | Notes |
+| Capability | Status | Notes |
 | --- | --- | --- |
-| Compression restore / DeH264 | Implemented | `restore_compression`; model-aware via ModelManager; FFmpeg filter fallback. |
-| Artifact cleanup / deblock | Implemented | `remove_artifacts`; model-aware; FFmpeg filter fallback. |
-| Denoise | Implemented | `denoise`; model-aware; FFmpeg `hqdn3d` fallback. |
-| Deblur | Implemented | `deblur`; model-aware; FFmpeg `unsharp` fallback. |
-| Dehalo | Implemented | `dehalo`; model-aware; FFmpeg filter fallback. |
-| Color fix | Implemented | `color_fix`; contrast, brightness, saturation, gamma, vibrance parameters. |
-| Upscale | Implemented | `upscale`; model-aware; FFmpeg `scale` fallback. |
-| Sharpen | Implemented | `sharpen`; model-aware; FFmpeg `unsharp` fallback. |
-| Frame interpolation | Implemented | `interpolate`; target FPS; scene-cut integration; FFmpeg `minterpolate` fallback. |
-| Scene-change detection | Implemented | `ffprobe`-based detection; scene cuts injected into interpolation pipeline. |
-| Multi-model enhancement stack | Implemented | Arbitrary stage stacking with deterministic planner ordering. |
+| Restore compression | Implemented | `restore_compression` stage with model-aware and FFmpeg fallback paths |
+| Remove artifacts | Implemented | `remove_artifacts` stage with model-aware and FFmpeg fallback paths |
+| Denoise | Implemented | `denoise` stage plus FFmpeg fallback |
+| Deblur | Implemented | `deblur` stage plus FFmpeg fallback |
+| Dehalo | Implemented | `dehalo` stage plus FFmpeg fallback |
+| Color fix | Implemented | `color_fix` stage with typed parameters |
+| Upscale | Implemented | model-aware stage with FFmpeg scale fallback |
+| Sharpen | Implemented | model-aware stage plus FFmpeg fallback |
+| Interpolate | Implemented | interpolation stage with scene-cut aware fallback behavior |
+| Deterministic stage ordering | Implemented | planner enforces cleanup before upscale and interpolation last |
 
-## Platform and backend
+## Runtime and model management
 
-| Category | Status | Notes |
+| Capability | Status | Notes |
 | --- | --- | --- |
-| MiGraphX / ROCm acceleration | Implemented | Full ONNX load, compile, and inference when `-DAVE_HAVE_MIGRAPHX=ON`; model path validation without library present. |
-| Vulkan Compute backend | Implemented | GPU stage execution via Vulkan compute shaders when `-DAVE_HAVE_VULKAN=ON`. |
-| NCNN Vulkan fallback | Implemented | Full model load path when `-DAVE_HAVE_NCNN=ON`; Vulkan GPU detection; FFmpeg fallback when library absent. |
-| CUDA / NVIDIA support | Removed | Deliberately unsupported by design. |
-| Python runtime backend | Removed | Deliberately unsupported by design. |
+| MiGraphX inference | Implemented | primary ROCm backend |
+| MiGraphX compile and cache | Implemented | `.mxr` compilation and reuse through ModelManager |
+| MiGraphX tiled execution | Implemented | fixed-tile runtime path for large-frame inference |
+| Vulkan Compute backend | Implemented | native GPU compute fallback path |
+| NCNN Vulkan backend | Implemented | alternate GPU inference path when supported |
+| FFmpeg fallback path | Implemented | always-available media path when AI backends are unavailable |
+| Model download management | Implemented | libcurl-backed downloads with local model storage |
+| PyTorch-to-ONNX export path | Implemented | conversion helper for supported checkpoints |
+| INT8 calibration workflow | Implemented | calibration-video-driven MiGraphX int8 path |
 
-## Pipeline requirements
+## Product surface
 
-| Requirement | Status | Notes |
+| Capability | Status | Notes |
 | --- | --- | --- |
-| Cleanup before upscale/sharpen | Implemented | Enforced by deterministic planner; covered by unit tests. |
-| Interpolation last before encode | Implemented | Enforced by deterministic planner; covered by unit tests. |
-| Stackable adjustable enhancements | Implemented | Per-stage typed parameters; sliders in GUI; `--stage key=value` in CLI. |
-| Model selection per stage | Implemented | 26 bundled model entries; per-stage dropdown in GUI; `model=<id>` param in CLI. |
-| Model download / MiGraphX compile / cache | Implemented | ModelManager with curl downloads, ONNX export for supported PyTorch models, and cached `.mxr` compilation through `migraphx-driver`. |
-| GUI with toggle controls | Implemented | Qt6 GUI, animated ToggleSwitch widget, per-stage sliders, drag-reorder pipeline. |
-| Profile save/load | Implemented | JSON profiles with schema versioning. |
+| CLI workflow | Implemented | `ave` target |
+| Qt GUI | Implemented | `ave_gui` target when Qt6 is available |
+| Settings persistence | Implemented | INI-backed app settings |
+| Profile save/load | Implemented | JSON profile support in the GUI |
+| Planner tests | Implemented | `planner_tests` target |
+| End-to-end backend regression tests | Planned | coverage still light outside planner tests |
+
+## Out of scope
+
+| Capability | Status | Notes |
+| --- | --- | --- |
+| CUDA / NVIDIA backend | Removed | not part of this project |
+| Python runtime backend | Removed | Python is only used for specific conversion helpers |
+| Windows support | Removed | Linux-only target |

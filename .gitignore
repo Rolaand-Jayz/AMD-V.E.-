@@ -1,3 +1,13 @@
 /build/
+/build_test/
 /.cache/
 .DS_Store
+/audit_chart.md
+/final_audit_chart.md
+/real_audit.md
+/files_list.txt
+/fix_doc.py
+/fix_script.py
+/full_audit.py
+/strict_audit.py
+/update_chart.py
