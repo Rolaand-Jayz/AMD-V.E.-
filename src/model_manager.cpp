@@ -49,6 +49,8 @@ namespace {
 constexpr int kDefaultBaselineCompileWidth = 192;
 constexpr int kDefaultBaselineCompileHeight = 192;
 constexpr int kDefaultMiopenCompileParallelCap = 8;
+constexpr int kMinimumMiGraphXTileFallbackExtent = 64;
+constexpr std::array<int, 4> kMiGraphXTileFallbackExtents = {192, 128, 96, 64};
 
 enum class MiGraphXCompileProfile {
     Fast,
@@ -346,6 +348,29 @@ std::string formatMiGraphXDriverEnv(const MiGraphXDriverEnv& env) {
         out << "\n" << name << "=" << value;
     }
     return out.str();
+}
+
+std::string formatCompileDimensions(int width, int height) {
+    return std::to_string(width) + "x" + std::to_string(height);
+}
+
+bool canUseMiGraphXTileFallbackLadder(int width, int height) {
+    return width == height && width > kMinimumMiGraphXTileFallbackExtent;
+}
+
+std::vector<int> buildMiGraphXTileFallbackExtents(int requestedExtent) {
+    std::vector<int> out;
+    out.push_back(requestedExtent);
+    for (const int candidate : kMiGraphXTileFallbackExtents) {
+        if (candidate >= requestedExtent || candidate < kMinimumMiGraphXTileFallbackExtent) {
+            continue;
+        }
+        if (candidate == out.back()) {
+            continue;
+        }
+        out.push_back(candidate);
+    }
+    return out;
 }
 
 #ifdef AVE_HAVE_MIGRAPHX
@@ -1733,6 +1758,8 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
     const int baselineWidth = baselineCompileWidth();
     const int baselineHeight = baselineCompileHeight();
     const auto mxrPath = compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision);
+    const bool allowTileFallback = canUseMiGraphXTileFallbackLadder(
+        baselineWidth, baselineHeight);
     bool ok = migraphxCompile(onnxPath, mxrPath,
                               baselineWidth, baselineHeight,
                               compilePrecision,
@@ -1760,6 +1787,33 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
         }
         if (ok) {
             error.clear();
+        }
+    }
+    if (!ok && isMiGraphXCompileTimeout(error) && allowTileFallback) {
+        const auto fallbackExtents = buildMiGraphXTileFallbackExtents(baselineWidth);
+        for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
+            const int fallbackExtent = fallbackExtents[i];
+            if (progressCb) {
+                progressCb(modelId, 0.02f,
+                    "Compilation timed out; retrying smaller fp32 tile at "
+                    + formatCompileDimensions(fallbackExtent, fallbackExtent) + "…");
+            }
+            std::string fallbackError;
+            ok = migraphxCompile(onnxPath, mxrPath,
+                                 fallbackExtent, fallbackExtent,
+                                 ModelPrecision::Fp32,
+                                 std::nullopt,
+                                 progressCb, modelId, fallbackError);
+            if (ok) {
+                error.clear();
+                break;
+            }
+            error += "\n\n"
+                  + formatCompileDimensions(fallbackExtent, fallbackExtent)
+                  + " fp32 fallback also failed:\n" + fallbackError;
+            if (!isMiGraphXCompileTimeout(fallbackError)) {
+                break;
+            }
         }
     }
 
@@ -1818,13 +1872,18 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         compileHeight = static_cast<int>(*inputHeight);
     }
 
+    const bool allowTileFallback = canUseMiGraphXTileFallbackLadder(
+        compileWidth, compileHeight);
+    auto artifactPathFor = [&](ModelPrecision precision,
+                               int width,
+                               int height) -> std::filesystem::path {
+        return compiledArtifactPath(impl_->convertedDir(), modelId, precision, width, height);
+    };
     auto customMxrPath = [&]() -> std::filesystem::path {
-        return compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision,
-                                    compileWidth, compileHeight);
+        return artifactPathFor(compilePrecision, compileWidth, compileHeight);
     };
     auto customMxrPathForPrecision = [&](ModelPrecision precision) -> std::filesystem::path {
-        return compiledArtifactPath(impl_->convertedDir(), modelId, precision,
-                                    compileWidth, compileHeight);
+        return artifactPathFor(precision, compileWidth, compileHeight);
     };
 
     if (useCustomDims) {
@@ -1841,6 +1900,21 @@ std::optional<std::string> ModelManager::autoCompileForInference(
                           << "' at " << compileWidth << "x" << compileHeight
                           << ": " << fp32Path << std::endl;
                 return fp32Path.string();
+            }
+        }
+        if (allowTileFallback) {
+            const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
+            for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
+                const int fallbackExtent = fallbackExtents[i];
+                const auto fallbackFp32Path =
+                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent);
+                if (fileExists(fallbackFp32Path)) {
+                    std::cout << "[auto-compile] Reusing smaller fp32 tile artifact for '"
+                              << modelId << "' at "
+                              << formatCompileDimensions(fallbackExtent, fallbackExtent)
+                              << ": " << fallbackFp32Path << std::endl;
+                    return fallbackFp32Path.string();
+                }
             }
         }
     } else {
@@ -1934,10 +2008,12 @@ std::optional<std::string> ModelManager::autoCompileForInference(
             std::cout << "[auto-compile] Successfully compiled to: " << mxrPath << std::endl;
             return mxrPath.string();
         }
+        bool exactFp32Attempted = false;
         if (shouldRetryFp32AfterTimeout(compilePrecision, error)) {
             const auto fp32Path = customMxrPathForPrecision(ModelPrecision::Fp32);
             std::cout << "[auto-compile] fp16 compilation timed out; retrying fp32 at "
                       << compileWidth << "x" << compileHeight << "..." << std::endl;
+            exactFp32Attempted = true;
             if (fileExists(fp32Path)) {
                 std::cout << "[auto-compile] Reusing fp32 artifact: " << fp32Path << std::endl;
                 error.clear();
@@ -1953,6 +2029,44 @@ std::optional<std::string> ModelManager::autoCompileForInference(
                 return fp32Path.string();
             }
             error += "\n\nfp32 fallback also failed:\n" + fp32Error;
+        }
+        const bool shouldTrySmallerTiles =
+            allowTileFallback &&
+            ((compilePrecision == ModelPrecision::Fp32 && isMiGraphXCompileTimeout(error)) ||
+             (exactFp32Attempted && isMiGraphXCompileTimeout(error)));
+        if (shouldTrySmallerTiles) {
+            const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
+            for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
+                const int fallbackExtent = fallbackExtents[i];
+                const auto fallbackFp32Path =
+                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent);
+                std::cout << "[auto-compile] compile timed out; retrying smaller fp32 tile at "
+                          << formatCompileDimensions(fallbackExtent, fallbackExtent)
+                          << "..." << std::endl;
+                if (fileExists(fallbackFp32Path)) {
+                    std::cout << "[auto-compile] Reusing smaller fp32 artifact: "
+                              << fallbackFp32Path << std::endl;
+                    error.clear();
+                    return fallbackFp32Path.string();
+                }
+                std::string fallbackError;
+                if (migraphxCompile(onnxPath, fallbackFp32Path,
+                                    fallbackExtent, fallbackExtent,
+                                    ModelPrecision::Fp32,
+                                    calibrationVideoPath,
+                                    progressCb, modelId, fallbackError)) {
+                    std::cout << "[auto-compile] Successfully compiled to: "
+                              << fallbackFp32Path << std::endl;
+                    error.clear();
+                    return fallbackFp32Path.string();
+                }
+                error += "\n\n"
+                      + formatCompileDimensions(fallbackExtent, fallbackExtent)
+                      + " fp32 fallback also failed:\n" + fallbackError;
+                if (!isMiGraphXCompileTimeout(fallbackError)) {
+                    break;
+                }
+            }
         }
         return std::nullopt;
     }

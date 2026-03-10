@@ -76,6 +76,7 @@ Models are stored under `~/.local/share/ave/models/`:
 - `migraphx/`: cached MiGraphX artifacts
 
 For MiGraphX, first use may trigger a compile step. Those compiled artifacts are reused on later runs.
+For tiled MiGraphX inference, the app compiles the requested tile size first and, on timeout, automatically retries smaller square fp32 artifacts at `128x128`, `96x96`, and `64x64`.
 
 ## Notes
 
