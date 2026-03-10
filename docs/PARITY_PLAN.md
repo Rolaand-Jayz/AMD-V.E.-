@@ -11,18 +11,18 @@ Each requested enhancement is represented as an `EnhancementStage` with a `Stage
 `BackendManager::createBackend()` probes available AMD GPU backends in priority order:
 
 1. **MiGraphX (ROCm)** — probed via presence of `/opt/rocm`, `rocminfo`, and `libmigraphx.so` or `migraphx-driver`. Full ONNX load and GPU compile path implemented when compiled with `-DAVE_HAVE_MIGRAPHX=ON -DAVE_HAVE_HIP=ON`. Model path validation runs without the library present.
-2. **NCNN Vulkan** — probed via `libvulkan.so` / `vulkaninfo`. Full model load path implemented when compiled with `-DAVE_HAVE_NCNN=ON`. GPU device selection via `ncnn::get_gpu_count()`.
-3. **FFmpeg filters** — always available; no GPU or model required.
+2. **Vulkan Compute** — probed via `libvulkan.so` / `vulkaninfo`. GPU stage execution implemented when compiled with `-DAVE_HAVE_VULKAN=ON`.
+3. **NCNN Vulkan** — probed via `libvulkan.so` / `vulkaninfo`. Full model load path implemented when compiled with `-DAVE_HAVE_NCNN=ON`. GPU device selection via `ncnn::get_gpu_count()`.
+4. **FFmpeg filters** — always available; no GPU or model required.
 
 ## 3. Model management
 
 `ModelManager` (backed by the 26-entry `ModelCatalog`) handles:
 
 - **Download** — HTTP(S) via libcurl with progress callbacks; cancellable.
-- **Conversion** — `migraphx-driver compile --onnx <in> --output <out.mxr>` CLI invocation.
-- **Optimisation** — Hardware-specific compile with `migraphx-driver` tuning flags.
+- **MiGraphX compilation** — `migraphx-driver compile --onnx <in> --output <out.mxr>` CLI invocation, including fp16 artifact generation.
 - **State tracking** — Per-model `ModelState` enum persisted via JSON sidecar files in `~/.local/share/ave/models/`.
-- **Best-path resolution** — Returns the most refined available file (optimised > converted > downloaded) for a given model ID.
+- **Backend-specific path resolution** — MiGraphX prefers compiled `.mxr` artifacts while other backends use the original downloaded model source.
 
 ## 4. Video processing pipeline
 
@@ -44,6 +44,6 @@ Each requested enhancement is represented as an `EnhancementStage` with a `Stage
 The Qt6 GUI (`ave_gui`) shares the same `ave_core` library as the CLI. Key components:
 
 - `MainWindow` — stage builder, planned-order preview, parameter sliders, drag-reorder `QListWidget`, `ToggleSwitch` widgets.
-- `ModelManagerDialog` — per-model download/convert/optimise with thread-safe Qt-queued callbacks.
+- `ModelManagerDialog` — per-model download and MiGraphX compile with thread-safe Qt-queued callbacks.
 - `ToggleSwitch` — custom `QAbstractButton` with `QPropertyAnimation` replacing all `QCheckBox` usage.
 - Profile serialisation — JSON with `schema_version` field for forward compatibility.

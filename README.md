@@ -1,12 +1,49 @@
 # AMD Video Enhancer
 
-AMD-exclusive C++ video enhancement pipeline. No Python, no CUDA, no NVIDIA.
+AMD-focused C++ video enhancement for Linux. The point of this project is to run restoration, upscale, and interpolation workloads on AMD hardware without CUDA and without a Python-heavy runtime in the main app.
 
-- **Preferred backend**: MiGraphX (ROCm) — full ONNX load, compile, and GPU inference
-- **Fallback backend**: NCNN Vulkan — Vulkan-accelerated model inference
-- **Always available**: FFmpeg filter chain — no model required
+MiGraphX is the primary inference path. Vulkan Compute is the second-choice GPU path. NCNN Vulkan is a fallback for models that fit that runtime. FFmpeg filters remain the last-resort path so the app can still process video when AI backends are unavailable.
 
-## Enhancement stages
+## Who This Is For
+
+This app is for:
+
+- Linux users with a modern AMD discrete GPU
+- users willing to install and debug ROCm, Vulkan, FFmpeg, and model files
+- users who care more about AMD-native performance and control than one-click convenience
+
+This app is not for:
+
+- NVIDIA or CUDA systems
+- Windows or macOS users
+- users expecting instant first-run behavior with zero model compilation
+- unsupported Linux distributions where ROCm packaging is unpredictable
+
+## Target Hardware and OS
+
+The intended target is an AMD Radeon or Radeon Pro system on a ROCm-supported Linux distribution.
+
+As of March 6, 2026, AMD's ROCm system requirements list Radeon RX 7900 GRE support only on `Ubuntu 24.04.3`, `Ubuntu 22.04.5`, `RHEL 10.1`, and `RHEL 9.7`. ROCm also publishes the full supported OS matrix separately. If you are on Arch, CachyOS, Fedora, or another unsupported distro, treat the setup as best-effort and expect backend issues to be part of the environment, not just the app.
+
+Official references:
+
+- ROCm system requirements: <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html>
+- ROCm compatibility matrix: <https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html>
+- MiGraphX driver reference: <https://rocm.docs.amd.com/projects/AMDMIGraphX/en/latest/migraphx-driver.html>
+
+## What The App Does
+
+The pipeline combines enhancement stages into a deterministic order:
+
+1. restoration and cleanup
+2. color correction
+3. upscale
+4. sharpen
+5. interpolation
+
+User-specified order is not trusted. The planner reorders stages so cleanup happens before upscale and interpolation always runs last.
+
+Available stages:
 
 | Stage | Aliases |
 | --- | --- |
@@ -20,113 +57,159 @@ AMD-exclusive C++ video enhancement pipeline. No Python, no CUDA, no NVIDIA.
 | `sharpen` | — |
 | `interpolate` | — |
 
-Stages are ordered deterministically: restoration and cleanup before upscale/sharpen; interpolation always last before encode.
+## Backend Roles
+
+- `MiGraphX (ROCm)`: loads or compiles `.mxr` artifacts and runs inference on AMD GPUs. This is the main backend the project is built around.
+- `Vulkan Compute`: runs compute-shader-based GPU stages when MiGraphX is unavailable or not appropriate.
+- `NCNN Vulkan`: fallback GPU inference path for models that exist in NCNN form.
+- `FFmpeg`: software and filter fallback. Always available if `ffmpeg` and `ffprobe` are installed.
+
+When `--backend auto` is used, the current priority order is:
+
+1. `MiGraphX`
+2. `Vulkan Compute`
+3. `NCNN Vulkan`
+4. `FFmpeg` fallback inside the pipeline
+
+Explicit backend requests fail honestly if that backend is unavailable. They do not silently switch to another AI backend.
+
+## Model Formats and Storage
+
+The app supports three user-visible model forms:
+
+- downloaded source models: `ONNX`
+- downloaded source models: `PyTorch` (`.pth` / `.pt`) when export to ONNX is possible
+- compiled MiGraphX artifacts: `.mxr`
+
+PyTorch support is a conversion path, not a native runtime path. Exporting a `.pth` or `.pt` model to ONNX still requires an ambient `python3` + `torch` environment at conversion time.
+
+The project does not expose a general-purpose "hardware optimization" step anymore. The supported backend-specific preparation step is MiGraphX compilation to `.mxr`.
+
+Models live under `~/.local/share/ave/models/`:
+
+| Directory | Contents |
+| --- | --- |
+| `downloaded/` | Original downloaded ONNX, PyTorch, NCNN, or prebuilt `.mxr` files |
+| `migraphx/` | Cached MiGraphX compiled artifacts |
+
+Models are sourced from the curated AMD-focused collection:
+<https://github.com/Rolaand-Jayz/awesome-AI-video-enhancing-models-AMD>
+
+## MiGraphX Compilation Behavior
+
+MiGraphX compilation is intentionally real, not fake progress wrapped around a stub.
+
+- First use can take a long time. Small models may compile in seconds; larger frame-size-specific artifacts can take minutes.
+- MiGraphX progress is phase-based. On heavier models you may see the same status text repeat for a long time while one compiler phase runs.
+- The app now compiles MiGraphX artifacts for the real input frame size instead of blindly compiling a generic 4K artifact.
+- MiGraphX artifacts are cached as `.mxr` files and reused on later runs.
+- The default MiGraphX compile precision in this app is `fp16`.
+- The downloaded source model is kept intact. The app generates a compiled `.mxr` next to it in the cache.
+
+MiGraphX driver features the app relies on:
+
+- `--fp16`: quantizes for fp16
+- `--enable-offload-copy`: enables implicit offload copying
+
+Those options are documented by AMD here:
+<https://rocm.docs.amd.com/projects/AMDMIGraphX/en/latest/migraphx-driver.html>
 
 ## Build
 
-### Dependencies
+Always build with every supported backend enabled. Do not do a bare CMake configure without backend flags.
 
-- CMake 3.21+, C++20 compiler (GCC 12+ / Clang 16+)
-- Qt 6.2+ (Widgets)
-- FFmpeg CLI tools (`ffmpeg` and `ffprobe` in PATH)
-- *(optional)* libcurl — model downloads (`-DAVE_HAVE_CURL=ON`, default ON)
-- *(optional)* ROCm / MiGraphX — GPU acceleration (`-DAVE_HAVE_MIGRAPHX=ON -DAVE_HAVE_HIP=ON`)
-- *(optional)* NCNN — Vulkan fallback (`-DAVE_HAVE_NCNN=ON`)
+Requirements:
 
-### Standard build (FFmpeg-only)
+- CMake 3.21+
+- C++20 compiler such as GCC 12+ or Clang 16+
+- FFmpeg CLI tools in `PATH`
+- Qt 6.2+ with Widgets for the GUI
+- ROCm + MiGraphX for the primary backend
+- Vulkan loader and development packages
+- NCNN if you want the NCNN Vulkan fallback
+- libcurl for model downloads
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
-### Full ROCm build
+Standard build for this repo:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DAVE_HAVE_CURL=ON \
   -DAVE_HAVE_MIGRAPHX=ON \
-  -DAVE_HAVE_HIP=ON
+  -DAVE_HAVE_HIP=ON \
+  -DAVE_HAVE_VULKAN=ON \
+  -DAVE_HAVE_NCNN=ON
 cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-## Usage
+## CLI Usage
 
-### CLI
-
-```bash
-./build/ave \
-  --input input.mp4 \
-  --output output.mp4 \
-  --backend auto \
-  --stage restore_compression:strength=0.9 \
-  --stage remove_artifacts:strength=0.8 \
-  --stage upscale:width=3840,height=2160 \
-  --stage sharpen:amount=0.5 \
-  --stage interpolate:fps=60
-```
-
-Dry-run (plan only, no processing):
-
-```bash
-./build/ave --input input.mp4 --output output.mp4 \
-  --stage sharpen --stage restore_compression --stage interpolate --dry-run
-```
-
-Backend discovery:
+List detected backends:
 
 ```bash
 ./build/ave --list-backends
 ```
 
-### GUI
+Plan a job without running it:
+
+```bash
+./build/ave \
+  --input input.mp4 \
+  --output output.mp4 \
+  --stage restore_compression \
+  --stage upscale:model=clearreality-x4-fast \
+  --stage interpolate:fps=60 \
+  --dry-run
+```
+
+Run a MiGraphX upscale:
+
+```bash
+./build/ave \
+  --input input.mp4 \
+  --output output.mp4 \
+  --backend migraphx \
+  --stage upscale:model=clearreality-x4-fast
+```
+
+Run a Vulkan Compute stage:
+
+```bash
+./build/ave \
+  --input input.mp4 \
+  --output output.mp4 \
+  --backend vulkan \
+  --stage denoise:strength=0.6
+```
+
+Launch the GUI:
 
 ```bash
 ./build/ave_gui
 ```
 
+## GUI Overview
+
 The GUI provides:
 
-- Stage stack builder with drag-and-drop reordering
-- Per-stage parameter sliders (strength, color correction, resolution, sharpness, FPS)
-- Per-stage model selection from downloaded, converted, or hardware-optimised models
-- Model Manager — download, MiGraphX conversion, and hardware optimisation for all 26 bundled models
-- Profile save/load as JSON
-- Quick templates (Web Cleanup 1080p60, Anime Upscale 4K60, Archive Restore 1440p)
-- Planned execution order preview
-- One-click CLI command copy
+- stage builder with per-stage parameter controls
+- backend-aware model selection
+- compile-on-demand action when a MiGraphX-compatible model still needs a `.mxr`
+- model manager for downloads and MiGraphX compilation
+- preview runs
+- profile save/load
+- command preview for the equivalent CLI invocation
 
-## Model storage
+## Operational Notes
 
-Models are sourced from [awesome-AI-video-enhancing-models-AMD](https://github.com/Rolaand-Jayz/awesome-AI-video-enhancing-models-AMD) and stored in `~/.local/share/ave/models/`:
+- `ffmpeg` and `ffprobe` are required at runtime for every path.
+- Mixed iGPU + dGPU systems can confuse ROCm. Set `HIP_VISIBLE_DEVICES` if MiGraphX picks the wrong GPU.
+- The first MiGraphX run is dominated by compile time. Long jobs benefit far more than short previews.
+- Current MiGraphX throughput is still constrained by host-staged frame I/O; compile-time improvements and fp16 help, but zero-copy GPU-native frame flow is the next major performance step.
 
-| Directory | Contents |
-| --- | --- |
-| `downloaded/` | Downloaded PyTorch (.pth), ONNX, and NCNN model files |
-| `migraphx/` | MiGraphX `.mxr` compiled programs |
-| `optimised/` | Hardware-optimised compiled programs |
+## Troubleshooting
 
-### Model Sources
-
-All models are available from the curated collection at:
-**https://github.com/Rolaand-Jayz/awesome-AI-video-enhancing-models-AMD**
-
-This repository includes:
-- **FBCNN** - JPEG artifact removal
-- **SCUNet** - Blind denoising
-- **DnCNN** - Gaussian denoising
-- **NAFNet** - Deblurring/denoising (3 variants)
-- **Restormer** - Multi-task restoration
-- **SwinIR** - Super-resolution (2 variants)
-- **Real-ESRGAN** - Upscaling (3 variants)
-- **DAT** - Dual Aggregation Transformer SR
-- **RIFE** - Frame interpolation (v4.6, v4.14, v4.25)
-
-## Backend selection
-
-When `--backend auto` is used (the default), backends are probed in priority order:
-
-1. **MiGraphX (ROCm)** — requires ROCm stack (`/opt/rocm`, `rocminfo`) and `libmigraphx.so` or `migraphx-driver`
-2. **NCNN (Vulkan)** — requires Vulkan runtime (`libvulkan.so` or `vulkaninfo`)
-3. **FFmpeg filters** — always available; uses classic filter chains without model inference
+- If MiGraphX is available but model load fails, check whether the selected model actually has a compiled `.mxr` for the real input frame size.
+- If an explicit backend is requested and unavailable, the app now reports that honestly instead of silently switching backends.
+- If ROCm is installed on an unsupported distro, reproduce on a supported Ubuntu or RHEL build before assuming the app is the only problem.
+- If long runs fail during encoding, inspect the reported FFmpeg stderr. Early pipe-close errors usually mean the encoder exited first.

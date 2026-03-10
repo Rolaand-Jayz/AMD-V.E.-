@@ -84,6 +84,15 @@ std::optional<BackendType> parseBackend(const std::string& value) {
     if (normalized == "ncnn-vulkan" || normalized == "ncnn_vulkan" || normalized == "ncnn") {
         return BackendType::NcnnVulkan;
     }
+    if (normalized == "vulkan" || normalized == "vulkan-compute" || normalized == "vulkan_compute") {
+        return BackendType::VulkanCompute;
+    }
+    if (normalized == "vapoursynth" || normalized == "vapourynth" || normalized == "vs") {
+        return BackendType::VapourSynth;
+    }
+    if (normalized == "glsl" || normalized == "glsl-shader" || normalized == "glsl_shader") {
+        return BackendType::GlslShader;
+    }
     return std::nullopt;
 }
 
@@ -147,11 +156,14 @@ void printUsage(const std::string& executableName) {
     std::cout << "Usage: " << executableName << " --input <in.mp4> --output <out.mp4> [options]\n"
               << "\n"
               << "Options:\n"
-              << "  --backend <auto|migraphx|ncnn-vulkan>\n"
+              << "  --backend <auto|migraphx|ncnn-vulkan|vulkan>\n"
               << "  --stage <name[:key=value,key=value]>      (repeatable, stackable)\n"
               << "  --codec <ffmpeg video codec>               default: libx264\n"
+              << "  --profile <codec profile>                  default: (auto)\n"
               << "  --crf <int>                                default: 18\n"
               << "  --preset <ffmpeg preset>                   default: medium\n"
+              << "  --preview                                  process only a short clip for preview\n"
+              << "  --preview-duration <seconds>               preview clip length (default: 10)\n"
               << "  --dry-run                                  print ordered plan only\n"
               << "  --list-backends                            probe AMD backends\n"
               << "  --help\n"
@@ -262,6 +274,15 @@ CliResult parseCli(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--profile") {
+            std::string value;
+            if (!requireValue(argc, argv, i, value, arg, result)) {
+                return result;
+            }
+            job.encode.profile = value;
+            continue;
+        }
+
         if (arg == "--crf") {
             std::string value;
             if (!requireValue(argc, argv, i, value, arg, result)) {
@@ -294,6 +315,36 @@ CliResult parseCli(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--preview") {
+            job.previewMode = true;
+            continue;
+        }
+
+        if (arg == "--preview-duration") {
+            std::string value;
+            if (!requireValue(argc, argv, i, value, arg, result)) {
+                return result;
+            }
+            try {
+                const double dur = std::stod(value);
+                if (dur <= 0.0 || dur > 300.0) {
+                    std::cerr << "--preview-duration must be in range (0, 300], got: "
+                              << dur << std::endl;
+                    result.shouldExit = true;
+                    result.exitCode = 1;
+                    return result;
+                }
+                job.previewDurationSec = dur;
+                job.previewMode = true;  // Implies preview mode
+            } catch (...) {
+                std::cerr << "Invalid --preview-duration value: " << value << std::endl;
+                result.shouldExit = true;
+                result.exitCode = 1;
+                return result;
+            }
+            continue;
+        }
+
         std::cerr << "Unknown argument: " << arg << std::endl;
         result.shouldExit = true;
         result.exitCode = 1;
@@ -317,7 +368,8 @@ CliResult parseCli(int argc, char** argv) {
         std::filesystem::path outputDir = inputP.parent_path() / "output";
         std::filesystem::create_directories(outputDir);
         std::string stem = inputP.stem().string();
-        job.outputPath = (outputDir / (stem + "_enhanced.mp4")).string();
+        std::string suffix = job.previewMode ? "_preview" : "_enhanced";
+        job.outputPath = (outputDir / (stem + suffix + ".mp4")).string();
     }
 
     result.job = job;

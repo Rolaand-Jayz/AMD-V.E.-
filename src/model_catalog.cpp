@@ -268,6 +268,22 @@ static const std::vector<ModelEntry> kCatalog = {
         /* minVram     */ 2048
     },
     {
+        /* id          */ "realesrgan-x4plus-pth",
+        /* displayName */ "Real-ESRGAN x4+ (PyTorch .pth)",
+        /* stage       */ StageKind::Upscale,
+        /* format      */ ModelFormat::Pytorch,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 4,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        /* filename    */ "RealESRGAN_x4plus.pth",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Original PyTorch checkpoint for Real-ESRGAN x4plus. Compiled through torch export (PyTorch -> ONNX -> MiGraphX).",
+        /* isDefault   */ false,
+        /* minVram     */ 2048
+    },
+    {
         /* id          */ "animesharp-x4",
         /* displayName */ "4x-AnimeSharp (anime + CGI upscale)",
         /* stage       */ StageKind::Upscale,
@@ -350,32 +366,32 @@ static const std::vector<ModelEntry> kCatalog = {
 
     // ── Lightweight / fast-enough 2× general ─────────────────────
     {
-        /* id          */ "clearreality-x2",
-        /* displayName */ "2x-ClearRealityV1 — Lightweight General (ONNX)",
+        /* id          */ "modernspanimation-x2-fp32",
+        /* displayName */ "ModernSpanimation v1 x2 fp32 (lightweight general, ONNX)",
         /* stage       */ StageKind::Upscale,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/2x_ClearRealityV1.onnx",
-        /* filename    */ "2x_ClearRealityV1.onnx",
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV1_fp32_op17.onnx",
+        /* filename    */ "2x_ModernSpanimationV1_fp32_op17.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "ClearRealityV1 x2 – sub-megabyte compact model; ideal for 1080p→1440p or any moderate upscale "
+        /* description */ "ModernSpanimation v1 fp32 – compact 2.8 MB model; ideal for 1080p→1440p or any moderate upscale "
                           "without heavy VRAM use. Fast enough for near-real-time batch processing.",
         /* isDefault   */ false,
         /* minVram     */ 256
     },
     {
         /* id          */ "realesrnet-x2plus",
-        /* displayName */ "RealESRNet x2+ (conservative 2x, no GAN, ONNX)",
+        /* displayName */ "ModernSpanimation v2 x2 fp32 slim (conservative 2x, ONNX)",
         /* stage       */ StageKind::Upscale,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_RealESRNet_x2plus_onnxslim.onnx",
-        /* filename    */ "2x_RealESRNet_x2plus_onnxslim.onnx",
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
+        /* filename    */ "2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
         /* description */ "RealESRNet x2+ without the GAN discriminator – stable, artifact-free x2 upscale at roughly half "
@@ -404,15 +420,15 @@ static const std::vector<ModelEntry> kCatalog = {
         /* minVram     */ 256
     },
     {
-        /* id          */ "realesrnet-x4plus",
-        /* displayName */ "RealESRNet x4+ (conservative 4x, no GAN, ONNX)",
+        /* id          */ "ultrasharpv2-lite-x4",
+        /* displayName */ "4x-UltraSharpV2 Lite (conservative 4x, ONNX)",
         /* stage       */ StageKind::Upscale,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 4,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/RealESRNet_x4plus.onnx",
-        /* filename    */ "RealESRNet_x4plus.onnx",
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-UltraSharpV2_Lite.onnx",
+        /* filename    */ "4x-UltraSharpV2_Lite.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
         /* description */ "RealESRNet x4+ trained without a GAN discriminator – produces slightly softer but more stable "
@@ -421,19 +437,19 @@ static const std::vector<ModelEntry> kCatalog = {
         /* minVram     */ 1024
     },
     {
-        /* id          */ "nmkd-superscale-x4",
-        /* displayName */ "4x NMKD-Superscale-SP (fast general, ONNX)",
+        /* id          */ "realistic-rescaler-x4",
+        /* displayName */ "4x RealisticRescaler (fast general, ONNX)",
         /* stage       */ StageKind::Upscale,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 4,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x_NMKD-Superscale-SP_178000_G.onnx",
-        /* filename    */ "4x_NMKD-Superscale-SP_178000_G.onnx",
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x_RealisticRescaler_100000_G.onnx",
+        /* filename    */ "4x_RealisticRescaler_100000_G.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "NMKD Superscale-SP x4 – general-purpose model biased towards speed. Lighter than Siax 200k while "
-                          "retaining good detail recovery. Suitable when throughput matters more than maximum fidelity.",
+        /* description */ "RealisticRescaler x4 – general-purpose model biased towards realism. Good detail recovery and "
+                          "natural textures. Suitable when throughput matters more than maximum fidelity.",
         /* isDefault   */ false,
         /* minVram     */ 1024
     },
@@ -447,8 +463,8 @@ static const std::vector<ModelEntry> kCatalog = {
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV1_Compact_clamp_op20_onnxslim.onnx",
-        /* filename    */ "2x_ModernSpanimationV1_Compact_clamp_op20_onnxslim.onnx",
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20.onnx",
+        /* filename    */ "2x_ModernSpanimationV2_clamp_op20.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
         /* description */ "ModernSpanimation v1 Compact – significantly smaller network than v2 Full for anime x2 upscale. "
@@ -458,18 +474,18 @@ static const std::vector<ModelEntry> kCatalog = {
     },
     {
         /* id          */ "animejananai-hd-compact-x2",
-        /* displayName */ "AnimeJaNai HD V3 Compact x2 (anime, ONNX)",
+        /* displayName */ "AnimeJaNai HD V3 Sharp Compact x2 (anime, PyTorch)",
         /* stage       */ StageKind::Upscale,
-        /* format      */ ModelFormat::Onnx,
+        /* format      */ ModelFormat::Pytorch,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://github.com/the-database/AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_Compact_s2_490k.onnx",
-        /* filename    */ "2x_AnimeJaNai_HD_V3_Compact_s2_490k.onnx",
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_AnimeJaNai_HD_V3_Sharp1_Compact_430k.pth",
+        /* filename    */ "2x_AnimeJaNai_HD_V3_Sharp1_Compact_430k.pth",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "AnimeJaNai HD V3 Compact – purpose-built for 1080p anime upscale to 2160p with a compact "
-                          "network. Much lighter than the full V3 while keeping excellent line fidelity.",
+        /* description */ "AnimeJaNai HD V3 Sharp Compact – purpose-built for 1080p anime upscale to 2160p with a compact "
+                          "network. PyTorch format – will be exported to ONNX then compiled to MXR.",
         /* isDefault   */ false,
         /* minVram     */ 512
     },

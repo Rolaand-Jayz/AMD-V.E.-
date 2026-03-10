@@ -4,13 +4,13 @@
 
 #include <QApplication>
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMessageBox>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
@@ -32,8 +32,6 @@ static QString stateText(ModelState s) {
     case ModelState::Downloaded:    return QStringLiteral("Downloaded");
     case ModelState::Converting:    return QStringLiteral("Converting to MiGraphX…");
     case ModelState::Converted:     return QStringLiteral("Converted (.mxr)");
-    case ModelState::Optimizing:    return QStringLiteral("Optimising for hardware…");
-    case ModelState::Optimized:     return QStringLiteral("Optimised");
     case ModelState::Error:         return QStringLiteral("Error");
     }
     return QStringLiteral("Unknown");
@@ -43,36 +41,37 @@ static QString stateColor(ModelState s) {
     switch (s) {
     case ModelState::NotDownloaded: return QStringLiteral("#9E9E9E");
     case ModelState::Downloading:
-    case ModelState::Converting:
-    case ModelState::Optimizing:    return QStringLiteral("#2196F3");
+    case ModelState::Converting:    return QStringLiteral("#2196F3");
     case ModelState::Downloaded:    return QStringLiteral("#FF9800");
     case ModelState::Converted:     return QStringLiteral("#4CAF50");
-    case ModelState::Optimized:     return QStringLiteral("#00BCD4");
     case ModelState::Error:         return QStringLiteral("#F44336");
     }
     return QStringLiteral("#9E9E9E");
 }
 
 // Build per-call callbacks that post safely back to the UI thread.
-// QMetaObject::invokeMethod with a QObject* context and
-// Qt::QueuedConnection will automatically drop the call if the
-// context object is destroyed before the event is processed.
 ModelProgressCb ModelManagerDialog::makeProgressCb(const std::string& modelId) {
-    return [this, modelId](const std::string&, float p, const std::string& msg) {
+    QPointer<ModelManagerDialog> self(this);
+    return [self, modelId](const std::string&, float p, const std::string& msg) {
         QString qid  = QString::fromStdString(modelId);
         QString qmsg = QString::fromStdString(msg);
-        QMetaObject::invokeMethod(this,
-            [this, qid, p, qmsg]() { onProgressQt(qid, p, qmsg); },
-            Qt::QueuedConnection);
+        QMetaObject::invokeMethod(QApplication::instance(),
+            [self, qid, p, qmsg]() {
+                if (!self) { return; }
+                self->onProgressQt(qid, p, qmsg);
+            }, Qt::QueuedConnection);
     };
 }
 
 ModelStateCb ModelManagerDialog::makeStateCb(const std::string& modelId) {
-    return [this, modelId](const std::string&, ModelState st) {
+    QPointer<ModelManagerDialog> self(this);
+    return [self, modelId](const std::string&, ModelState st) {
         QString qid = QString::fromStdString(modelId);
-        QMetaObject::invokeMethod(this,
-            [this, qid, st]() { onStateChangedQt(qid, st); },
-            Qt::QueuedConnection);
+        QMetaObject::invokeMethod(QApplication::instance(),
+            [self, qid, st]() {
+                if (!self) { return; }
+                self->onStateChangedQt(qid, st);
+            }, Qt::QueuedConnection);
     };
 }
 
@@ -80,16 +79,20 @@ ModelStateCb ModelManagerDialog::makeStateCb(const std::string& modelId) {
 
 // ─── closeEvent ──────────────────────────────────────────────────
 // Block the dialog from closing while any model operation is in progress.
-// Background threads (download inside ModelManager, plus the dialog's own
-// convert/optimize threads) capture `this` through their callbacks.  If the
-// dialog were destroyed while those threads are still running, the callbacks
-// would dereference a dangling pointer, causing undefined behaviour / crash.
 void ModelManagerDialog::closeEvent(QCloseEvent* event) {
+    if (operationKickoff_) {
+        QMessageBox::information(
+            this,
+            tr("Operation in progress"),
+            tr("A model operation is starting. Please wait a moment and try again."));
+        event->ignore();
+        return;
+    }
+
     const auto models = manager_.allModels();
     for (const auto& m : models) {
         if (m.state == ModelState::Downloading ||
-            m.state == ModelState::Converting  ||
-            m.state == ModelState::Optimizing) {
+            m.state == ModelState::Converting) {
             QMessageBox::information(
                 this,
                 tr("Operation in progress"),
@@ -102,13 +105,20 @@ void ModelManagerDialog::closeEvent(QCloseEvent* event) {
     QDialog::closeEvent(event);
 }
 
-ModelManagerDialog::ModelManagerDialog(ModelManager& manager, AppSettings& settings, QWidget* parent)
+ModelManagerDialog::ModelManagerDialog(ModelManager& manager,
+                                       AppSettings& settings,
+                                       const QString& initialModelId,
+                                       QWidget* parent)
     : QDialog(parent), manager_(manager), settings_(settings) {
     setWindowTitle(tr("Model Manager"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     resize(880, 560);
     buildUi();
+    selectedModelId_ = initialModelId;
     populateList();
+    if (!selectedModelId_.isEmpty()) {
+        updateDetailPanel(selectedModelId_);
+    }
 }
 
 // ─── UI construction ─────────────────────────────────────────────
@@ -148,16 +158,6 @@ void ModelManagerDialog::buildUi() {
     descLabel_->setWordWrap(true);
     descLabel_->setStyleSheet(QStringLiteral("color: #555;"));
 
-    // Per-model precision override combo
-    precisionCombo_ = new QComboBox;
-    precisionCombo_->addItem(tr("Global default"),  QStringLiteral("global"));
-    precisionCombo_->addItem(tr("fp32"),            QStringLiteral("fp32"));
-    precisionCombo_->addItem(tr("fp16"),            QStringLiteral("fp16"));
-    precisionCombo_->addItem(tr("int8"),            QStringLiteral("int8"));
-    precisionCombo_->setEnabled(false);
-    precisionCombo_->setToolTip(tr("Per-model compile precision. "
-        "\"Global default\" follows the setting in Settings > Inference."));
-
     rightLayout->addWidget(nameLabel_);
     rightLayout->addWidget(stageLabel_);
     rightLayout->addWidget(descLabel_);
@@ -166,12 +166,6 @@ void ModelManagerDialog::buildUi() {
     rightLayout->addWidget(statusLabel_);
     rightLayout->addWidget(new QLabel(tr("Path:")));
     rightLayout->addWidget(pathLabel_);
-    {
-        auto* precRow = new QHBoxLayout;
-        precRow->addWidget(new QLabel(tr("Compile precision:")));
-        precRow->addWidget(precisionCombo_, 1);
-        rightLayout->addLayout(precRow);
-    }
 
     progressBar_ = new QProgressBar;
     progressBar_->setRange(0, 100);
@@ -185,13 +179,11 @@ void ModelManagerDialog::buildUi() {
     auto* btnLayout = new QHBoxLayout;
     downloadBtn_   = new QPushButton(tr("Download"));
     convertBtn_    = new QPushButton(tr("Convert to MiGraphX"));
-    optimizeBtn_   = new QPushButton(tr("Optimise for Hardware"));
     cancelBtn_     = new QPushButton(tr("Cancel"));
     openFolderBtn_ = new QPushButton(tr("Open Folder"));
     cancelBtn_->setEnabled(false);
     btnLayout->addWidget(downloadBtn_);
     btnLayout->addWidget(convertBtn_);
-    btnLayout->addWidget(optimizeBtn_);
     btnLayout->addWidget(cancelBtn_);
     btnLayout->addWidget(openFolderBtn_);
     btnLayout->addStretch();
@@ -215,25 +207,10 @@ void ModelManagerDialog::buildUi() {
             this, &ModelManagerDialog::onSelectionChanged);
     connect(downloadBtn_,  &QPushButton::clicked, this, &ModelManagerDialog::onDownloadClicked);
     connect(convertBtn_,   &QPushButton::clicked, this, &ModelManagerDialog::onConvertClicked);
-    connect(optimizeBtn_,  &QPushButton::clicked, this, &ModelManagerDialog::onOptimizeClicked);
     connect(cancelBtn_,    &QPushButton::clicked, this, &ModelManagerDialog::onCancelClicked);
     connect(openFolderBtn_,&QPushButton::clicked, this, &ModelManagerDialog::onOpenFolderClicked);
     connect(refreshBtn_,   &QPushButton::clicked, this, &ModelManagerDialog::onRefreshClicked);
     connect(closeBtn_,     &QPushButton::clicked, this, &QDialog::accept);
-
-    // Precision combo: save override when user changes it.
-    connect(precisionCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) {
-        if (selectedModelId_.isEmpty()) return;
-        const QString key = precisionCombo_->currentData().toString();
-        const std::string id = selectedModelId_.toStdString();
-        if (key == QStringLiteral("global")) {
-            settings_.modelPrecisionOverrides.erase(id);
-        } else {
-            settings_.modelPrecisionOverrides[id] = precisionFromString(key.toStdString()).value_or(ModelPrecision::Fp32);
-        }
-        settings_.save();
-    });
 
     setButtonsEnabled(false);
 }
@@ -306,14 +283,15 @@ void ModelManagerDialog::updateDetailPanel(const QString& modelId) {
     auto bestPath = manager_.bestPathForModel(modelId.toStdString());
     pathLabel_->setText(bestPath ? QString::fromStdString(*bestPath) : tr("(not on disk)"));
 
-    updatePrecisionCombo(m);
-
     const bool busy = (m.state == ModelState::Downloading ||
-                       m.state == ModelState::Converting  ||
-                       m.state == ModelState::Optimizing);
+                       m.state == ModelState::Converting);
     progressBar_->setVisible(busy);
     progressMsg_->setVisible(busy);
-    if (!busy) progressBar_->setValue(0);
+    if (!busy) {
+        // Restore determinate range if it was in indeterminate (pulsing) mode.
+        if (progressBar_->maximum() == 0) { progressBar_->setRange(0, 100); }
+        progressBar_->setValue(0);
+    }
 
     setButtonsEnabled(true);
     downloadBtn_->setEnabled(!m.entry.downloadUrl.empty() && m.state == ModelState::NotDownloaded);
@@ -321,57 +299,13 @@ void ModelManagerDialog::updateDetailPanel(const QString& modelId) {
         m.state == ModelState::Downloaded &&
         (m.entry.sourceFormat == ModelFormat::Onnx || m.entry.sourceFormat == ModelFormat::Pytorch);
     convertBtn_->setEnabled(canConvert);
-    optimizeBtn_->setEnabled(m.state == ModelState::Converted);
     cancelBtn_->setEnabled(busy);
     openFolderBtn_->setEnabled(true);
-    precisionCombo_->setEnabled(!busy);
-}
-
-// ─── Precision helpers ───────────────────────────────────────────
-
-void ModelManagerDialog::updatePrecisionCombo(const ManagedModel& m) {
-    // Block signals so our currentIndexChanged handler doesn't fire
-    // while we are programmatically updating the combo.
-    QSignalBlocker blocker(precisionCombo_);
-
-    // Update the "Global default" label to show the current global value.
-    const QString globalLabel = tr("Global default (%1)")
-        .arg(QString::fromStdString(toString(settings_.globalQuantization)));
-    precisionCombo_->setItemText(0, globalLabel);
-
-    // Select the per-model override if one exists, else "Global default".
-    const std::string id = m.entry.id;
-    auto it = settings_.modelPrecisionOverrides.find(id);
-    if (it != settings_.modelPrecisionOverrides.end()) {
-        const QString overrideStr = QString::fromStdString(toString(it->second));
-        const int idx = precisionCombo_->findData(overrideStr);
-        precisionCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
-    } else {
-        precisionCombo_->setCurrentIndex(0);  // "Global default"
-    }
-}
-
-ave::ModelPrecision ModelManagerDialog::effectivePrecision() const {
-    if (selectedModelId_.isEmpty()) return ModelPrecision::Fp32;
-
-    auto optModel = manager_.findModel(selectedModelId_.toStdString());
-    const ModelPrecision catalogPrec = optModel ? optModel->entry.precision : ModelPrecision::Fp32;
-
-    const QString key = precisionCombo_->currentData().toString();
-    if (key != QStringLiteral("global")) {
-        // Use the explicit per-model override from the combo.
-        const ModelPrecision requested = precisionFromString(key.toStdString()).value_or(ModelPrecision::Fp32);
-        return AppSettings::clampToEnvironment(requested, true /* MiGraphX required anyway */);
-    }
-    // Fall back to global-aware logic (honours catalogue when global is still default Fp32).
-    const ModelPrecision eff = settings_.effectivePrecisionFor(selectedModelId_.toStdString(), catalogPrec);
-    return AppSettings::clampToEnvironment(eff, true);
 }
 
 void ModelManagerDialog::setButtonsEnabled(bool enabled) {
     downloadBtn_->setEnabled(enabled);
     convertBtn_->setEnabled(enabled);
-    optimizeBtn_->setEnabled(enabled);
     cancelBtn_->setEnabled(false);
     openFolderBtn_->setEnabled(enabled);
 }
@@ -381,7 +315,15 @@ void ModelManagerDialog::setButtonsEnabled(bool enabled) {
 void ModelManagerDialog::onProgressQt(const QString& modelId, float p, const QString& msg) {
     if (modelId != selectedModelId_) return;
     progressBar_->setVisible(true); progressMsg_->setVisible(true);
-    progressBar_->setValue(static_cast<int>(p * 100.f));
+    if (p < 0.0f) {
+        // Indeterminate (pulsing) mode — the compilation phase has no
+        // measurable sub-progress; only elapsed time is known.
+        if (progressBar_->maximum() != 0) { progressBar_->setRange(0, 0); }
+    } else {
+        // Determinate mode — restore 0-100 range if we were pulsing.
+        if (progressBar_->maximum() == 0) { progressBar_->setRange(0, 100); }
+        progressBar_->setValue(static_cast<int>(p * 100.f));
+    }
     progressMsg_->setText(msg);
 }
 
@@ -391,6 +333,13 @@ void ModelManagerDialog::onStateChangedQt(const QString& modelId, ModelState) {
         if (it->data(Qt::UserRole).toString() == modelId) {
             auto opt = manager_.findModel(modelId.toStdString());
             if (opt) { it->setForeground(QColor(stateColor(opt->state))); it->setToolTip(stateText(opt->state)); }
+            break;
+        }
+    }
+    operationKickoff_ = false;
+    for (const auto& m : manager_.allModels()) {
+        if (m.state == ModelState::Downloading || m.state == ModelState::Converting) {
+            operationKickoff_ = true;
             break;
         }
     }
@@ -408,39 +357,33 @@ void ModelManagerDialog::onSelectionChanged() {
 void ModelManagerDialog::onDownloadClicked() {
     if (selectedModelId_.isEmpty()) return;
     const std::string id = selectedModelId_.toStdString();
-    std::thread([this, id]() {
-        std::string err;
-        manager_.startDownload(id, makeProgressCb(id), makeStateCb(id), err);
-    }).detach();
+    operationKickoff_ = true;
+    std::string err;
+    if (!manager_.startDownload(id, makeProgressCb(id), makeStateCb(id), err)) {
+        operationKickoff_ = false;
+        QMessageBox::warning(this, tr("Download Failed"), QString::fromStdString(err));
+    }
     updateDetailPanel(selectedModelId_);
 }
 
 void ModelManagerDialog::onConvertClicked() {
     if (selectedModelId_.isEmpty()) return;
-    const std::string id    = selectedModelId_.toStdString();
-    const ModelPrecision prec = effectivePrecision();
-    std::thread([this, id, prec]() {
+    const std::string id = selectedModelId_.toStdString();
+    operationKickoff_ = true;
+    const auto progressCb = makeProgressCb(id);
+    const auto stateCb = makeStateCb(id);
+    ModelManager* manager = &manager_;
+    QPointer<ModelManagerDialog> self(this);
+    std::thread([manager, id, progressCb, stateCb, self]() {
         std::string err;
-        if (!manager_.convertToMiGraphX(id, makeProgressCb(id), makeStateCb(id), err, prec)) {
+        if (!manager->convertToMiGraphX(id, progressCb, stateCb, err)) {
             const QString msg = QString::fromStdString("MiGraphX conversion failed:\n" + err);
             QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
                 QMessageBox::warning(nullptr, "Conversion Failed", msg);
             }, Qt::QueuedConnection);
-        }
-    }).detach();
-    updateDetailPanel(selectedModelId_);
-}
-
-void ModelManagerDialog::onOptimizeClicked() {
-    if (selectedModelId_.isEmpty()) return;
-    const std::string id    = selectedModelId_.toStdString();
-    const ModelPrecision prec = effectivePrecision();
-    std::thread([this, id, prec]() {
-        std::string err;
-        if (!manager_.optimizeForHardware(id, makeProgressCb(id), makeStateCb(id), err, prec)) {
-            const QString msg = QString::fromStdString("Hardware optimisation failed:\n" + err);
-            QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
-                QMessageBox::warning(nullptr, "Optimisation Failed", msg);
+            QMetaObject::invokeMethod(QApplication::instance(), [self]() {
+                if (!self) { return; }
+                self->operationKickoff_ = false;
             }, Qt::QueuedConnection);
         }
     }).detach();

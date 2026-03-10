@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 // ─────────────────────────────────────────────────────────────────
 // filter_browser.cpp — GUI panel for toggling / configuring filters
 // ─────────────────────────────────────────────────────────────────
@@ -70,6 +67,7 @@ FilterBrowser::FilterBrowser(QWidget* parent) : QWidget(parent) {
 void FilterBrowser::buildUi() {
     auto* topLayout = new QVBoxLayout(this);
     topLayout->setContentsMargins(0, 0, 0, 0);
+    topLayout->setSpacing(8);
 
     // ── Category filter combo ───────────────────────────────────
     auto* filterRow = new QHBoxLayout;
@@ -81,6 +79,12 @@ void FilterBrowser::buildUi() {
     }
     filterRow->addWidget(categoryFilter_, 1);
     topLayout->addLayout(filterRow);
+
+    auto* hintLabel = new QLabel(
+        QStringLiteral("Optional catalog filters for cleanup, color work, and utility passes."));
+    hintLabel->setWordWrap(true);
+    hintLabel->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    topLayout->addWidget(hintLabel);
 
     // ── Scrollable filter list ──────────────────────────────────
     scrollArea_ = new QScrollArea;
@@ -96,8 +100,13 @@ void FilterBrowser::buildUi() {
         FilterRow row;
         row.filterId = ef.id;
 
-        // ── Card: checkbox + badges ─────────────────────────────
-        auto* card = new QVBoxLayout;
+        row.card = new QWidget(scrollContent);
+        row.card->setObjectName(QStringLiteral("filterCard"));
+        row.card->setStyleSheet(
+            QStringLiteral("#filterCard { border: 1px solid palette(mid); border-radius: 6px; }"));
+        auto* card = new QVBoxLayout(row.card);
+        card->setContentsMargins(10, 8, 10, 8);
+        card->setSpacing(6);
 
         auto* headerRow = new QHBoxLayout;
         row.enableBox = new QCheckBox(
@@ -178,7 +187,7 @@ void FilterBrowser::buildUi() {
         }
 
         card->addWidget(row.paramGroup);
-        filterLayout_->addLayout(card);
+        filterLayout_->addWidget(row.card);
 
         // ── Show/hide params on toggle ──────────────────────────
         connect(row.enableBox, &QCheckBox::toggled, this,
@@ -212,12 +221,8 @@ void FilterBrowser::onCategoryFilterChanged(int index) {
             auto selectedCat = categoryList()[static_cast<std::size_t>(index - 1)].cat;
             visible = (catalog[i].category == selectedCat);
         }
-        // Show/hide by finding parent layouts — simpler: walk enableBox parent
-        if (rows_[i].enableBox) {
-            // We need to show/hide the whole card.  Since we used addLayout
-            // (not addWidget), we wrap each card in a helper QWidget.
-            // For simplicity, just show/hide the checkbox + paramGroup:
-            rows_[i].enableBox->parentWidget()->setVisible(visible);
+        if (rows_[i].card) {
+            rows_[i].card->setVisible(visible);
         }
     }
 }
@@ -272,5 +277,3 @@ int FilterBrowser::enabledCount() const {
     }
     return n;
 }
-
-#endif // ── entire file disabled ──────────────────────────────

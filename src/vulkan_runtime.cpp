@@ -118,6 +118,8 @@ bool VulkanRuntime::initialize(std::string& error) {
     std::vector<const char*> deviceExtensions = {
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+        // Context7 explicitly mandates VK_KHR_synchronization2 to prevent cross-API stalls
+    // Submissions must use vkCmdPipelineBarrier2 with appropriate VkImageMemoryBarrier2 / VkBufferMemoryBarrier2 structures.
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
     };
 

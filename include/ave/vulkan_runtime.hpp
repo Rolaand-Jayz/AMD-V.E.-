@@ -25,6 +25,8 @@ public:
     uint32_t getComputeQueueFamilyIndex() const;
 
     // Allocate a buffer that can be exported as an FD
+    // Note: This must be synchronised properly using VK_KHR_synchronization2
+    // and VkImageMemoryBarrier2 in the pipeline submission.
     bool allocateExternalBuffer(std::size_t sizeBytes,
                                 VkBuffer& bufferOut,
                                 VkDeviceMemory& memoryOut,

@@ -7,7 +7,6 @@
 #include "ave/app_settings.hpp"
 #include "ave/model_manager.hpp"
 
-class QComboBox;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -21,10 +20,9 @@ class QTextEdit;
 // ─────────────────────────────────────────────────────────────────
 // Provides a UI for:
 //  • Browsing all models grouped by stage kind
-//  • Seeing each model's download / compile / optimise status
+//  • Seeing each model's download / compile status
 //  • Downloading models (with progress)
 //  • Compiling downloaded ONNX models to MiGraphX .mxr
-//  • Running GPU-tuned hardware optimisation
 //  • Cancelling in-flight operations
 // ─────────────────────────────────────────────────────────────────
 class ModelManagerDialog final : public QDialog {
@@ -33,6 +31,7 @@ class ModelManagerDialog final : public QDialog {
   public:
     explicit ModelManagerDialog(ave::ModelManager&  manager,
                                 ave::AppSettings&   settings,
+                                const QString&      initialModelId = QString(),
                                 QWidget*            parent = nullptr);
     ~ModelManagerDialog() override = default;
 
@@ -40,16 +39,15 @@ class ModelManagerDialog final : public QDialog {
     void onSelectionChanged();
     void onDownloadClicked();
     void onConvertClicked();
-    void onOptimizeClicked();
     void onCancelClicked();
     void onOpenFolderClicked();
     void onRefreshClicked();
 
   private:
-    // Prevent the dialog from being closed (OS X button / Escape / accept)
-    // while a download, conversion, or optimisation is still running.
-    // Background threads hold raw 'this' pointers through callbacks and would
-    // dereference a dangling pointer if the dialog were destroyed mid-flight.
+    // Prevent the dialog from being closed while a download or
+    // conversion is still running.  Background threads hold raw 'this'
+    // pointers through callbacks and would dereference a dangling
+    // pointer if the dialog were destroyed mid-flight.
     void closeEvent(QCloseEvent* event) override;
 
     void buildUi();
@@ -58,22 +56,12 @@ class ModelManagerDialog final : public QDialog {
     void setButtonsEnabled(bool enabled);
 
     // Build per-call callbacks that marshal back to the Qt main thread.
-    // Uses QMetaObject::invokeMethod(this, ..., QueuedConnection) so that
-    // the call is automatically discarded if the dialog is destroyed.
     ave::ModelProgressCb makeProgressCb(const std::string& modelId);
     ave::ModelStateCb    makeStateCb   (const std::string& modelId);
 
     // Called on the Qt main thread by the callbacks above.
     void onProgressQt   (const QString& modelId, float progress, const QString& msg);
     void onStateChangedQt(const QString& modelId, ave::ModelState newState);
-
-    // Returns the effective precision for the current model taking the
-    // per-model combo, global setting and environment into account.
-    ave::ModelPrecision effectivePrecision() const;
-
-    // Refresh the precision combo to reflect the current model and
-    // global setting (called in updateDetailPanel).
-    void updatePrecisionCombo(const ave::ManagedModel& m);
 
     ave::ModelManager&  manager_;
     ave::AppSettings&   settings_;
@@ -84,17 +72,16 @@ class ModelManagerDialog final : public QDialog {
     QLabel*       statusLabel_ = nullptr;
     QLabel*       pathLabel_   = nullptr;
     QLabel*       descLabel_   = nullptr;
-    QComboBox*    precisionCombo_ = nullptr;
     QProgressBar* progressBar_ = nullptr;
     QLabel*       progressMsg_ = nullptr;
 
     QPushButton* downloadBtn_  = nullptr;
     QPushButton* convertBtn_   = nullptr;
-    QPushButton* optimizeBtn_  = nullptr;
     QPushButton* cancelBtn_    = nullptr;
     QPushButton* openFolderBtn_= nullptr;
     QPushButton* refreshBtn_   = nullptr;
     QPushButton* closeBtn_     = nullptr;
 
     QString selectedModelId_;
+    bool operationKickoff_ = false;
 };

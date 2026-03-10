@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 #pragma once
 
 #include <unordered_map>
@@ -34,6 +31,7 @@ struct FilterParamRow {
 // ─────────────────────────────────────────────────────────────────
 struct FilterRow {
     std::string                filterId;
+    QWidget*                   card       = nullptr;
     QCheckBox*                 enableBox  = nullptr;
     QGroupBox*                 paramGroup = nullptr;
     std::vector<FilterParamRow> paramRows;
@@ -87,5 +85,3 @@ class FilterBrowser final : public QWidget {
 
     std::vector<FilterRow> rows_;
 };
-
-#endif // ── entire file disabled ──────────────────────────────

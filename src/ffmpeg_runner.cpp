@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -191,7 +192,8 @@ bool runFfmpegWithProgress(
         const std::string& stepName,
         std::int64_t totalFrames,
         const std::function<void(float, const std::string&)>& taskCb,
-        std::string& error) {
+        std::string& error,
+        std::atomic<bool>* cancelFlag = nullptr) {
     // Capture stderr to a temp file so we can report the actual error.
     const std::string errTmp = "/tmp/ave_ffmpeg_"
         + std::to_string(static_cast<long>(getpid())) + ".err";
@@ -206,7 +208,12 @@ bool runFfmpegWithProgress(
     char buf[512];
     std::int64_t lastReportedFrame = -100;
     constexpr std::int64_t kReportInterval = 5;
+    bool cancelled = false;
     while (fgets(buf, sizeof(buf), pipe)) {
+        if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) {
+            cancelled = true;
+            break;
+        }
         std::string line = trim(std::string(buf));
         if (line.rfind("frame=", 0) == 0) {
             try {
@@ -225,6 +232,14 @@ bool runFfmpegWithProgress(
         }
     }
     const int ret = pclose(pipe);
+
+    if (cancelled) {
+        error = stepName + " cancelled by user.";
+        // Remove temp stderr file
+        std::error_code rmEc;
+        std::filesystem::remove(errTmp, rmEc);
+        return false;
+    }
 
     // Read captured stderr for diagnostics.
     std::string ffmpegStderr;
@@ -247,63 +262,6 @@ bool runFfmpegWithProgress(
     }
     if (!ffmpegStderr.empty())
         std::cerr << "[ffmpeg-warn] " << stepName << ": " << ffmpegStderr << std::endl;
-    return true;
-}
-
-// Run realesrgan-ncnn-vulkan, parse "N.NN%" percentage lines from combined stdout+stderr.
-// All non-progress lines are collected so that silent GPU/Vulkan failures are
-// visible to the user rather than silently producing blank output frames.
-bool runRealEsrganWithProgress(
-        const std::string& baseCmd,
-        const std::function<void(float, const std::string&)>& taskCb,
-        std::string& error) {
-    const std::string cmd = baseCmd + " 2>&1";
-    std::cout << "[cmd] ai-upscale: " << baseCmd << std::endl;
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        error = "ai-upscale failed to start (popen failed).";
-        return false;
-    }
-    char buf[512];
-    float lastPct = -2.0f;
-    std::vector<std::string> diagnosticLines;
-    while (fgets(buf, sizeof(buf), pipe)) {
-        std::string line = trim(std::string(buf));
-        if (line.empty()) continue;
-
-        // Progress lines end with '%', e.g. "12.34%"
-        if (line.back() == '%') {
-            try {
-                const float pct = std::stof(line.substr(0, line.size() - 1));
-                if (pct - lastPct >= 1.0f) {
-                    lastPct = pct;
-                    if (taskCb) taskCb(pct / 100.0f, "AI upscale \u2013 " + line);
-                }
-                continue;
-            } catch (...) {}
-        }
-
-        // Capture non-progress output for diagnostics (limit to avoid OOM).
-        if (diagnosticLines.size() < 50) {
-            diagnosticLines.push_back(line);
-        }
-        std::cerr << "[realesrgan] " << line << '\n';
-    }
-    const int ret = pclose(pipe);
-    if (ret != 0) {
-        error = "ai-upscale failed (exit " + std::to_string(ret) + ")";
-        if (!diagnosticLines.empty()) {
-            error += ":\n";
-            for (const auto& dl : diagnosticLines) error += "  " + dl + "\n";
-        } else {
-            error += " — no output captured.";
-        }
-        return false;
-    }
-    // Exited 0 but no progress seen — warn so the user can check GPU access.
-    if (lastPct < 0.0f && !diagnosticLines.empty())
-        std::cerr << "[realesrgan] WARNING: tool exited 0 but no progress lines seen; "
-                     "check GPU/Vulkan access.\n";
     return true;
 }
 
@@ -396,14 +354,6 @@ std::optional<double> getOptionalDoubleParam(const EnhancementStage& stage, cons
     return value;
 }
 
-std::optional<std::int64_t> getOptionalIntParam(const EnhancementStage& stage, const std::string& key) {
-    std::int64_t value = 0;
-    if (!tryGetInt(stage.params, key, value)) {
-        return std::nullopt;
-    }
-    return value;
-}
-
 std::optional<std::string> getOptionalStringParam(const EnhancementStage& stage, const std::string& key) {
     const auto it = stage.params.find(key);
     if (it == stage.params.end()) {
@@ -421,37 +371,6 @@ std::optional<std::string> getOptionalStringParam(const EnhancementStage& stage,
     }
     if (const auto* value = std::get_if<bool>(&it->second)) {
         return *value ? "true" : "false";
-    }
-
-    return std::nullopt;
-}
-
-std::optional<bool> getOptionalBoolParam(const EnhancementStage& stage, const std::string& key) {
-    const auto it = stage.params.find(key);
-    if (it == stage.params.end()) {
-        return std::nullopt;
-    }
-
-    if (const auto* value = std::get_if<bool>(&it->second)) {
-        return *value;
-    }
-
-    if (const auto* value = std::get_if<std::int64_t>(&it->second)) {
-        return *value != 0;
-    }
-
-    if (const auto* value = std::get_if<double>(&it->second)) {
-        return *value != 0.0;
-    }
-
-    if (const auto* value = std::get_if<std::string>(&it->second)) {
-        const std::string normalized = toLower(trim(*value));
-        if (normalized == "true" || normalized == "yes" || normalized == "on" || normalized == "1") {
-            return true;
-        }
-        if (normalized == "false" || normalized == "no" || normalized == "off" || normalized == "0") {
-            return false;
-        }
     }
 
     return std::nullopt;
@@ -629,63 +548,37 @@ bool hasModelPath(const EnhancementStage& stage) {
     return false;
 }
 
+bool hasModelId(const EnhancementStage& stage) {
+    const auto it = stage.params.find("model");
+    if (it == stage.params.end()) return false;
+    if (const auto* s = std::get_if<std::string>(&it->second))
+        return !s->empty();
+    return false;
+}
+
+bool isScriptedFilterBackend(const IAcceleratorBackend* backend) {
+    if (backend == nullptr) {
+        return false;
+    }
+    return backend->type() == BackendType::VapourSynth ||
+           backend->type() == BackendType::GlslShader;
+}
+
 // Returns true if the stage should be processed via AI inference
 // (either via the backend's processFrameDir or via realesrgan).
 bool isAiProcessable(const EnhancementStage& stage,
                      const IAcceleratorBackend* backend) {
+    if (stage.backendProcessed) {
+        return false;
+    }
+    if (isScriptedFilterBackend(backend)) {
+        return true;
+    }
     if (shouldUseAiUpscale(stage)) return true;
-    if (backend && hasModelPath(stage) && !stage.backendProcessed) return true;
+    if (backend && (hasModelPath(stage) || hasModelId(stage))) {
+        return true;
+    }
     return false;
-}
-
-// Counts regular PNG files in a directory whose size is >= minBytes.
-std::size_t countValidFrames(const std::filesystem::path& dir,
-                              std::uintmax_t minBytes = 1024) {
-    std::error_code ec;
-    std::size_t n = 0;
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec || !e.is_regular_file()) continue;
-        std::error_code szEc;
-        if (e.file_size(szEc) >= minBytes && !szEc) ++n;
-    }
-    return n;
-}
-
-// Sort all PNG files in dir by name and rename them to %08d.png starting at 0.
-// Handles any naming convention realesrgan uses and fills gaps caused by a
-// partial run (so FFmpeg can always read a contiguous %08d sequence).
-bool renumberFramesSequentially(const std::filesystem::path& dir, std::string& error) {
-    std::error_code ec;
-    std::vector<std::filesystem::path> files;
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (!ec && e.is_regular_file() && e.path().extension() == ".png")
-            files.push_back(e.path());
-    }
-    if (files.empty()) return true;
-    std::sort(files.begin(), files.end());
-
-    // Check whether renaming is actually needed.
-    bool needsRename = false;
-    for (std::size_t i = 0; i < files.size(); ++i) {
-        char expected[32];
-        snprintf(expected, sizeof(expected), "%08zu.png", i);
-        if (files[i].filename().string() != expected) { needsRename = true; break; }
-    }
-    if (!needsRename) return true;
-
-    // Two-pass rename: first to a guaranteed-unique temp name, then to final.
-    for (std::size_t i = 0; i < files.size(); ++i) {
-        std::filesystem::rename(files[i], dir / ("__t" + std::to_string(i) + ".png"), ec);
-        if (ec) { error = "Failed to stage-rename AI frame: " + files[i].filename().string(); return false; }
-    }
-    for (std::size_t i = 0; i < files.size(); ++i) {
-        char final_name[32];
-        snprintf(final_name, sizeof(final_name), "%08zu.png", i);
-        std::filesystem::rename(dir / ("__t" + std::to_string(i) + ".png"), dir / final_name, ec);
-        if (ec) { error = std::string("Failed to final-rename AI frame to ") + final_name; return false; }
-    }
-    std::cout << "[ai] renamed " << files.size() << " frames to sequential %08d.png" << std::endl;
-    return true;
 }
 
 std::filesystem::path createTempJobDir(const std::filesystem::path& outputPath) {
@@ -694,32 +587,6 @@ std::filesystem::path createTempJobDir(const std::filesystem::path& outputPath) 
     std::filesystem::path path = base / ("ave_ai_job_" + std::to_string(tick));
     std::filesystem::create_directories(path);
     return path;
-}
-
-std::int64_t pickAiScale(const EnhancementStage& upscaleStage,
-                         const std::optional<VideoProbeInfo>& probe,
-                         const std::optional<std::int64_t>& targetWidth,
-                         const std::optional<std::int64_t>& targetHeight) {
-    const std::optional<std::int64_t> explicitScale = getOptionalIntParam(upscaleStage, "ai_scale");
-    if (explicitScale.has_value()) {
-        return clampInt(*explicitScale, 2, 4);
-    }
-
-    if (probe.has_value() && targetWidth.has_value() && targetHeight.has_value() && probe->width > 0 && probe->height > 0) {
-        const double ratioW = static_cast<double>(*targetWidth) / static_cast<double>(probe->width);
-        const double ratioH = static_cast<double>(*targetHeight) / static_cast<double>(probe->height);
-        const double ratio = std::max(ratioW, ratioH);
-
-        if (ratio <= 2.2) {
-            return 2;
-        }
-        if (ratio <= 3.3) {
-            return 3;
-        }
-        return 4;
-    }
-
-    return 4;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -763,6 +630,22 @@ bool encodeWithAiProcessing(const VideoJob& job,
         return (tempGuard.path / ("temp_" + std::to_string(fileIndex++) + ".mkv")).string();
     };
 
+    // ── Preview: create a duration-limited clip if preview mode ──
+    const bool isPreview = job.previewMode && job.previewDurationSec > 0.0;
+    if (isPreview) {
+        std::string previewClip = makeTempVideo();
+        std::ostringstream pvCmd;
+        pvCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
+              << "-i " << quoteArg(currentVideoPath) << ' '
+              << "-t " << job.previewDurationSec << ' '
+              << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
+              << quoteArg(previewClip);
+        if (!runFfmpegWithProgress(pvCmd.str(), "create-preview-clip",
+                                   totalInputFrames, nullptr, error))
+            return false;
+        currentVideoPath = previewClip;
+    }
+
     std::vector<std::string> pendingFilters;
     std::vector<std::string> postFilters;
 
@@ -783,6 +666,21 @@ bool encodeWithAiProcessing(const VideoJob& job,
     for (std::size_t i = 0; i < orderedStages.size(); ++i)
         if (isAiProcessable(orderedStages[i], backend)) ++aiStageCount;
     int aiStagesDone = 0;
+    bool finalOutputReady = false;
+
+    auto canDirectEncodeFinalFromBackend = [&](std::size_t aiIdx) {
+        if (!backend || backend->type() != BackendType::MiGraphX) {
+            return false;
+        }
+        if (aiIdx != lastAiIdx) {
+            return false;
+        }
+        std::vector<std::string> trailingFilters;
+        for (std::size_t j = aiIdx + 1; j < orderedStages.size(); ++j) {
+            appendFiltersForStage(orderedStages[j], trailingFilters, true);
+        }
+        return trailingFilters.empty();
+    };
 
     for (std::size_t i = 0; i < orderedStages.size(); ++i) {
         const auto& stage = orderedStages[i];
@@ -818,6 +716,8 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
         // Run AI inference
         std::string aiOutputVideo = makeTempVideo();
+        const bool directOutputEncode = canDirectEncodeFinalFromBackend(i);
+        const std::string backendOutputVideo = directOutputEncode ? job.outputPath : aiOutputVideo;
         bool aiHandled = false;
 
         if (backend) {
@@ -831,20 +731,56 @@ bool encodeWithAiProcessing(const VideoJob& job,
             if (progressCb) progressCb(0, static_cast<int>(aiBase),
                 "Running AI " + toString(stage.kind) + " via " + backend->name() + "\u2026");
 
+            // Build process options for preview support
+            ProcessVideoOptions pvOpts;
+            if (isPreview) {
+                pvOpts.previewDurationSec = job.previewDurationSec;
+            }
+            pvOpts.framePreviewCb     = job.framePreviewCb;
+            pvOpts.previewFrameInterval = job.previewFrameInterval;
+            pvOpts.cancelFlag         = job.cancelFlag;
+            pvOpts.pauseFlag          = job.pauseFlag;
+            pvOpts.directOutputEncode = directOutputEncode;
+            if (directOutputEncode) {
+                pvOpts.outputCodec = job.encode.codec;
+                pvOpts.outputProfile = job.encode.profile;
+                pvOpts.outputCrf = job.encode.crf;
+                pvOpts.outputPreset = job.encode.preset;
+                pvOpts.outputThreads = job.encode.threads;
+            }
+
             std::string backendError;
             const StageResult result = backend->processVideoFile(
-                stage, currentVideoPath, aiOutputVideo,
-                frameCb, backendError);
+                stage, currentVideoPath, backendOutputVideo,
+                frameCb, backendError, pvOpts);
 
             if (result == StageResult::Processed) {
                 std::cout << "[ai-pipeline] " << toString(stage.kind)
-                          << " → AI complete via " << backend->name() << std::endl;
+                          << " → AI complete via " << backend->name()
+                          << (directOutputEncode ? " (direct final encode)" : "")
+                          << std::endl;
                 aiHandled = true;
+                if (directOutputEncode) {
+                    finalOutputReady = true;
+                }
+            } else if (result == StageResult::Cancelled) {
+                error = "Processing cancelled by user.";
+                return false;
             } else if (result == StageResult::Error) {
                 error = "AI inference failed for " + toString(stage.kind) +
                         ": " + backendError;
                 return false;
             } else {
+                if (job.requestedBackend != BackendType::Auto) {
+                    if (backendError.empty()) {
+                        backendError = backend->name() + " deferred AI processing for stage '"
+                                     + toString(stage.kind) + "'.";
+                    }
+                    error = "Explicit backend request cannot fall back for "
+                          + toString(stage.kind) + ": " + backendError;
+                    return false;
+                }
+
                 std::cout << "[ai-pipeline] " << toString(stage.kind)
                           << " → deferred to FFmpeg filter." << std::endl;
             }
@@ -870,7 +806,17 @@ bool encodeWithAiProcessing(const VideoJob& job,
         }
 
         currentVideoPath = aiOutputVideo;
+        if (directOutputEncode && aiHandled) {
+            currentVideoPath = job.outputPath;
+        }
         ++aiStagesDone;
+    }
+
+    if (finalOutputReady) {
+        std::cout << "[ai-pipeline] Final delivery encode completed inside "
+                  << backend->name() << "; skipping redundant FFmpeg re-encode."
+                  << std::endl;
+        return true;
     }
 
     // Final encode
@@ -903,8 +849,14 @@ bool encodeWithAiProcessing(const VideoJob& job,
     
     encCmd << "-c:v " << job.encode.codec << ' '
            << "-crf " << job.encode.crf << ' '
-           << "-preset " << job.encode.preset << ' '
-           << "-c:a copy -shortest "
+           << "-preset " << job.encode.preset << ' ';
+    if (!job.encode.profile.empty()) {
+        encCmd << "-profile:v " << job.encode.profile << ' ';
+    }
+    if (job.encode.threads > 0) {
+        encCmd << "-threads " << job.encode.threads << ' ';
+    }
+    encCmd << "-c:a copy -shortest "
            << quoteArg(job.outputPath);
 
     return runFfmpegWithProgress(encCmd.str(), "encode-video",
@@ -971,6 +923,11 @@ bool FfmpegRunner::encode(const VideoJob& job,
     cmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
         << "-i " << quoteArg(job.inputPath) << ' ';
 
+    // Limit duration for preview mode
+    if (job.previewMode && job.previewDurationSec > 0.0) {
+        cmd << "-t " << job.previewDurationSec << ' ';
+    }
+
     if (!filters.empty()) {
         const std::string chain = joinFilters(filters);
         cmd << "-vf " << quoteArg(chain) << ' ';
@@ -980,10 +937,17 @@ bool FfmpegRunner::encode(const VideoJob& job,
     cmd << "-c:v " << job.encode.codec << ' ';
     cmd << "-crf " << job.encode.crf << ' ';
     cmd << "-preset " << job.encode.preset << ' ';
+    if (job.encode.threads > 0) {
+        cmd << "-threads " << job.encode.threads << ' ';
+    }
+    if (!job.encode.profile.empty()) {
+        cmd << "-profile:v " << job.encode.profile << ' ';
+    }
     cmd << "-c:a copy ";
     cmd << quoteArg(job.outputPath);
 
-    return runFfmpegWithProgress(cmd.str(), "encode-video", totalFrames, taskCb, error);
+    return runFfmpegWithProgress(cmd.str(), "encode-video", totalFrames, taskCb, error,
+                                 job.cancelFlag);
 }
 
 }  // namespace ave

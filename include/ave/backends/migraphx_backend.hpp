@@ -8,7 +8,7 @@
 //
 // Key gold-standard compliance points:
 //   •  ONNX opset ≤19 gate enforced at parse time.
-//   •  Compile options are explicit (CompileOptions struct).
+//   •  Compile options are explicit and minimal.
 //   •  Artifact cache key = model identity + ROCm/MiGraphX version +
 //      GPU gfx target + compile options + MIGRAPHX_* env vars.
 //   •  Manifest sidecar (.mxr.manifest) guards cached artifacts;
@@ -31,6 +31,12 @@
 
 namespace ave {
 
+enum class MiGraphXPrecision {
+    Fp32,
+    Fp16,
+    Int8,
+};
+
 // ─────────────────────────────────────────────────────────────────
 // CompileOptions — MiGraphX compilation policy
 //
@@ -46,17 +52,13 @@ struct CompileOptions {
     // If true, MiGraphX allocates tensor buffers on CPU even for GPU
     // target.  offload_copy=true → CPU pointers; =false → GPU pointers.
     // Must be consistent between compile time and runtime.
-    bool offloadCopy    = false;
+    bool offloadCopy    = true;
 
-    // Allow fast-math optimisations (may affect numerical precision).
-    bool fastMath       = true;
-
-    // Run exhaustive auto-tuning (slow first run, faster inference).
-    bool exhaustiveTune = false;
-
-    // Inference precision.  Supported values: "fp32", "fp16", "bf16",
-    // "int8" (requires calibration data), "fp8" (E4M3FNUZ only).
-    std::string precision = "fp32";
+    // Precision used for compiled MiGraphX artifacts. The current host
+    // staging path accepts fp32/fp16 model I/O tensors; int8 compilation is
+    // supported for models whose host-facing contracts stay float while the
+    // internal graph is quantized.
+    MiGraphXPrecision precision = MiGraphXPrecision::Fp16;
 
     // Returns true if all settings are within known-safe ranges.
     bool validate(std::string& error) const;
@@ -103,7 +105,8 @@ class MiGraphXBackend final : public IAcceleratorBackend {
         const std::string& inputVideo,
         const std::string& outputVideo,
         const FrameProgressCb& progressCb,
-        std::string& error) override;
+        std::string& error,
+        const ProcessVideoOptions& opts = {}) override;
 
     // ── Extended API ────────────────────────────────────────────
 

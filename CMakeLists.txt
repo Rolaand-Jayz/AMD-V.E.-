@@ -24,7 +24,7 @@ option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
 # FFmpeg (Required for Vulkan hardware frame extraction)
 # ─────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libavfilter)
+pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libavfilter libswscale)
 
 # ─────────────────────────────────────────────────────────────────
 # Optional: libcurl
@@ -155,6 +155,7 @@ add_library(ave_core
     src/cli.cpp
     src/error_taxonomy.cpp
     src/ffmpeg_runner.cpp
+    src/filter_catalog.cpp
     src/frame_io.cpp
     src/frame_io_vulkan.cpp
     src/interop_bridge.cpp
@@ -168,8 +169,11 @@ add_library(ave_core
     src/types.cpp
     src/video_processor.cpp
     src/vulkan_runtime.cpp
+    src/backends/glsl_shader_backend.cpp
     src/backends/migraphx_backend.cpp
     src/backends/ncnn_vulkan_backend.cpp
+    src/backends/vapoursynth_backend.cpp
+    src/backends/vulkan_compute_backend.cpp
 )
 
 target_include_directories(ave_core PUBLIC include ${FFMPEG_INCLUDE_DIRS})
@@ -230,6 +234,8 @@ if(AVE_BUILD_GUI)
             src/gui/settings_dialog.hpp
             src/gui/toggle_switch.cpp
             src/gui/toggle_switch.hpp
+            src/gui/filter_browser.cpp
+            src/gui/filter_browser.hpp
         )
         target_include_directories(ave_gui PRIVATE src/gui)
         target_link_libraries(ave_gui PRIVATE ave_core Qt6::Widgets)

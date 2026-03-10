@@ -1,35 +1,39 @@
 #pragma once
 
 // ─────────────────────────────────────────────────────────────────
-// vapoursynth_backend.hpp — VapourSynth processing backend
+// vulkan_compute_backend.hpp — Vulkan compute shader backend
 //
-// Runs video enhancement through VapourSynth filter scripts via the
-// vspipe command-line tool.  VapourSynth scripts can apply arbitrary
-// frame-level processing including AI super-resolution filters
-// (e.g., vs-mlrt with NCNN/TRT), denoising (BM3D, KNLMeansCL),
-// dehaloing, etc.
+// GPU-accelerated image processing using raw Vulkan compute
+// pipelines.  Does not require MiGraphX, NCNN, or any external AI
+// runtime — only the Vulkan SDK.
+//
+// Supported stages:
+//   Sharpen        — Unsharp-mask via compute shader
+//   Denoise        — Bilateral filter approximation
+//   Upscale        — Lanczos-approximation upscale
+//   Dehalo         — Halo removal (inverse unsharp)
+//
+// Stages without a dedicated shader return Deferred so the FFmpeg
+// filter chain handles them instead.
 //
 // Requires:
-//   - VapourSynth R55+ with vspipe in $PATH
-//   - Desired VS plugins installed (e.g., vs-mlrt, mvtools, etc.)
-//
-// The backend generates a temporary .vpy script per stage, feeds
-// input frames, and collects output frames.
+//   - AVE_HAVE_VULKAN=ON (compile time)
+//   - Vulkan-capable GPU at runtime
+//   - `glslc` in PATH (Vulkan SDK shader compiler) for first-run
+//     SPIR-V compilation; compiled shaders are cached locally.
 // ─────────────────────────────────────────────────────────────────
 
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "ave/backend.hpp"
-#include "ave/filter_catalog.hpp"
 
 namespace ave {
 
-class VapourSynthBackend final : public IAcceleratorBackend {
+class VulkanComputeBackend final : public IAcceleratorBackend {
   public:
-    VapourSynthBackend();
-    ~VapourSynthBackend() override;
+    VulkanComputeBackend();
+    ~VulkanComputeBackend() override;
 
     // IAcceleratorBackend
     BackendType type()  const override;
@@ -38,8 +42,6 @@ class VapourSynthBackend final : public IAcceleratorBackend {
     bool initialize(std::string& error)   override;
     StageResult runStage(const EnhancementStage& stage, std::string& error) override;
 
-    // Process a directory of PNG frames through a VapourSynth
-    // filter script for the given enhancement stage.
     StageResult processVideoFile(
         const EnhancementStage& stage,
         const std::string& inputVideo,
@@ -47,10 +49,6 @@ class VapourSynthBackend final : public IAcceleratorBackend {
         const FrameProgressCb& progressCb,
         std::string& error,
         const ProcessVideoOptions& opts = {}) override;
-
-    // Accept enabled filters from the catalog UI.
-    void setCatalogFilters(
-        const std::vector<ActiveFilter>& filters);
 
   private:
     struct Impl;

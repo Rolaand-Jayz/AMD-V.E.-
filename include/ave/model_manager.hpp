@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -7,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "ave/app_settings.hpp"
 #include "ave/model_catalog.hpp"
 
 namespace ave {
@@ -20,9 +20,7 @@ enum class ModelState {
     Downloading,
     Downloaded,         // ONNX or NCNN files present
     Converting,         // MiGraphX compilation in progress
-    Converted,          // .mxr file present, not hardware-tuned
-    Optimizing,         // GPU-tuned compile in progress
-    Optimized,          // GPU-tuned .mxr present
+    Converted,          // .mxr file present
     Error
 };
 
@@ -37,7 +35,6 @@ struct ManagedModel {
     std::string     downloadedPath;    // path to ONNX / NCNN param file
     std::string     downloadedPathAux; // path to NCNN .bin file (if any)
     std::string     convertedPath;     // path to .mxr (MiGraphX compiled)
-    std::string     optimizedPath;     // path to .mxr (GPU-tuned)
     float           downloadProgress  = 0.0f;
     std::string     errorMessage;
 };
@@ -87,7 +84,7 @@ class ModelManager {
     // ── Path selection ───────────────────────────────────────────
 
     // Returns the best inference-ready path for the given model:
-    //   optimized > converted > downloaded
+    //   converted > downloaded
     // Returns nullopt when nothing is available.
     std::optional<std::string> bestPathForModel(const std::string& modelId) const;
 
@@ -110,23 +107,32 @@ class ModelManager {
     // program file.  Requires migraphx-driver on PATH or the MiGraphX
     // C++ runtime headers/libs linked in.
     // Progress callback is called periodically (0.0–1.0).
-    // precisionOverride: if set, overrides the catalog entry precision.
     bool convertToMiGraphX(const std::string& modelId,
                            const ModelProgressCb& progressCb,
                            const ModelStateCb&    stateCb,
                            std::string&           error,
-                           std::optional<ModelPrecision> precisionOverride = std::nullopt);
+                           ModelPrecision         compilePrecision = ModelPrecision::Fp16);
 
-    // Compile with --gpu tuning enabled (slow first run but faster inference).
-    bool optimizeForHardware(const std::string& modelId,
-                             const ModelProgressCb& progressCb,
-                             const ModelStateCb&    stateCb,
-                             std::string&           error,
-                             std::optional<ModelPrecision> precisionOverride = std::nullopt);
+    // ── Auto-compile ──────────────────────────────────────────────
+
+    // Automatically compile a model for inference if not already compiled.
+    // Returns the path to the compiled .mxr, or nullopt on failure.
+    // First-time compilation requires inputWidth and inputHeight so the
+    // artifact matches the real video frame size. Without dimensions this
+    // only returns an already-compiled .mxr. Int8 compilation additionally
+    // requires a calibration video path so representative frames can be
+    // sampled during quantization.
+    std::optional<std::string> autoCompileForInference(
+        const std::string& modelId,
+        std::string& error,
+        std::optional<std::int64_t> inputWidth = std::nullopt,
+        std::optional<std::int64_t> inputHeight = std::nullopt,
+        ModelPrecision compilePrecision = ModelPrecision::Fp16,
+        std::optional<std::string> calibrationVideoPath = std::nullopt);
 
     // ── UI helpers ───────────────────────────────────────────────
 
-    // Returns a UI-ready label for a model: "[Optimized] Real-ESRGAN x4"
+    // Returns a UI-ready label for a model, e.g. "[Compiled] Real-ESRGAN x4"
     std::string modelDropdownLabel(const std::string& modelId) const;
 
     // Returns sorted list of dropdown labels for a given stage, plus the
@@ -134,7 +140,7 @@ class ModelManager {
     struct DropdownEntry {
         std::string modelId;
         std::string label;
-        bool        inferenceReady; // downloaded, converted, or optimized
+        bool        inferenceReady;
     };
     std::vector<DropdownEntry> dropdownEntriesForStage(StageKind kind) const;
 

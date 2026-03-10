@@ -39,7 +39,8 @@ class NcnnVulkanBackend final : public IAcceleratorBackend {
         const std::string& inputVideo,
         const std::string& outputVideo,
         const FrameProgressCb& progressCb,
-        std::string& error) override;
+        std::string& error,
+        const ProcessVideoOptions& opts = {}) override;
 
     // ── Extended API ────────────────────────────────────────────
 

@@ -94,8 +94,14 @@ bool InteropBridge::releaseMemory(void* hipPtr, std::string& error) {
         return false;
     }
 
-    hipFree(hipPtr);
-    hipDestroyExternalMemory(it->second);
+    if (hipFree(hipPtr) != hipSuccess) {
+        error = "hipFree failed while releasing imported external memory.";
+        return false;
+    }
+    if (hipDestroyExternalMemory(it->second) != hipSuccess) {
+        error = "hipDestroyExternalMemory failed.";
+        return false;
+    }
     impl_->mappedMemory.erase(it);
     return true;
 #else

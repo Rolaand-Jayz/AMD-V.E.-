@@ -7,6 +7,7 @@ Guide for AI agents working in the AMD Video Enhancer C++ codebase.
 AMD-exclusive C++ video enhancement pipeline. No Python, no CUDA, no NVIDIA.
 
 - **Primary backend**: MiGraphX (ROCm) - ONNX load, compile, GPU inference
+- **Vulkan compute backend**: Vulkan SPIR-V compute shaders for GPU processing
 - **Fallback backend**: NCNN Vulkan - Vulkan-accelerated inference
 - **Always available**: FFmpeg filter chain - no model required
 
@@ -14,20 +15,21 @@ AMD-exclusive C++ video enhancement pipeline. No Python, no CUDA, no NVIDIA.
 
 ### Build
 
-```bash
-# Standard build (FFmpeg-only)
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+**IMPORTANT**: Always enable ALL available backends. Never build without them.
 
-# Full ROCm build
+```bash
+# Standard build — ALL backends enabled (this is the ONLY build you should run)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DAVE_HAVE_CURL=ON \
   -DAVE_HAVE_MIGRAPHX=ON \
-  -DAVE_HAVE_HIP=ON
-
-# With NCNN Vulkan support
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAVE_HAVE_NCNN=ON
+  -DAVE_HAVE_HIP=ON \
+  -DAVE_HAVE_VULKAN=ON \
+  -DAVE_HAVE_NCNN=ON
+cmake --build build -j
 ```
+
+> **Never** use a bare `cmake -S . -B build` without backend flags.
+> MiGraphX, HIP, Vulkan, and NCNN must always be explicitly enabled.
 
 ### Test
 
@@ -62,46 +64,93 @@ ctest --test-dir build --output-on-failure
 
 ## CMake Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `AVE_STRICT_WARNINGS` | ON | Enable `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion` |
-| `AVE_BUILD_GUI` | ON | Build Qt6 GUI |
-| `AVE_HAVE_CURL` | ON | Enable libcurl for model downloads |
-| `AVE_HAVE_MIGRAPHX` | OFF | Enable MiGraphX ROCm runtime |
-| `AVE_HAVE_HIP` | OFF | Enable HIP GPU headers |
-| `AVE_HAVE_NCNN` | OFF | Enable NCNN Vulkan runtime |
+| Option               | Default | Description                                                    |
+| -------------------- | ------- | -------------------------------------------------------------- |
+| `AVE_STRICT_WARNINGS`| ON      | Enable `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion` |
+| `AVE_BUILD_GUI`      | ON      | Build Qt6 GUI                                                  |
+| `AVE_HAVE_CURL`      | ON      | Enable libcurl for model downloads                             |
+| `AVE_HAVE_VULKAN`    | ON      | Enable Vulkan runtime (compute shaders, interop)               |
+| `AVE_HAVE_MIGRAPHX`  | OFF     | Enable MiGraphX ROCm runtime — **always pass ON**              |
+| `AVE_HAVE_HIP`       | OFF     | Enable HIP GPU headers (ROCm) — **always pass ON**             |
+| `AVE_HAVE_NCNN`      | OFF     | Enable NCNN Vulkan runtime — **always pass ON**                |
+| `AVE_HAVE_ROCTX`     | OFF     | Enable ROCTx markers for rocprof tracing                       |
+
+> CMake defaults for MIGRAPHX, HIP, and NCNN are OFF in `CMakeLists.txt`, but
+> **agents must always explicitly set them ON** in the cmake configure command.
+> The standard build command above already does this.
 
 ## Code Organization
 
-```
+```text
 ├── include/ave/           # Public headers (namespace ave)
 │   ├── backends/          # Backend-specific headers
+│   │   ├── glsl_shader_backend.hpp
+│   │   ├── migraphx_backend.hpp
+│   │   ├── ncnn_vulkan_backend.hpp
+│   │   ├── vapoursynth_backend.hpp
+│   │   └── vulkan_compute_backend.hpp
+│   ├── app_settings.hpp
 │   ├── backend.hpp        # IAcceleratorBackend interface
 │   ├── backend_manager.hpp
 │   ├── cli.hpp
+│   ├── error_taxonomy.hpp
 │   ├── ffmpeg_runner.hpp
+│   ├── filter_catalog.hpp
+│   ├── frame_io.hpp
+│   ├── interop_bridge.hpp
 │   ├── job.hpp            # VideoJob, EncodeSettings structs
 │   ├── model_catalog.hpp
 │   ├── model_manager.hpp
+│   ├── observability.hpp
 │   ├── planner.hpp        # PipelinePlanner class
 │   ├── scene_detector.hpp
 │   ├── stage.hpp          # EnhancementStage, ParameterValue
+│   ├── tensor_contract.hpp
 │   ├── types.hpp          # StageKind enum
-│   └── video_processor.hpp
+│   ├── video_processor.hpp
+│   └── vulkan_runtime.hpp
 ├── src/
 │   ├── backends/          # Backend implementations
+│   │   ├── glsl_shader_backend.cpp
 │   │   ├── migraphx_backend.cpp
-│   │   └── ncnn_vulkan_backend.cpp
+│   │   ├── ncnn_vulkan_backend.cpp
+│   │   ├── vapoursynth_backend.cpp
+│   │   └── vulkan_compute_backend.cpp
 │   ├── gui/               # Qt6 GUI (conditional)
+│   │   ├── filter_browser.cpp/hpp
 │   │   ├── main_gui.cpp
 │   │   ├── main_window.cpp/hpp
 │   │   ├── model_manager_dialog.cpp/hpp
+│   │   ├── settings_dialog.cpp/hpp
 │   │   └── toggle_switch.cpp/hpp
-│   └── *.cpp              # Core implementations
+│   ├── app_settings.cpp
+│   ├── backend.cpp
+│   ├── backend_manager.cpp
+│   ├── cli.cpp
+│   ├── error_taxonomy.cpp
+│   ├── ffmpeg_runner.cpp
+│   ├── filter_catalog.cpp
+│   ├── frame_io.cpp
+│   ├── frame_io_vulkan.cpp
+│   ├── interop_bridge.cpp
+│   ├── main.cpp
+│   ├── model_catalog.cpp
+│   ├── model_manager.cpp
+│   ├── observability.cpp
+│   ├── planner.cpp
+│   ├── scene_detector.cpp
+│   ├── stage.cpp
+│   ├── tensor_contract.cpp
+│   ├── types.cpp
+│   ├── video_processor.cpp
+│   └── vulkan_runtime.cpp
 ├── tests/
 │   └── planner_tests.cpp  # Unit tests
 └── docs/
-    └── FEATURE_PARITY_MATRIX.md
+    ├── FEATURE_PARITY_MATRIX.md
+    ├── GOLD_STANDARD_FOR_IMPLEMENTATION.md
+    ├── PARITY_PLAN.md
+    └── migraphx_debugging_playbook.md
 ```
 
 ## Naming Conventions
@@ -186,10 +235,10 @@ Stages execute in deterministic order (enforced by `PipelinePlanner`):
 
 ### Stage Aliases (CLI)
 
-| Stage | Aliases |
-|-------|---------|
-| `restore_compression` | `decompress`, `deh264` |
-| `remove_artifacts` | `deartifact`, `deblock` |
+| Stage                   | Aliases                    |
+| ----------------------- | -------------------------- |
+| `restore_compression`   | `decompress`, `deh264`     |
+| `remove_artifacts`      | `deartifact`, `deblock`    |
 
 ## Backend Interface
 
@@ -203,24 +252,33 @@ class IAcceleratorBackend {
     virtual std::string name() const = 0;
     virtual bool isAvailable(std::string& reason) const = 0;
     virtual bool initialize(std::string& error) = 0;
-    virtual bool runStage(const EnhancementStage& stage, std::string& error) = 0;
+    virtual StageResult runStage(const EnhancementStage& stage, std::string& error) = 0;
+    virtual StageResult processVideoFile(
+        const EnhancementStage& stage,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
+        const FrameProgressCb& progressCb,
+        std::string& error,
+        const ProcessVideoOptions& opts = {}) = 0;
 };
 ```
 
 Backend priority when `--backend auto`:
+
 1. MiGraphX (ROCm) - requires `/opt/rocm`, `rocminfo`, `libmigraphx.so`
-2. NCNN (Vulkan) - requires `vulkaninfo` or `libvulkan.so`
-3. FFmpeg filters - always available
+2. Vulkan Compute - requires Vulkan SDK and `libvulkan.so`
+3. NCNN (Vulkan) - requires `vulkaninfo` or `libvulkan.so`
+4. FFmpeg filters - always available
 
 ## Model Storage
 
 Models stored in `~/.local/share/ave/models/`:
 
-| Directory | Contents |
-|-----------|----------|
-| `downloaded/` | Raw ONNX / PyTorch source files |
-| `migraphx/` | MiGraphX `.mxr` compiled programs |
-| `optimised/` | Hardware-optimised compiled programs |
+| Directory     | Contents                              |
+| ------------- | ------------------------------------- |
+| `downloaded/` | Raw ONNX / PyTorch source files       |
+| `migraphx/`   | MiGraphX `.mxr` compiled programs     |
+| `optimised/`  | Hardware-optimised compiled programs   |
 
 ## Testing
 

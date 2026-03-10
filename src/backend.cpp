@@ -10,6 +10,12 @@ std::string toString(BackendType type) {
             return "migraphx";
         case BackendType::NcnnVulkan:
             return "ncnn-vulkan";
+        case BackendType::VulkanCompute:
+            return "vulkan";
+        case BackendType::VapourSynth:
+            return "vapoursynth";
+        case BackendType::GlslShader:
+            return "glsl";
     }
     return "unknown";
 }

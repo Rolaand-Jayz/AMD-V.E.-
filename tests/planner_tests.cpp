@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstdlib>
+#include <iostream>
 #include <vector>
 
 #include "ave/planner.hpp"
@@ -9,6 +11,14 @@ namespace {
 using ave::EnhancementStage;
 using ave::PipelinePlanner;
 using ave::StageKind;
+
+void check(bool condition, const char* message) {
+    if (condition) {
+        return;
+    }
+    std::cerr << "planner_tests failed: " << message << '\n';
+    std::abort();
+}
 
 EnhancementStage stage(StageKind kind) {
     EnhancementStage s;
@@ -29,8 +39,8 @@ void testInterpolationLast() {
     PipelinePlanner planner;
     const auto ordered = planner.plan({stage(StageKind::Interpolate), stage(StageKind::Sharpen), stage(StageKind::Upscale)});
 
-    assert(!ordered.empty());
-    assert(ordered.back().kind == StageKind::Interpolate);
+    check(!ordered.empty(), "planned pipeline should not be empty");
+    check(ordered.back().kind == StageKind::Interpolate, "interpolate must execute last");
 }
 
 void testRestoreBeforeUpscaleAndSharpen() {
@@ -43,15 +53,15 @@ void testRestoreBeforeUpscaleAndSharpen() {
     const int upscaleIdx = indexOf(ordered, StageKind::Upscale);
     const int sharpenIdx = indexOf(ordered, StageKind::Sharpen);
 
-    assert(restoreIdx != -1);
-    assert(removeIdx != -1);
-    assert(upscaleIdx != -1);
-    assert(sharpenIdx != -1);
+    check(restoreIdx != -1, "restore stage missing");
+    check(removeIdx != -1, "remove-artifacts stage missing");
+    check(upscaleIdx != -1, "upscale stage missing");
+    check(sharpenIdx != -1, "sharpen stage missing");
 
-    assert(restoreIdx < upscaleIdx);
-    assert(removeIdx < upscaleIdx);
-    assert(restoreIdx < sharpenIdx);
-    assert(removeIdx < sharpenIdx);
+    check(restoreIdx < upscaleIdx, "restore must come before upscale");
+    check(removeIdx < upscaleIdx, "remove-artifacts must come before upscale");
+    check(restoreIdx < sharpenIdx, "restore must come before sharpen");
+    check(removeIdx < sharpenIdx, "remove-artifacts must come before sharpen");
 }
 
 void testStableWithinCategory() {
@@ -59,10 +69,10 @@ void testStableWithinCategory() {
     const auto ordered = planner.plan(
         {stage(StageKind::RemoveArtifacts), stage(StageKind::Denoise), stage(StageKind::Deblur), stage(StageKind::Sharpen)});
 
-    assert(ordered.size() == 4);
-    assert(ordered[0].kind == StageKind::RemoveArtifacts);
-    assert(ordered[1].kind == StageKind::Denoise);
-    assert(ordered[2].kind == StageKind::Deblur);
+    check(ordered.size() == 4, "planner should preserve all stages");
+    check(ordered[0].kind == StageKind::RemoveArtifacts, "remove-artifacts order changed");
+    check(ordered[1].kind == StageKind::Denoise, "denoise order changed");
+    check(ordered[2].kind == StageKind::Deblur, "deblur order changed");
 }
 
 }  // namespace

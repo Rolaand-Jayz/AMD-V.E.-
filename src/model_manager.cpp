@@ -5,11 +5,14 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -17,9 +20,18 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__)
+#  include <sys/wait.h>
+#endif
 
 #ifdef AVE_HAVE_CURL
 #  include <curl/curl.h>
+#endif
+
+#include "ave/frame_io.hpp"
+
+#ifdef AVE_HAVE_MIGRAPHX
+#  include <migraphx/migraphx.hpp>
 #endif
 
 namespace ave {
@@ -28,6 +40,12 @@ namespace ave {
 // Helpers
 // ─────────────────────────────────────────────────────────────────
 namespace {
+
+// Small fixed-shape fallback used only for explicit "convert model" actions
+// where no real video dimensions are available yet. Runtime auto-compile still
+// waits for the actual input frame size before producing inference artifacts.
+constexpr int kDefaultBaselineCompileWidth = 192;
+constexpr int kDefaultBaselineCompileHeight = 192;
 
 std::string defaultModelsDir() {
     const char* home = std::getenv("HOME");
@@ -66,6 +84,32 @@ bool commandInPath(const std::string& cmd) {
     return false;
 }
 
+bool hasMxrExtension(const std::string& path) {
+    if (path.size() < 4) { return false; }
+    const std::string ext = path.substr(path.size() - 4);
+    return ext == ".mxr" || ext == ".MXR";
+}
+
+std::string shellQuote(const std::string& value) {
+    std::string out = "'";
+    for (char ch : value) {
+        if (ch == '\'') {
+            out += "'\\''";
+        } else {
+            out.push_back(ch);
+        }
+    }
+    out.push_back('\'');
+    return out;
+}
+
+std::string trimLine(std::string line) {
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.pop_back();
+    }
+    return line;
+}
+
 std::string statePrefix(ModelState state) {
     switch (state) {
         case ModelState::NotDownloaded: return "[Not Downloaded]";
@@ -73,12 +117,307 @@ std::string statePrefix(ModelState state) {
         case ModelState::Downloaded:    return "[Downloaded]";
         case ModelState::Converting:    return "[Converting…]";
         case ModelState::Converted:     return "[Compiled]";
-        case ModelState::Optimizing:    return "[Optimizing…]";
-        case ModelState::Optimized:     return "[Optimized]";
         case ModelState::Error:         return "[Error]";
     }
     return "";
 }
+
+bool isSupportedMiGraphXCompilePrecision(ModelPrecision precision) {
+    return precision == ModelPrecision::Fp32 ||
+           precision == ModelPrecision::Fp16 ||
+           precision == ModelPrecision::Int8;
+}
+
+bool isMiGraphXCompileTimeout(const std::string& error) {
+    return error.find("migraphx-driver timed out after") != std::string::npos;
+}
+
+bool shouldRetryFp32AfterTimeout(ModelPrecision requestedPrecision,
+                                 const std::string& error) {
+    return requestedPrecision == ModelPrecision::Fp16 &&
+           isMiGraphXCompileTimeout(error);
+}
+
+std::string compilePrecisionTag(ModelPrecision precision) {
+    switch (precision) {
+        case ModelPrecision::Fp32: return "fp32";
+        case ModelPrecision::Fp16: return "fp16";
+        case ModelPrecision::Int8: return "int8";
+    }
+    return "unknown";
+}
+
+std::string compiledArtifactStem(const std::string& modelId,
+                                 ModelPrecision precision,
+                                 std::optional<int> width = std::nullopt,
+                                 std::optional<int> height = std::nullopt) {
+    std::ostringstream stem;
+    stem << modelId;
+    if (width.has_value() && height.has_value()) {
+        stem << "_" << *width << "x" << *height;
+    }
+    if (precision != ModelPrecision::Fp32) {
+        stem << "_" << compilePrecisionTag(precision);
+    }
+    return stem.str();
+}
+
+std::filesystem::path compiledArtifactPath(const std::filesystem::path& dir,
+                                           const std::string& modelId,
+                                           ModelPrecision precision,
+                                           std::optional<int> width = std::nullopt,
+                                           std::optional<int> height = std::nullopt) {
+    return dir / (compiledArtifactStem(modelId, precision, width, height) + ".mxr");
+}
+
+int readPositiveIntEnv(const char* name, int defaultValue, int minimumValue, int maximumValue) {
+    int value = defaultValue;
+    if (const char* raw = std::getenv(name); raw != nullptr) {
+        try {
+            value = std::stoi(raw);
+        } catch (...) {
+            value = defaultValue;
+        }
+    }
+    value = std::max(value, minimumValue);
+    value = std::min(value, maximumValue);
+    return value;
+}
+
+int baselineCompileWidth() {
+    return readPositiveIntEnv("AVE_MIGRAPHX_BASELINE_WIDTH",
+                              kDefaultBaselineCompileWidth, 32, 4096);
+}
+
+int baselineCompileHeight() {
+    return readPositiveIntEnv("AVE_MIGRAPHX_BASELINE_HEIGHT",
+                              kDefaultBaselineCompileHeight, 32, 4096);
+}
+
+#ifdef AVE_HAVE_MIGRAPHX
+
+constexpr int kDefaultInt8CalibrationFrames = 8;
+
+struct CalibrationSample {
+    std::vector<migraphx::argument> args;
+    migraphx::program_parameters params;
+};
+
+bool extractCalibrationFramesRgb24(const std::string& videoPath,
+                                   int width,
+                                   int height,
+                                   int requestedFrames,
+                                   std::vector<std::vector<std::uint8_t>>& frames,
+                                   std::string& error) {
+    if (!commandInPath("ffmpeg")) {
+        error = "ffmpeg is required to extract calibration frames for int8 compilation.";
+        return false;
+    }
+    if (requestedFrames <= 0) {
+        error = "Requested calibration frame count must be positive.";
+        return false;
+    }
+
+    const std::size_t frameBytes =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u;
+    const std::string scaleArg =
+        "scale=" + std::to_string(width) + ":" + std::to_string(height) + ":flags=bicubic";
+    const std::string cmd =
+        "ffmpeg -hide_banner -loglevel error -i " + shellQuote(videoPath) +
+        " -vf " + shellQuote(scaleArg) +
+        " -frames:v " + std::to_string(requestedFrames) +
+        " -f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null";
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe == nullptr) {
+        error = "Failed to start ffmpeg while extracting int8 calibration frames.";
+        return false;
+    }
+
+    frames.clear();
+    std::vector<std::uint8_t> buffer(frameBytes);
+    while (static_cast<int>(frames.size()) < requestedFrames) {
+        std::size_t totalRead = 0u;
+        while (totalRead < frameBytes) {
+            const std::size_t n = std::fread(buffer.data() + totalRead, 1u,
+                                             frameBytes - totalRead, pipe);
+            if (n == 0u) {
+                break;
+            }
+            totalRead += n;
+        }
+        if (totalRead != frameBytes) {
+            break;
+        }
+        frames.push_back(buffer);
+    }
+
+    const int rc = pclose(pipe);
+    if (rc != 0 && frames.empty()) {
+        error = "ffmpeg failed while extracting int8 calibration frames from: " + videoPath;
+        return false;
+    }
+    if (frames.empty()) {
+        error = "No calibration frames could be extracted from: " + videoPath;
+        return false;
+    }
+    return true;
+}
+
+bool shapeLooksLikeImageTensor(const migraphx::shape& shape, int width, int height) {
+    const auto dims = shape.lengths();
+    if (dims.size() == 4u) {
+        if (dims[0] != 1u) {
+            return false;
+        }
+        if (dims[1] <= 4u) {
+            return (dims[1] == 3u || dims[1] == 1u) &&
+                   dims[2] == static_cast<std::size_t>(height) &&
+                   dims[3] == static_cast<std::size_t>(width);
+        }
+        if (dims[3] <= 4u) {
+            return (dims[3] == 3u || dims[3] == 1u) &&
+                   dims[1] == static_cast<std::size_t>(height) &&
+                   dims[2] == static_cast<std::size_t>(width);
+        }
+        return false;
+    }
+    if (dims.size() == 3u) {
+        if (dims[0] <= 4u) {
+            return (dims[0] == 3u || dims[0] == 1u) &&
+                   dims[1] == static_cast<std::size_t>(height) &&
+                   dims[2] == static_cast<std::size_t>(width);
+        }
+        if (dims[2] <= 4u) {
+            return (dims[2] == 3u || dims[2] == 1u) &&
+                   dims[0] == static_cast<std::size_t>(height) &&
+                   dims[1] == static_cast<std::size_t>(width);
+        }
+    }
+    return false;
+}
+
+bool fillCalibrationArgument(const std::vector<std::uint8_t>& rgbFrame,
+                             int width,
+                             int height,
+                             const migraphx::shape& shape,
+                             migraphx::argument& arg,
+                             std::string& error) {
+    if (shape.type() == migraphx_shape_float_type) {
+        std::vector<float> tensor;
+        frame_io::rgb24ToNchwFp32(rgbFrame.data(), width, height, tensor);
+        const std::size_t bytes = tensor.size() * sizeof(float);
+        if (bytes != shape.bytes()) {
+            error = "Calibration tensor byte size mismatch for fp32 input.";
+            return false;
+        }
+        std::memcpy(arg.data(), tensor.data(), bytes);
+        return true;
+    }
+
+    if (shape.type() == migraphx_shape_half_type) {
+        std::vector<std::uint16_t> tensor;
+        frame_io::rgb24ToNchwFp16(rgbFrame.data(), width, height, tensor);
+        const std::size_t bytes = tensor.size() * sizeof(std::uint16_t);
+        if (bytes != shape.bytes()) {
+            error = "Calibration tensor byte size mismatch for fp16 input.";
+            return false;
+        }
+        std::memcpy(arg.data(), tensor.data(), bytes);
+        return true;
+    }
+
+    error = "Unsupported MiGraphX input dtype for int8 calibration: "
+          + std::to_string(static_cast<int>(shape.type()));
+    return false;
+}
+
+bool buildInt8CalibrationData(const migraphx::program& prog,
+                              const std::string& calibrationVideoPath,
+                              int width,
+                              int height,
+                              std::vector<CalibrationSample>& samples,
+                              std::string& error) {
+    const int requestedFrames = readPositiveIntEnv(
+        "AVE_MIGRAPHX_INT8_CALIBRATION_FRAMES", kDefaultInt8CalibrationFrames, 1, 64);
+
+    std::vector<std::vector<std::uint8_t>> rgbFrames;
+    if (!extractCalibrationFramesRgb24(calibrationVideoPath, width, height, requestedFrames,
+                                       rgbFrames, error)) {
+        return false;
+    }
+
+    const auto paramShapes = prog.get_parameter_shapes();
+    std::string primaryInputName;
+    for (const char* rawName : paramShapes.names()) {
+        if (rawName == nullptr) {
+            continue;
+        }
+        const std::string name(rawName);
+        if (name.empty() || name.find("#output") != std::string::npos) {
+            continue;
+        }
+        if (shapeLooksLikeImageTensor(paramShapes[name.c_str()], width, height)) {
+            primaryInputName = name;
+            break;
+        }
+    }
+
+    if (primaryInputName.empty()) {
+        for (const char* rawName : paramShapes.names()) {
+            if (rawName == nullptr) {
+                continue;
+            }
+            const std::string name(rawName);
+            if (!name.empty() && name.find("#output") == std::string::npos) {
+                primaryInputName = name;
+                break;
+            }
+        }
+    }
+
+    if (primaryInputName.empty()) {
+        error = "MiGraphX int8 calibration could not find a usable input tensor.";
+        return false;
+    }
+
+    samples.clear();
+    samples.reserve(rgbFrames.size());
+    for (const auto& frame : rgbFrames) {
+        CalibrationSample sample;
+        sample.args.reserve(paramShapes.size());
+
+        for (const char* rawName : paramShapes.names()) {
+            if (rawName == nullptr) {
+                continue;
+            }
+            const std::string name(rawName);
+            if (name.empty() || name.find("#output") != std::string::npos) {
+                continue;
+            }
+
+            const auto shape = paramShapes[name.c_str()];
+            sample.args.emplace_back(shape);
+            auto& arg = sample.args.back();
+
+            if (name == primaryInputName) {
+                if (!fillCalibrationArgument(frame, width, height, shape, arg, error)) {
+                    return false;
+                }
+            } else {
+                std::memset(arg.data(), 0, shape.bytes());
+            }
+
+            sample.params.add(name.c_str(), arg);
+        }
+
+        samples.push_back(std::move(sample));
+    }
+
+    return !samples.empty();
+}
+
+#endif  // AVE_HAVE_MIGRAPHX
 
 // ─── CURL download helper ─────────────────────────────────────────
 #ifdef AVE_HAVE_CURL
@@ -142,6 +481,11 @@ bool curlDownload(const std::string& url, const std::filesystem::path& destPath,
     curl_easy_setopt(curl, CURLOPT_USERAGENT,        "AMD Video Enhancer/1.0");
 
     const CURLcode res = curl_easy_perform(curl);
+
+    // ── Check HTTP status code before cleaning up ──────────────
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
     curl_easy_cleanup(curl);
     outFile.close();
 
@@ -157,6 +501,28 @@ bool curlDownload(const std::string& url, const std::filesystem::path& destPath,
         std::filesystem::remove(destPath, ec);
         error = std::string("libcurl error: ") + curl_easy_strerror(res);
         return false;
+    }
+
+    // ── Validate HTTP response code ────────────────────────────
+    if (httpCode != 200) {
+        std::error_code ec;
+        std::filesystem::remove(destPath, ec);
+        error = "HTTP error " + std::to_string(httpCode) +
+                " while downloading " + url;
+        return false;
+    }
+
+    // ── Validate downloaded file size (models are always > 1 KB) ─
+    {
+        std::error_code ec;
+        const auto fileSize = std::filesystem::file_size(destPath, ec);
+        if (ec || fileSize < 1024) {
+            std::filesystem::remove(destPath, ec);
+            error = "Downloaded file is too small (" +
+                    std::to_string(ec ? 0 : fileSize) +
+                    " bytes); the URL may be invalid: " + url;
+            return false;
+        }
     }
 
     return true;
@@ -273,142 +639,422 @@ std::vector<std::string> scanOnnxQuantizedOps(
     return found;
 }
 
-// ─── MiGraphX compilation ─────────────────────────────────────────
-// Uses the migraphx-driver command-line tool if present.
-// The driver is shipped with ROCm and provides:
-//   migraphx-driver compile --onnx <in.onnx> --output <out.mxr>
-//   migraphx-driver compile --onnx <in.onnx> --gpu --output <out.mxr>
-//
-// PROGRESS NOTE: migraphx-driver emits no incremental progress to stdout/stderr,
-// so we run the compile in a dedicated thread and send a heartbeat tick every
-// 4 seconds, crawling progress from 5 % → 90 %.  The final 100 % is sent only
-// after the process exits successfully.
-bool migraphxCompile(const std::filesystem::path& onnxPath,
-                     const std::filesystem::path& mxrPath,
-                     bool gpuTune,
-                     ModelPrecision precision,
-                     const ModelProgressCb& progressCb,
-                     const std::string& modelId,
-                     std::string& error) {
-    if (!commandInPath("migraphx-driver")) {
-        error = "migraphx-driver not found in PATH.  ROCm must be installed.";
+void appendDriverDimParamFallback(std::ostringstream& cmd,
+                                  int compileWidth,
+                                  int compileHeight) {
+    cmd << " --batch 1"
+        << " --dim-param @batch_size 1"
+        << " --dim-param @b 1"
+        << " --dim-param @n 1"
+        << " --dim-param @width " << compileWidth
+        << " --dim-param @w " << compileWidth
+        << " --dim-param @x " << compileWidth
+        << " --dim-param @cols " << compileWidth
+        << " --dim-param @height " << compileHeight
+        << " --dim-param @h " << compileHeight
+        << " --dim-param @y " << compileHeight
+        << " --dim-param @rows " << compileHeight;
+
+    if (compileWidth == compileHeight) {
+        const std::string fixedDynDim =
+            "{min:" + std::to_string(compileWidth) +
+            ", max:" + std::to_string(compileWidth) +
+            ", optimals:[" + std::to_string(compileWidth) + "]}";
+        cmd << " --default-dyn-dim " << shellQuote(fixedDynDim);
+    }
+}
+
+#ifdef AVE_HAVE_MIGRAPHX
+bool appendDriverInputDims(std::ostringstream& cmd,
+                           const std::filesystem::path& onnxPath,
+                           int compileWidth,
+                           int compileHeight,
+                           std::string& error) {
+    migraphx::onnx_options probeOpts;
+    probeOpts.set_default_dim_value(1);
+
+    migraphx::program prog;
+    try {
+        prog = migraphx::parse_onnx(onnxPath.string().c_str(), probeOpts);
+    } catch (const std::exception& ex) {
+        error = std::string("MiGraphX could not inspect ONNX inputs for ")
+              + onnxPath.string() + ": " + ex.what();
         return false;
     }
 
-    // ── Pre-flight: quantized-op scan ────────────────────────────
-    // Run before spawning migraphx-driver to avoid the SIGABRT (exit 134)
-    // that the driver emits when it encounters quantized ops it cannot lower.
-    {
-        const auto quantOps = scanOnnxQuantizedOps(onnxPath);
-        if (!quantOps.empty()) {
-            std::ostringstream msg;
-            msg << "Model contains quantized operators not supported by MiGraphX: ";
-            for (std::size_t i = 0; i < quantOps.size(); ++i) {
-                if (i > 0) { msg << ", "; }
-                msg << quantOps[i];
+    const auto paramShapes = prog.get_parameter_shapes();
+    const auto w = static_cast<std::size_t>(compileWidth);
+    const auto h = static_cast<std::size_t>(compileHeight);
+    bool appendedAny = false;
+
+    for (const char* rawName : paramShapes.names()) {
+        if (rawName == nullptr) { continue; }
+        const std::string name(rawName);
+        if (name.empty() || name.find("#output") != std::string::npos) { continue; }
+
+        auto dims = paramShapes[name.c_str()].lengths();
+        if (dims.empty()) { continue; }
+
+        if (dims.size() == 4) {
+            dims[0] = 1;
+            if (dims[1] <= 4) {
+                dims[2] = h;
+                dims[3] = w;
+            } else if (dims[3] <= 4) {
+                dims[1] = h;
+                dims[2] = w;
+            } else {
+                dims[2] = h;
+                dims[3] = w;
             }
-            msg << ".\n"
-                << "Action: re-export the ONNX model in fp32 or fp16 precision "
-                << "(remove QLinear/quantize ops) before compiling with MiGraphX.";
-            error = msg.str();
+        } else if (dims.size() == 3) {
+            if (dims[0] <= 4) {
+                dims[1] = h;
+                dims[2] = w;
+            } else if (dims[2] <= 4) {
+                dims[0] = h;
+                dims[1] = w;
+            } else {
+                dims[1] = h;
+                dims[2] = w;
+            }
+        } else {
+            continue;
+        }
+
+        cmd << " --input-dim " << shellQuote("@" + name);
+        for (const auto dim : dims) {
+            cmd << ' ' << dim;
+        }
+        appendedAny = true;
+    }
+
+    if (!appendedAny) {
+        error = "MiGraphX found no usable input tensors in " + onnxPath.string();
+        return false;
+    }
+
+    return true;
+}
+
+bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
+                                const std::filesystem::path& mxrPath,
+                                int compileWidth,
+                                int compileHeight,
+                                ModelPrecision compilePrecision,
+                                std::optional<std::string> calibrationVideoPath,
+                                const ModelProgressCb& progressCb,
+                                const std::string& modelId,
+                                std::string& error) {
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
+#endif
+    try {
+        if (compilePrecision == ModelPrecision::Fp16) {
+            error = "MiGraphX C++ runtime fallback only supports fp32 artifacts; "
+                    "install migraphx-driver to compile " + compilePrecisionTag(compilePrecision) + " artifacts.";
             if (progressCb) {
                 progressCb(modelId, 0.0f,
-                    "Unsupported: quantized model (" + quantOps[0] + " …)");
+                    "Compilation failed: " + compilePrecisionTag(compilePrecision)
+                    + " requires migraphx-driver");
             }
             return false;
         }
+        if (compilePrecision == ModelPrecision::Int8 &&
+            (!calibrationVideoPath.has_value() || calibrationVideoPath->empty())) {
+            error = "MiGraphX int8 compilation requires a calibration video path.";
+            if (progressCb) {
+                progressCb(modelId, 0.0f, "Compilation failed: int8 requires calibration video");
+            }
+            return false;
+        }
+
+        const std::string onnxStr = onnxPath.string();
+        const std::string mxrStr = mxrPath.string();
+
+        if (progressCb) { progressCb(modelId, 0.02f, "Reading ONNX model…"); }
+        migraphx::onnx_options firstOpts;
+        firstOpts.set_default_dim_value(1);
+        auto prog = migraphx::parse_onnx(onnxStr.c_str(), firstOpts);
+
+        if (progressCb) {
+            progressCb(modelId, 0.05f,
+                "Setting input dimensions ("
+                + std::to_string(compileWidth) + "x"
+                + std::to_string(compileHeight) + ")…");
+        }
+
+        migraphx::onnx_options finalOpts;
+        finalOpts.set_default_dim_value(1);
+        const auto paramShapes = prog.get_parameter_shapes();
+        const auto w = static_cast<std::size_t>(compileWidth);
+        const auto h = static_cast<std::size_t>(compileHeight);
+
+        for (const char* rawName : paramShapes.names()) {
+            if (rawName == nullptr) { continue; }
+            const std::string nm(rawName);
+            if (nm.empty() || nm.find("#output") != std::string::npos) { continue; }
+            auto dims = paramShapes[nm.c_str()].lengths();
+            if (dims.empty()) { continue; }
+
+            if (dims.size() == 4) {
+                dims[0] = 1;
+                if (dims[1] <= 4) {
+                    dims[2] = h;
+                    dims[3] = w;
+                } else if (dims[3] <= 4) {
+                    dims[1] = h;
+                    dims[2] = w;
+                } else {
+                    dims[2] = h;
+                    dims[3] = w;
+                }
+                finalOpts.set_input_parameter_shape(nm.c_str(), dims);
+            } else if (dims.size() == 3) {
+                if (dims[0] <= 4) {
+                    dims[1] = h;
+                    dims[2] = w;
+                } else if (dims[2] <= 4) {
+                    dims[0] = h;
+                    dims[1] = w;
+                } else {
+                    dims[1] = h;
+                    dims[2] = w;
+                }
+                finalOpts.set_input_parameter_shape(nm.c_str(), dims);
+            }
+        }
+
+        prog = migraphx::parse_onnx(onnxStr.c_str(), finalOpts);
+
+        if (compilePrecision == ModelPrecision::Int8) {
+            if (progressCb) {
+                progressCb(modelId, 0.25f, "Extracting calibration frames for int8…");
+            }
+            std::vector<CalibrationSample> calibrationSamples;
+            if (!buildInt8CalibrationData(prog, *calibrationVideoPath,
+                                          compileWidth, compileHeight,
+                                          calibrationSamples, error)) {
+                if (progressCb) {
+                    progressCb(modelId, 0.0f, "Compilation failed: int8 calibration setup");
+                }
+                return false;
+            }
+
+            if (progressCb) {
+                progressCb(modelId, 0.40f,
+                    "Quantizing to int8 with "
+                    + std::to_string(calibrationSamples.size()) + " calibration frame(s)…");
+            }
+
+            migraphx::quantize_int8_options int8Options;
+            int8Options.add_op_name("dot");
+            int8Options.add_op_name("convolution");
+            for (const auto& sample : calibrationSamples) {
+                int8Options.add_calibration_data(sample.params);
+            }
+            migraphx::quantize_int8(prog, migraphx::target("gpu"), int8Options);
+        }
+
+        if (progressCb) {
+            progressCb(modelId, -1.0f, "Compiling with MiGraphX C++ runtime…");
+        }
+        migraphx::compile_options copts;
+        copts.set_offload_copy(true);
+        prog.compile(migraphx::target("gpu"), copts);
+
+        if (progressCb) { progressCb(modelId, 0.95f, "Saving compiled model…"); }
+        migraphx::save(prog, mxrStr.c_str());
+
+        if (!fileExists(mxrPath)) {
+            error = "Compilation succeeded but output file not found: " + mxrStr;
+            return false;
+        }
+
+        if (progressCb) { progressCb(modelId, 1.0f, "Compilation complete."); }
+        return true;
+    } catch (const std::exception& ex) {
+        error = std::string("MiGraphX compilation failed: ") + ex.what();
+        if (progressCb) { progressCb(modelId, 0.0f, "Compilation failed"); }
+        return false;
     }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+}
+#endif
+
+bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
+                               const std::filesystem::path& mxrPath,
+                               int compileWidth,
+                               int compileHeight,
+                               ModelPrecision compilePrecision,
+                               const ModelProgressCb& progressCb,
+                               const std::string& modelId,
+                               std::string& error) {
+    if (!commandInPath("migraphx-driver")) {
+        error = "migraphx-driver not found in PATH. ROCm must be installed.";
+        return false;
+    }
+
+    if (!isSupportedMiGraphXCompilePrecision(compilePrecision)) {
+        error = "MiGraphX compile precision '" + compilePrecisionTag(compilePrecision)
+              + "' is not supported by this app yet.";
+        return false;
+    }
+    if (compilePrecision == ModelPrecision::Int8) {
+        error = "MiGraphX int8 compilation uses the C++ runtime path because calibration data "
+                "must be supplied explicitly.";
+        return false;
+    }
+
+    if (progressCb) { progressCb(modelId, 0.02f, "Inspecting ONNX input tensors…"); }
 
     std::ostringstream cmd;
     cmd << "migraphx-driver compile"
-        << " --onnx " << onnxPath.string()
-        << " --output " << mxrPath.string();
-    if (gpuTune)                          { cmd << " --gpu"; }
-    if (precision == ModelPrecision::Fp16) { cmd << " --fp16"; }
-    if (precision == ModelPrecision::Int8) { cmd << " --int8"; }
+        << " --onnx " << shellQuote(onnxPath.string())
+        << " --gpu"
+        << " --enable-offload-copy"
+        << " --output " << shellQuote(mxrPath.string());
+    if (compilePrecision == ModelPrecision::Fp16) {
+        cmd << " --fp16";
+    }
 
-    // For gold-standard interop, we do NOT want offload-copy.
-    // We want MiGraphX to expect GPU pointers so we can pass
-    // Vulkan-imported HIP pointers directly.
-    // cmd << " --enable-offload-copy";
+    std::string inputProbeError;
+    bool usedDimParamFallback = false;
+#ifdef AVE_HAVE_MIGRAPHX
+    if (!appendDriverInputDims(cmd, onnxPath, compileWidth, compileHeight, inputProbeError)) {
+        appendDriverDimParamFallback(cmd, compileWidth, compileHeight);
+        usedDimParamFallback = true;
+    }
+#else
+    appendDriverDimParamFallback(cmd, compileWidth, compileHeight);
+    usedDimParamFallback = true;
+#endif
 
-    // ── Symbolic dimension defaults ──────────────────────────────
-    // ONNX models typically declare spatial dimensions as symbolic
-    // (e.g. "batch_size", "width", "height", "h", "w").  MiGraphX
-    // defaults them to 1 which produces a compiled program that can
-    // only process 1×1 tiles.  We force sensible defaults here.
-    // Extra dim-params for names that don't exist in the graph are
-    // silently ignored by migraphx-driver.
-    constexpr int kDefaultTileSize = 256;
-    cmd << " --dim-param @batch_size 1"
-        << " --dim-param @width "  << kDefaultTileSize
-        << " --dim-param @height " << kDefaultTileSize
-        << " --dim-param @w "      << kDefaultTileSize
-        << " --dim-param @h "      << kDefaultTileSize;
+    const char* timeoutEnv = std::getenv("AVE_MIGRAPHX_COMPILE_TIMEOUT_SEC");
+    int timeoutSeconds = 45 * 60;
+    if (timeoutEnv != nullptr) {
+        try {
+            timeoutSeconds = std::stoi(timeoutEnv);
+        } catch (...) {
+            timeoutSeconds = 45 * 60;
+        }
+    }
+    if (timeoutSeconds < 60) { timeoutSeconds = 60; }
 
-    const std::string cmdStr = cmd.str();
+    const bool timeoutAvailable = commandInPath("timeout");
+    std::ostringstream wrappedCmd;
+    if (timeoutAvailable) {
+        wrappedCmd << "timeout --foreground " << timeoutSeconds << "s " << cmd.str();
+    } else {
+        wrappedCmd << cmd.str();
+    }
+    const std::string cmdStr = wrappedCmd.str() + " 2>&1";
 
-    // Shared state between compile thread and heartbeat ticker.
-    std::atomic<bool>  compileDone{false};
-    std::atomic<int>   compileExit{-1};
+    if (progressCb && usedDimParamFallback) {
+        progressCb(modelId, 0.03f,
+            "ONNX input inspection failed; using symbolic dimension fallback…");
+    }
+    if (progressCb) { progressCb(modelId, 0.05f, "Launching migraphx-driver…"); }
 
-    if (progressCb) { progressCb(modelId, 0.05f, "Compiling with MiGraphX…"); }
+    std::atomic<bool> compileDone{false};
+    std::atomic<int> compileExit{-1};
+    std::string lastOutputLine;
+    std::string capturedOutput;
+    std::mutex outputMtx;
 
-    // Spawn compile work in a thread so this function can tick progress.
     std::thread compileThread([&]() {
-        compileExit.store(std::system(cmdStr.c_str()));
+        FILE* pipe = popen(cmdStr.c_str(), "r");
+        if (pipe == nullptr) {
+            compileExit.store(-1);
+            compileDone.store(true);
+            return;
+        }
+        char buf[512];
+        while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+            const std::string line = trimLine(std::string(buf));
+            if (line.empty()) { continue; }
+            std::lock_guard<std::mutex> lk(outputMtx);
+            lastOutputLine = line;
+            if (capturedOutput.size() < 16384) {
+                capturedOutput.append(line);
+                capturedOutput.push_back('\n');
+            }
+        }
+        compileExit.store(pclose(pipe));
         compileDone.store(true);
     });
 
-    // Heartbeat: crawl from 5 % to 90 % while the driver runs.
-    // Each tick is ~4 seconds; 3 % per tick reaches 90 % after ~28 ticks (~112 s).
-    // Large models can take much longer, so we clamp at 90 % and wait.
-    {
-        constexpr auto kTickInterval = std::chrono::seconds(4);
-        constexpr float kTickStep    = 0.03f;  // +3 % per tick
-        constexpr float kMaxProgress = 0.90f;
-        float progress = 0.05f;
-
-        while (!compileDone.load()) {
-            std::this_thread::sleep_for(kTickInterval);
-            if (compileDone.load()) { break; }
-            progress = std::min(progress + kTickStep, kMaxProgress);
-            if (progressCb) {
-                progressCb(modelId, progress, "Compiling with MiGraphX… (this can take several minutes)");
+    int elapsedSec = 0;
+    while (!compileDone.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (compileDone.load()) { break; }
+        elapsedSec += 2;
+        if (progressCb) {
+            std::string line;
+            {
+                std::lock_guard<std::mutex> lk(outputMtx);
+                line = lastOutputLine;
             }
+            const int mins = elapsedSec / 60;
+            const int secs = elapsedSec % 60;
+            std::ostringstream status;
+            status << "migraphx-driver compiling… "
+                   << mins << "m " << secs << "s elapsed";
+            if (!line.empty()) { status << " — " << line; }
+            progressCb(modelId, -1.0f, status.str());
         }
     }
-
     compileThread.join();
 
-    const int rc = compileExit.load();
-    if (rc != 0) {
+    const int rawRc = compileExit.load();
+    int exitCode = rawRc;
+    int signalNum = 0;
+#if defined(__unix__) || defined(__APPLE__)
+    if (WIFEXITED(rawRc)) {
+        exitCode = WEXITSTATUS(rawRc);
+    } else if (WIFSIGNALED(rawRc)) {
+        signalNum = WTERMSIG(rawRc);
+        exitCode = 128 + signalNum;
+    }
+#endif
+
+    if (exitCode != 0) {
         std::ostringstream msg;
-        // WIFEXITED / WEXITSTATUS semantics: std::system() returns the raw
-        // wait-status on POSIX.  Signals appear as 128 + signum.
-        if (rc > 128) {
-            const int sig = rc - 128;
-            msg << "migraphx-driver killed by signal " << sig;
-            if (sig == 6) {
-                msg << " (SIGABRT).  This usually means MiGraphX encountered "
-                    << "an operator it cannot lower.  "
-                    << "Common causes: quantized operators (QLinearConv, "
-                    << "QuantizeLinear, …), opset > " << 19
-                    << ", or an internal MiGraphX assertion failure.\n"
-                    << "The quantized-op pre-flight scan did not catch this model — "
-                    << "please report the model name so the scanner can be updated.";
-            } else if (sig == 11) {
-                msg << " (SIGSEGV – internal MiGraphX crash).";
+        if (signalNum > 0) {
+            msg << "migraphx-driver killed by signal " << signalNum;
+            if (signalNum == 6) {
+                msg << " (SIGABRT). This usually means MiGraphX hit an unsupported operator or internal assertion.";
+            } else if (signalNum == 11) {
+                msg << " (SIGSEGV).";
             } else {
-                msg << ".";
+                msg << '.';
             }
+        } else if (timeoutAvailable && exitCode == 124) {
+            msg << "migraphx-driver timed out after " << timeoutSeconds
+                << " seconds. Set AVE_MIGRAPHX_COMPILE_TIMEOUT_SEC to a larger value if this model really needs longer.";
+        } else if (rawRc == -1) {
+            msg << "Failed to launch migraphx-driver.";
         } else {
-            msg << "migraphx-driver exited with code " << rc << ".";
+            msg << "migraphx-driver exited with code " << exitCode << '.';
+        }
+        std::string driverOutput;
+        {
+            std::lock_guard<std::mutex> lk(outputMtx);
+            driverOutput = capturedOutput.empty() ? lastOutputLine : capturedOutput;
+        }
+        if (!inputProbeError.empty()) {
+            msg << "\nInput inspection note:\n" << inputProbeError;
+        }
+        if (!driverOutput.empty()) {
+            msg << "\nDriver output:\n" << driverOutput;
         }
         error = msg.str();
         if (progressCb) {
             progressCb(modelId, 0.0f,
-                "Compilation failed (exit " + std::to_string(rc) + ")");
+                "Compilation failed (exit " + std::to_string(exitCode) + ")");
         }
         return false;
     }
@@ -421,6 +1067,68 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
 
     if (progressCb) { progressCb(modelId, 1.0f, "Compilation complete."); }
     return true;
+}
+
+// ─── MiGraphX compilation ─────────────────────────────────────────
+// Uses the migraphx-driver command-line tool if present.
+// The driver is shipped with ROCm and provides:
+//   migraphx-driver compile --onnx <in.onnx> --output <out.mxr>
+bool migraphxCompile(const std::filesystem::path& onnxPath,
+                     const std::filesystem::path& mxrPath,
+                     int compileWidth,
+                     int compileHeight,
+                     ModelPrecision compilePrecision,
+                     std::optional<std::string> calibrationVideoPath,
+                     const ModelProgressCb& progressCb,
+                     const std::string& modelId,
+                     std::string& error) {
+    // ── Pre-flight: quantized-op scan ────────────────────────────
+    // Run before compilation to detect quantized ops MiGraphX cannot lower.
+    {
+        const auto quantOps = scanOnnxQuantizedOps(onnxPath);
+        if (!quantOps.empty()) {
+            std::ostringstream msg;
+            msg << "Model contains quantized operators not supported by MiGraphX: ";
+            for (std::size_t i = 0; i < quantOps.size(); ++i) {
+                if (i > 0) { msg << ", "; }
+                msg << quantOps[i];
+            }
+            msg << ".\n"
+                << "Action: use a non-quantized ONNX export before compiling with MiGraphX.";
+            error = msg.str();
+            if (progressCb) {
+                progressCb(modelId, 0.0f,
+                    "Unsupported: quantized model (" + quantOps[0] + " …)");
+            }
+            return false;
+        }
+    }
+
+    if (compileWithMigraphxDriver(onnxPath, mxrPath, compileWidth, compileHeight,
+                                  compilePrecision,
+                                  progressCb, modelId, error)) {
+        return true;
+    }
+
+#ifdef AVE_HAVE_MIGRAPHX
+    const bool needsLibraryCompile =
+        compilePrecision == ModelPrecision::Int8 ||
+        error.find("migraphx-driver not found in PATH") != std::string::npos;
+    if (!needsLibraryCompile) {
+        return false;
+    }
+
+    if (progressCb && compilePrecision != ModelPrecision::Int8) {
+        progressCb(modelId, 0.02f,
+            "migraphx-driver not found; falling back to MiGraphX C++ runtime…");
+    }
+    return compileWithMigraphxLibrary(
+        onnxPath, mxrPath, compileWidth, compileHeight, compilePrecision,
+        calibrationVideoPath,
+        progressCb, modelId, error);
+#else
+    return false;
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -502,8 +1210,6 @@ std::string toString(ModelState state) {
         case ModelState::Downloaded:    return "downloaded";
         case ModelState::Converting:    return "converting";
         case ModelState::Converted:     return "converted";
-        case ModelState::Optimizing:    return "optimizing";
-        case ModelState::Optimized:     return "optimized";
         case ModelState::Error:         return "error";
     }
     return "unknown";
@@ -532,7 +1238,6 @@ struct ModelManager::Impl {
 
     std::filesystem::path downloadedDir()  const { return std::filesystem::path(modelsDir) / "downloaded"; }
     std::filesystem::path convertedDir()   const { return std::filesystem::path(modelsDir) / "migraphx"; }
-    std::filesystem::path optimizedDir()   const { return std::filesystem::path(modelsDir) / "optimized"; }
 
     void scanAndUpdate(ManagedModel& m) {
         const std::string& id = m.entry.id;
@@ -551,26 +1256,31 @@ struct ModelManager::Impl {
 
         // Compiled .mxr (regular)
         {
-            const auto p = convertedDir() / (id + ".mxr");
-            m.convertedPath = fileExists(p) ? p.string() : "";
-        }
-
-        // GPU-tuned .mxr
-        {
-            const auto p = optimizedDir() / (id + "_tuned.mxr");
-            m.optimizedPath = fileExists(p) ? p.string() : "";
+            m.convertedPath.clear();
+            const std::array<ModelPrecision, 3> preferredPrecisions = {
+                ModelPrecision::Fp16,
+                ModelPrecision::Int8,
+                ModelPrecision::Fp32,
+            };
+            for (const auto precision : preferredPrecisions) {
+                const auto p = compiledArtifactPath(convertedDir(), id, precision);
+                if (fileExists(p)) {
+                    m.convertedPath = p.string();
+                    break;
+                }
+            }
         }
 
         // Derive state (do not overwrite transient states like Downloading)
         if (m.state == ModelState::Downloading ||
-            m.state == ModelState::Converting  ||
-            m.state == ModelState::Optimizing) {
+            m.state == ModelState::Converting) {
             return;
         }
 
-        if (!m.optimizedPath.empty()) {
-            m.state = ModelState::Optimized;
-        } else if (!m.convertedPath.empty()) {
+        if (!m.convertedPath.empty()) {
+            m.state = ModelState::Converted;
+        } else if (!m.downloadedPath.empty() && hasMxrExtension(m.downloadedPath)) {
+            // Downloaded .mxr models are inference-ready without a separate convert step.
             m.state = ModelState::Converted;
         } else if (!m.downloadedPath.empty()) {
             m.state = ModelState::Downloaded;
@@ -591,7 +1301,6 @@ ModelManager::ModelManager() : impl_(std::make_shared<Impl>()) {
     impl_->modelsDir = defaultModelsDir();
     ensureDir(impl_->downloadedDir());
     ensureDir(impl_->convertedDir());
-    ensureDir(impl_->optimizedDir());
 
     for (const auto& entry : builtinModelCatalog()) {
         ManagedModel m;
@@ -609,7 +1318,6 @@ void ModelManager::setModelsDirectory(const std::string& dir) {
     impl_->modelsDir = dir;
     ensureDir(impl_->downloadedDir());
     ensureDir(impl_->convertedDir());
-    ensureDir(impl_->optimizedDir());
 }
 
 std::string ModelManager::modelsDirectory() const {
@@ -665,7 +1373,6 @@ std::optional<std::string> ModelManager::bestPathForModel(const std::string& mod
     auto it = impl_->records.find(modelId);
     if (it == impl_->records.end()) { return std::nullopt; }
     const auto& m = it->second;
-    if (!m.optimizedPath.empty())  return m.optimizedPath;
     if (!m.convertedPath.empty())  return m.convertedPath;
     if (!m.downloadedPath.empty()) return m.downloadedPath;
     return std::nullopt;
@@ -688,8 +1395,7 @@ bool ModelManager::startDownload(const std::string& modelId,
             return false;
         }
         if (m.state == ModelState::Downloaded ||
-            m.state == ModelState::Converted  ||
-            m.state == ModelState::Optimized) {
+            m.state == ModelState::Converted) {
             error = "Model already available at: " + m.downloadedPath;
             return false;
         }
@@ -758,6 +1464,9 @@ bool ModelManager::startDownload(const std::string& modelId,
             std::lock_guard<std::mutex> lock(implPtr->mtx);
             auto& m = implPtr->records[modelId];
             if (ok) {
+                // Clear the transient Downloading state before scanning so
+                // scanAndUpdate() can derive the correct final state.
+                m.state = ModelState::NotDownloaded;
                 implPtr->scanAndUpdate(m);
             } else {
                 m.state        = ModelState::Error;
@@ -787,7 +1496,19 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
                                       const ModelProgressCb& progressCb,
                                       const ModelStateCb&    stateCb,
                                       std::string&           error,
-                                      std::optional<ModelPrecision> precisionOverride) {
+                                      ModelPrecision         compilePrecision) {
+    if (!isSupportedMiGraphXCompilePrecision(compilePrecision)) {
+        error = "MiGraphX compilation currently supports fp32, fp16, and int8 artifacts; requested "
+              + compilePrecisionTag(compilePrecision) + ".";
+        return false;
+    }
+    if (compilePrecision == ModelPrecision::Int8) {
+        error = "Generic MiGraphX int8 conversion is not supported because int8 compilation "
+                "requires calibration frames from a real input video. "
+                "Use runtime auto-compile with AVE_MIGRAPHX_PRECISION=int8 instead.";
+        return false;
+    }
+
     std::string modelPath;
     ModelFormat sourceFormat = ModelFormat::Onnx;
     {
@@ -838,26 +1559,48 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
         onnxPath = tempOnnxPath.string();
     }
 
-    // Precision: caller override → entry catalog value.
-    // (Global setting applied by caller before passing precisionOverride.)
-    ModelPrecision precision = ModelPrecision::Fp32;
-    {
-        std::lock_guard<std::mutex> lock(impl_->mtx);
-        const auto it2 = impl_->records.find(modelId);
-        if (it2 != impl_->records.end()) {
-            precision = precisionOverride.value_or(it2->second.entry.precision);
+    const int baselineWidth = baselineCompileWidth();
+    const int baselineHeight = baselineCompileHeight();
+    const auto mxrPath = compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision);
+    bool ok = migraphxCompile(onnxPath, mxrPath,
+                              baselineWidth, baselineHeight,
+                              compilePrecision,
+                              std::nullopt,
+                              progressCb, modelId, error);
+    if (!ok && shouldRetryFp32AfterTimeout(compilePrecision, error)) {
+        const auto fp32Path = compiledArtifactPath(
+            impl_->convertedDir(), modelId, ModelPrecision::Fp32);
+        if (progressCb) {
+            progressCb(modelId, 0.02f,
+                "fp16 compilation timed out; retrying with fp32 artifact…");
+        }
+        if (fileExists(fp32Path)) {
+            ok = true;
+        } else {
+            std::string fp32Error;
+            ok = migraphxCompile(onnxPath, fp32Path,
+                                 baselineWidth, baselineHeight,
+                                 ModelPrecision::Fp32,
+                                 std::nullopt,
+                                 progressCb, modelId, fp32Error);
+            if (!ok) {
+                error += "\n\nfp32 fallback also failed:\n" + fp32Error;
+            }
+        }
+        if (ok) {
+            error.clear();
         }
     }
-
-    const auto mxrPath = impl_->convertedDir() / (modelId + ".mxr");
-    const bool ok = migraphxCompile(onnxPath, mxrPath, /*gpuTune=*/false,
-                                    precision, progressCb, modelId, error);
 
     ModelState finalState = ModelState::Error;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
         auto& m = impl_->records[modelId];
         if (ok) {
+            // Clear the transient Converting state before scanning so
+            // scanAndUpdate() can derive the correct final state from
+            // the files on disk (it early-returns for transient states).
+            m.state = ModelState::Downloaded;
             impl_->scanAndUpdate(m);
         } else {
             m.state        = ModelState::Error;
@@ -869,11 +1612,99 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
     return ok;
 }
 
-bool ModelManager::optimizeForHardware(const std::string& modelId,
-                                        const ModelProgressCb& progressCb,
-                                        const ModelStateCb&    stateCb,
-                                        std::string&           error,
-                                        std::optional<ModelPrecision> precisionOverride) {
+// ─── autoCompileForInference ───────────────────────────────────────
+// Automatically compile a model for inference if not already compiled.
+std::optional<std::string> ModelManager::autoCompileForInference(
+    const std::string& modelId,
+    std::string& error,
+    std::optional<std::int64_t> inputWidth,
+    std::optional<std::int64_t> inputHeight,
+    ModelPrecision compilePrecision,
+    std::optional<std::string> calibrationVideoPath) {
+
+    if (!isSupportedMiGraphXCompilePrecision(compilePrecision)) {
+        error = "MiGraphX auto-compile currently supports fp32, fp16, and int8 artifacts; requested "
+              + compilePrecisionTag(compilePrecision) + ".";
+        return std::nullopt;
+    }
+
+    const bool useCustomDims = inputWidth.has_value() || inputHeight.has_value();
+    if (useCustomDims && (!inputWidth.has_value() || !inputHeight.has_value())) {
+        error = "autoCompileForInference requires both inputWidth and inputHeight when either is provided.";
+        return std::nullopt;
+    }
+
+    int compileWidth = baselineCompileWidth();
+    int compileHeight = baselineCompileHeight();
+    if (useCustomDims) {
+        if (*inputWidth <= 0 || *inputHeight <= 0 ||
+            *inputWidth > static_cast<std::int64_t>(std::numeric_limits<int>::max()) ||
+            *inputHeight > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            error = "Invalid compile dimensions: " + std::to_string(*inputWidth) + "x" + std::to_string(*inputHeight);
+            return std::nullopt;
+        }
+        compileWidth = static_cast<int>(*inputWidth);
+        compileHeight = static_cast<int>(*inputHeight);
+    }
+
+    auto customMxrPath = [&]() -> std::filesystem::path {
+        return compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision,
+                                    compileWidth, compileHeight);
+    };
+    auto customMxrPathForPrecision = [&](ModelPrecision precision) -> std::filesystem::path {
+        return compiledArtifactPath(impl_->convertedDir(), modelId, precision,
+                                    compileWidth, compileHeight);
+    };
+
+    if (useCustomDims) {
+        const auto mxrPath = customMxrPath();
+        if (fileExists(mxrPath)) {
+            std::cout << "[auto-compile] Model '" << modelId << "' already compiled for "
+                      << compileWidth << "x" << compileHeight << ": " << mxrPath << std::endl;
+            return mxrPath.string();
+        }
+        if (compilePrecision == ModelPrecision::Fp16) {
+            const auto fp32Path = customMxrPathForPrecision(ModelPrecision::Fp32);
+            if (fileExists(fp32Path)) {
+                std::cout << "[auto-compile] Reusing fp32 artifact for '" << modelId
+                          << "' at " << compileWidth << "x" << compileHeight
+                          << ": " << fp32Path << std::endl;
+                return fp32Path.string();
+            }
+        }
+    } else {
+        // First check if already compiled (default path selection).
+        {
+            std::lock_guard<std::mutex> lock(impl_->mtx);
+            auto it = impl_->records.find(modelId);
+            if (it == impl_->records.end()) {
+                error = "Unknown model id: " + modelId;
+                return std::nullopt;
+            }
+            impl_->scanAndUpdate(it->second);
+        }
+        auto bestPath = bestPathForModel(modelId);
+        if (bestPath && hasMxrExtension(*bestPath)) {
+            std::cout << "[auto-compile] Model '" << modelId << "' already compiled: " << *bestPath << std::endl;
+            return bestPath;
+        }
+
+        error = "[NeedsFrameSize] MiGraphX auto-compile requires actual input dimensions for the first compile of model '"
+              + modelId + "'.";
+        if (compilePrecision == ModelPrecision::Int8) {
+            error += " Int8 also requires calibration frames from the real input video.";
+        }
+        error += " Deferring compile until the input video has been probed.";
+        return std::nullopt;
+    }
+
+    if (compilePrecision == ModelPrecision::Int8 &&
+        (!calibrationVideoPath.has_value() || calibrationVideoPath->empty())) {
+        error = "MiGraphX int8 auto-compile requires a calibration video path.";
+        return std::nullopt;
+    }
+
+    // Check if model is downloaded and capture source format/path.
     std::string modelPath;
     ModelFormat sourceFormat = ModelFormat::Onnx;
     {
@@ -881,75 +1712,93 @@ bool ModelManager::optimizeForHardware(const std::string& modelId,
         auto it = impl_->records.find(modelId);
         if (it == impl_->records.end()) {
             error = "Unknown model id: " + modelId;
-            return false;
+            return std::nullopt;
         }
         const auto& m = it->second;
         if (m.downloadedPath.empty() || m.downloadedPath == "(builtin)") {
-            error = "Model not yet downloaded – cannot optimise.";
-            return false;
+            error = "Model not yet downloaded – cannot compile.";
+            return std::nullopt;
         }
         if (m.entry.sourceFormat != ModelFormat::Onnx &&
             m.entry.sourceFormat != ModelFormat::Pytorch) {
-            error = "MiGraphX optimisation requires ONNX or PyTorch (.pth/.pt) format.";
-            return false;
+            error = "MiGraphX compilation requires ONNX or PyTorch (.pth/.pt) format.";
+            return std::nullopt;
         }
+        modelPath = m.downloadedPath;
         sourceFormat = m.entry.sourceFormat;
-        modelPath    = m.downloadedPath;
-        impl_->records[modelId].state = ModelState::Optimizing;
     }
-    if (stateCb) { stateCb(modelId, ModelState::Optimizing); }
 
-    // PyTorch → ONNX export step (mirrors convertToMiGraphX).
+    // PyTorch checkpoints are exported to temporary ONNX before compile.
     std::string onnxPath = modelPath;
     std::filesystem::path tempOnnxPath;
     if (sourceFormat == ModelFormat::Pytorch) {
-        if (progressCb) { progressCb(modelId, 0.02f, "Exporting PyTorch model to ONNX…"); }
         tempOnnxPath = std::filesystem::temp_directory_path()
                      / (modelId + "_torch_export.onnx");
         std::string exportErr;
         if (!torchExportToOnnx(modelPath, tempOnnxPath, exportErr)) {
             error = "PyTorch → ONNX export failed: " + exportErr;
-            ModelState finalState = ModelState::Error;
-            {
-                std::lock_guard<std::mutex> lockErr(impl_->mtx);
-                auto& mErr        = impl_->records[modelId];
-                mErr.state        = ModelState::Error;
-                mErr.errorMessage = error;
-                finalState        = mErr.state;
-            }
-            if (stateCb) { stateCb(modelId, finalState); }
-            return false;
+            return std::nullopt;
         }
         onnxPath = tempOnnxPath.string();
     }
 
-    ModelPrecision precision = ModelPrecision::Fp32;
-    {
-        std::lock_guard<std::mutex> lock(impl_->mtx);
-        const auto it2 = impl_->records.find(modelId);
-        if (it2 != impl_->records.end()) {
-            precision = precisionOverride.value_or(it2->second.entry.precision);
+    // Progress callback that logs to stdout
+    auto progressCb = [](const std::string&, float progress, const std::string& msg) {
+        std::cout << "[auto-compile] ";
+        if (progress >= 0.0f) {
+            std::cout << static_cast<int>(progress * 100) << "%: ";
+        }
+        std::cout << msg << std::endl;
+    };
+
+    std::cout << "[auto-compile] Compiling '" << modelId
+              << "' at " << compileWidth << "x" << compileHeight << "..." << std::endl;
+
+    if (useCustomDims) {
+        const auto mxrPath = customMxrPath();
+        if (migraphxCompile(onnxPath, mxrPath, compileWidth, compileHeight,
+                            compilePrecision,
+                            calibrationVideoPath,
+                            progressCb, modelId, error)) {
+            std::cout << "[auto-compile] Successfully compiled to: " << mxrPath << std::endl;
+            return mxrPath.string();
+        }
+        if (shouldRetryFp32AfterTimeout(compilePrecision, error)) {
+            const auto fp32Path = customMxrPathForPrecision(ModelPrecision::Fp32);
+            std::cout << "[auto-compile] fp16 compilation timed out; retrying fp32 at "
+                      << compileWidth << "x" << compileHeight << "..." << std::endl;
+            if (fileExists(fp32Path)) {
+                std::cout << "[auto-compile] Reusing fp32 artifact: " << fp32Path << std::endl;
+                error.clear();
+                return fp32Path.string();
+            }
+            std::string fp32Error;
+            if (migraphxCompile(onnxPath, fp32Path, compileWidth, compileHeight,
+                                ModelPrecision::Fp32,
+                                calibrationVideoPath,
+                                progressCb, modelId, fp32Error)) {
+                std::cout << "[auto-compile] Successfully compiled to: " << fp32Path << std::endl;
+                error.clear();
+                return fp32Path.string();
+            }
+            error += "\n\nfp32 fallback also failed:\n" + fp32Error;
+        }
+        return std::nullopt;
+    }
+
+    if (convertToMiGraphX(modelId, progressCb, ModelStateCb{}, error, compilePrecision)) {
+        refresh();
+        auto bestPath = bestPathForModel(modelId);
+        if (bestPath && hasMxrExtension(*bestPath)) {
+            std::cout << "[auto-compile] Successfully compiled to: " << *bestPath << std::endl;
+            return bestPath;
         }
     }
 
-    const auto mxrPath = impl_->optimizedDir() / (modelId + "_tuned.mxr");
-    const bool ok = migraphxCompile(onnxPath, mxrPath, /*gpuTune=*/true,
-                                    precision, progressCb, modelId, error);
-
-    ModelState finalState = ModelState::Error;
-    {
-        std::lock_guard<std::mutex> lock(impl_->mtx);
-        auto& m = impl_->records[modelId];
-        if (ok) {
-            impl_->scanAndUpdate(m);
-        } else {
-            m.state        = ModelState::Error;
-            m.errorMessage = error;
-        }
-        finalState = m.state;
+    if (error.empty()) {
+        error = "Compilation failed: compiled .mxr was not found after convert step.";
     }
-    if (stateCb) { stateCb(modelId, finalState); }
-    return ok;
+    return std::nullopt;
 }
 
 std::string ModelManager::modelDropdownLabel(const std::string& modelId) const {
@@ -966,14 +1815,13 @@ ModelManager::dropdownEntriesForStage(StageKind kind) const {
     std::vector<DropdownEntry> out;
     out.reserve(models.size());
 
-    // Sort: inference-ready first (optimized > converted > downloaded), then by name
+    // Sort: inference-ready first (converted > downloaded), then by name
     for (const auto& m : models) {
         DropdownEntry de;
         de.modelId       = m.entry.id;
         de.label         = statePrefix(m.state) + " " + m.entry.displayName;
         de.inferenceReady = (m.state == ModelState::Downloaded  ||
-                             m.state == ModelState::Converted   ||
-                             m.state == ModelState::Optimized);
+                             m.state == ModelState::Converted);
         out.push_back(de);
     }
 

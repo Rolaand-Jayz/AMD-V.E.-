@@ -40,12 +40,9 @@
 //           hipImportExternalSemaphore (ROCm ≥ 5.0)
 //
 // ── Implementation status ────────────────────────────────────────
-// This header defines the gold-standard API contract.  The current
-// implementation (interop_bridge.cpp) provides a stub that resolves
-// interop as unavailable because VulkanRuntime (VkDevice/VkQueue
-// initialisation) has not yet been implemented.
-// Once VulkanRuntime is integrated, replace the stub bodies with
-// the actual hipImport* calls referencing the established VkDevice.
+// This header defines the gold-standard API contract.
+// VulkanRuntime initialises Vulkan context to correctly interact with
+// hipImportExternal* implementations in interop_bridge.cpp.
 // ─────────────────────────────────────────────────────────────────
 
 #include <cstddef>

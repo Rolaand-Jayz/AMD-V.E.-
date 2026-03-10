@@ -28,6 +28,41 @@ enum class ModelPrecision {
 // ─────────────────────────────────────────────────────────────────
 
 struct ModelEntry {
+    ModelEntry() = default;
+
+    ModelEntry(std::string id_,
+               std::string displayName_,
+               StageKind stage_,
+               ModelFormat sourceFormat_,
+               ModelPrecision precision_,
+               int scale_,
+               double fpsMul_,
+               std::string downloadUrl_,
+               std::string filename_,
+               std::string downloadUrlAux_,
+               std::string filenameAux_,
+               std::string description_,
+               bool isDefault_,
+               int minVramMib_,
+               std::string archiveSubPath_ = {},
+               std::string archiveSubPathAux_ = {})
+        : id(std::move(id_)),
+          displayName(std::move(displayName_)),
+          stage(stage_),
+          sourceFormat(sourceFormat_),
+          precision(precision_),
+          scale(scale_),
+          fpsMul(fpsMul_),
+          downloadUrl(std::move(downloadUrl_)),
+          filename(std::move(filename_)),
+          downloadUrlAux(std::move(downloadUrlAux_)),
+          filenameAux(std::move(filenameAux_)),
+          description(std::move(description_)),
+          isDefault(isDefault_),
+          minVramMib(minVramMib_),
+          archiveSubPath(std::move(archiveSubPath_)),
+          archiveSubPathAux(std::move(archiveSubPathAux_)) {}
+
     // Unique token used as the "model" parameter in EnhancementStage
     std::string id;
 

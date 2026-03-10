@@ -16,6 +16,9 @@
 #ifdef AVE_HAVE_MIGRAPHX
 #  include <migraphx/version.h>
 #endif
+#ifdef AVE_HAVE_HIP
+#  include <hip/hip_runtime.h>
+#endif
 
 namespace ave {
 namespace obs {
@@ -50,18 +53,6 @@ std::string readFirstLine(const std::string& path) {
     return "?";
 }
 
-#ifdef AVE_HAVE_MIGRAPHX
-std::string envOrEmpty(const char* name) {
-    const char* v = std::getenv(name);
-    return v != nullptr ? std::string(v) : std::string{};
-}
-
-std::string envOrDef(const char* name, const char* def) {
-    const char* v = std::getenv(name);
-    return v != nullptr ? std::string(v) : std::string(def);
-}
-#endif  // AVE_HAVE_MIGRAPHX
-
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────
@@ -91,10 +82,21 @@ void logVersionTuple() {
     const std::string ffmpegVer =
         captureFirstLine("ffmpeg -version 2>&1 | head -1");
 
-    // GPU gfx target (from rocminfo)
-    const std::string gfxTarget =
-        captureFirstLine("rocminfo 2>/dev/null"
-                         " | grep -m1 'gfx[0-9]' | tr -s ' ' | cut -d' ' -f2");
+    // GPU gfx target
+    std::string gfxTarget = "?";
+#ifdef AVE_HAVE_HIP
+    int device = 0;
+    hipDeviceProp_t props{};
+    if (hipGetDevice(&device) == hipSuccess &&
+        hipGetDeviceProperties(&props, device) == hipSuccess &&
+        props.gcnArchName[0] != '\0') {
+        gfxTarget = props.gcnArchName;
+    }
+#endif
+    if (gfxTarget == "?") {
+        gfxTarget = captureFirstLine("rocminfo 2>/dev/null"
+                                     " | grep -m1 'amdgcn-amd-amdhsa--gfx' | awk -F'--' '{print $2}'");
+    }
 
     // Kernel version
     const std::string kernel = captureFirstLine("uname -r");
@@ -175,11 +177,10 @@ bool writeArtifactManifest(const std::string&            manifestPath,
         << "onnx_file_size="   << f.onnxFileSizeStr  << '\n'
         << "onnx_mtime="       << f.onnxMtimeStr     << '\n'
         << "offload_copy="     << f.offloadCopy      << '\n'
-        << "fast_math="        << f.fastMath         << '\n'
-        << "exhaustive_tune="  << f.exhaustiveTune   << '\n'
         << "precision="        << f.precision        << '\n'
         << "disable_mlir="     << f.disableMlir      << '\n'
-        << "enable_nhwc="      << f.enableNhwc       << '\n';
+        << "enable_nhwc="      << f.enableNhwc       << '\n'
+        << "enable_ck="        << f.enableCk         << '\n';
     return true;
 }
 
@@ -222,11 +223,10 @@ bool validateArtifactManifest(const std::string&            manifestPath,
         && check("onnx_file_size",   expected.onnxFileSizeStr)
         && check("onnx_mtime",       expected.onnxMtimeStr)
         && check("offload_copy",     expected.offloadCopy)
-        && check("fast_math",        expected.fastMath)
-        && check("exhaustive_tune",  expected.exhaustiveTune)
         && check("precision",        expected.precision)
         && check("disable_mlir",     expected.disableMlir)
-        && check("enable_nhwc",      expected.enableNhwc);
+        && check("enable_nhwc",      expected.enableNhwc)
+        && check("enable_ck",        expected.enableCk);
 }
 
 }  // namespace obs

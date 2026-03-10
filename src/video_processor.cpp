@@ -5,23 +5,74 @@
 #include <sstream>
 #include <variant>
 
+#include "ave/backends/glsl_shader_backend.hpp"
+#include "ave/backends/vapoursynth_backend.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/stage.hpp"
 #include "ave/types.hpp"
 
 namespace ave {
 
+namespace {
+
+bool pathHasMxrExtension(const std::string& path) {
+    if (path.size() < 4) {
+        return false;
+    }
+    const std::string ext = path.substr(path.size() - 4);
+    return ext == ".mxr" || ext == ".MXR";
+}
+
+bool backendUsesScriptPipeline(const BackendType type) {
+    return type == BackendType::VapourSynth ||
+           type == BackendType::GlslShader;
+}
+
+}  // namespace
+
 // ─── resolveModelPath ────────────────────────────────────────────
 // If the stage carries a "model" parameter (a model catalog id),
-// look it up in ModelManager and inject the best on-disk path as
-// "model_path" so backends can load it directly.
+// look it up in ModelManager and inject a backend-appropriate on-disk
+// path as "model_path" so backends can load it directly.
 //
 // When no explicit "model" parameter is present, fall back to the
 // default model for the stage kind from the built-in catalog.  This
 // ensures AI inference is attempted for all backend-eligible stages,
 // not only those where the user manually specified a model.
-EnhancementStage VideoProcessor::resolveModelPath(const EnhancementStage& stage) const {
+EnhancementStage VideoProcessor::resolveModelPath(
+        const EnhancementStage& stage,
+        std::optional<BackendType> activeBackend) const {
     EnhancementStage out = stage;
+
+    // Preserve a user-specified model path exactly as provided.
+    auto modelPathIt = stage.params.find("model_path");
+    if (modelPathIt != stage.params.end() && std::holds_alternative<std::string>(modelPathIt->second)) {
+        const auto& explicitPath = std::get<std::string>(modelPathIt->second);
+        if (!explicitPath.empty()) {
+            std::string explicitModelId;
+            auto modelIt = stage.params.find("model");
+            if (modelIt != stage.params.end() && std::holds_alternative<std::string>(modelIt->second)) {
+                explicitModelId = std::get<std::string>(modelIt->second);
+            }
+            if (explicitModelId.empty()) {
+                const auto entries = catalogEntriesForStage(stage.kind);
+                for (const auto* e : entries) {
+                    if (e->isDefault) { explicitModelId = e->id; break; }
+                }
+                if (explicitModelId.empty() && !entries.empty()) {
+                    explicitModelId = entries.front()->id;
+                }
+            }
+            if (!explicitModelId.empty()) {
+                out.params["model"] = explicitModelId;
+            }
+            out.params["model_path"] = explicitPath;
+            out.params["model_path_explicit"] = true;
+            std::cout << "[model] " << toString(stage.kind)
+                      << " using explicit model path: " << explicitPath << std::endl;
+            return out;
+        }
+    }
 
     // Determine the model ID: explicit param → catalog default.
     std::string modelId;
@@ -44,11 +95,42 @@ EnhancementStage VideoProcessor::resolveModelPath(const EnhancementStage& stage)
     // Inject the model ID so downstream code can find it.
     out.params["model"] = modelId;
 
-    auto bestPath = modelManager_.bestPathForModel(modelId);
-    if (bestPath) {
-        out.params["model_path"] = *bestPath;
+    const auto managed = modelManager_.findModel(modelId);
+    if (!managed.has_value()) {
+        return out;
+    }
+
+    const bool migraphxActive =
+        activeBackend.has_value() && *activeBackend == BackendType::MiGraphX;
+
+    std::optional<std::string> selectedPath;
+    if (migraphxActive) {
+        if (!managed->convertedPath.empty()) {
+            selectedPath = managed->convertedPath;
+        } else if (!managed->downloadedPath.empty() && pathHasMxrExtension(managed->downloadedPath)) {
+            selectedPath = managed->downloadedPath;
+        }
+    } else if (!managed->downloadedPath.empty() &&
+               managed->downloadedPath != "(builtin)" &&
+               !pathHasMxrExtension(managed->downloadedPath)) {
+        // Non-MiGraphX backends need the original source model, not a cached
+        // MiGraphX artifact that happens to sort as the "best" path overall.
+        selectedPath = managed->downloadedPath;
+    }
+
+    if (selectedPath.has_value() && !selectedPath->empty() && *selectedPath != "(builtin)") {
+        out.params["model_path"] = *selectedPath;
+        out.params["model_path_explicit"] = false;
         std::cout << "[model] " << toString(stage.kind)
-                  << " using model: " << *bestPath << std::endl;
+                  << " using model: " << *selectedPath << std::endl;
+    } else if (migraphxActive &&
+               !managed->downloadedPath.empty() &&
+               managed->downloadedPath != "(builtin)") {
+        std::cout << "[model] " << toString(stage.kind)
+                  << " — model '" << modelId
+                  << "' is available on disk but not yet compiled to .mxr;"
+                  << " MiGraphX will resolve/compile the inference artifact."
+                  << std::endl;
     } else {
         std::cout << "[model] " << toString(stage.kind)
                   << " — model '" << modelId
@@ -88,13 +170,12 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     std::filesystem::create_directories(outputDir, ec);
 
     // ── Identify which stages are backend-eligible ────────────────
-    // Interpolate and Sharpen are FFmpeg-only.
-    // All other stages (including Upscale) are candidates for AI backend inference.
     int backendEligibleCount = 0;
     for (const auto& s : ordered) {
-        if (s.kind != StageKind::Interpolate &&
-            s.kind != StageKind::Sharpen)
+        if (backendUsesScriptPipeline(job.requestedBackend) ||
+            (s.kind != StageKind::Interpolate && s.kind != StageKind::Sharpen)) {
             ++backendEligibleCount;
+        }
     }
 
     // Only create and initialise the backend if there are stages that
@@ -104,7 +185,11 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
         std::string backendSummary;
         backend = backendManager_.createBackend(job.requestedBackend, backendSummary);
         if (!backend) {
-            // No backend available — all eligible stages will use FFmpeg filters.
+            if (job.requestedBackend != BackendType::Auto) {
+                error = backendSummary;
+                std::cout << "[backend] " << backendSummary << std::endl;
+                return false;
+            }
             std::cout << "[backend] " << backendSummary
                       << "\n  All stages will use FFmpeg filter chain." << std::endl;
         } else {
@@ -112,16 +197,37 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
 
             std::string backendError;
             if (!backend->initialize(backendError)) {
+                if (job.requestedBackend != BackendType::Auto) {
+                    error = backend->name() + " initialization failed: " + backendError;
+                    std::cout << "[backend] init failed: " << backendError << std::endl;
+                    return false;
+                }
                 std::cout << "[backend] init failed: " << backendError
                           << "\n  All stages will use FFmpeg filter chain." << std::endl;
                 backend.reset();  // discard; we'll fall back to FFmpeg
             } else {
                 std::cout << "[backend] ready: " << backend->name() << '\n';
             }
+
+            // Pass catalog filters to backends that support them.
+            if (backend && !job.catalogFilters.empty()) {
+                if (auto* glsl = dynamic_cast<GlslShaderBackend*>(backend.get())) {
+                    glsl->setCatalogFilters(job.catalogFilters);
+                    std::cout << "[backend] Passed " << job.catalogFilters.size()
+                              << " catalog filter(s) to GLSL backend." << std::endl;
+                } else if (auto* vs = dynamic_cast<VapourSynthBackend*>(backend.get())) {
+                    vs->setCatalogFilters(job.catalogFilters);
+                    std::cout << "[backend] Passed " << job.catalogFilters.size()
+                              << " catalog filter(s) to VapourSynth backend." << std::endl;
+                }
+            }
         }
     }
 
-    const int totalItems = backendEligibleCount + 1; // +1 for the FFmpeg encode pass
+    // The backend pre-load pass is fast (model validation only);
+    // real AI work happens inside ffmpeg_.encode() → encodeWithAiProcessing().
+    // So we allocate only 5% to the pre-load phase, 95% to the encode phase.
+    constexpr int kPreloadPct = 5;
 
     auto reportProgress = [&](int overallPct, int taskPct, const std::string& msg) {
         std::cout << "[progress] " << msg << '\n';
@@ -159,8 +265,10 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     // ── Build a model-resolved copy of the ordered stages ──────────
     std::vector<EnhancementStage> resolvedOrdered;
     resolvedOrdered.reserve(ordered.size());
+    const std::optional<BackendType> activeBackend =
+        backend ? std::optional<BackendType>(backend->type()) : std::nullopt;
     for (const auto& s : ordered) {
-        EnhancementStage rs = resolveModelPath(s);
+        EnhancementStage rs = resolveModelPath(s, activeBackend);
         if (rs.kind == StageKind::Interpolate && !sceneCuts.empty()) {
             rs.params["scene_cut_count"] = static_cast<std::int64_t>(sceneCuts.size());
         }
@@ -171,59 +279,78 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     int completedBackend = 0;
     int aiProcessedCount = 0;
     int deferredCount    = 0;
+    const bool scriptBackendActive = backend &&
+        backendUsesScriptPipeline(backend->type());
 
-    for (EnhancementStage& stage : resolvedOrdered) {
-        if (stage.kind == StageKind::Interpolate ||
-            stage.kind == StageKind::Sharpen)       continue;
-
-        const std::string stageName = toString(stage.kind);
-
-        if (!backend) {
-            // No backend available — stage deferred to FFmpeg.
-            ++deferredCount;
-            ++completedBackend;
-            std::cout << "[pipeline] " << stageName
-                      << " → FFmpeg filter (no backend)" << std::endl;
-            continue;
-        }
-
-        const int overallBefore = (completedBackend * 100) / totalItems;
-        reportProgress(overallBefore, 0,
-            "Backend pass " + std::to_string(completedBackend + 1) + "/" +
-            std::to_string(backendEligibleCount) + ": " + stageName +
-            " via " + backend->name());
-
-        std::string backendError;
-        const StageResult result = backend->runStage(stage, backendError);
-
-        switch (result) {
-            case StageResult::Processed:
-                stage.backendProcessed = true;
-                ++aiProcessedCount;
-                std::cout << "[pipeline] " << stageName
-                          << " → AI inference complete (" << backend->name() << ")"
-                          << std::endl;
-                break;
-
-            case StageResult::Deferred:
-                ++deferredCount;
-                std::cout << "[pipeline] " << stageName
-                          << " → deferred to FFmpeg filter chain"
-                          << std::endl;
-                break;
-
-            case StageResult::Error: {
-                std::ostringstream os;
-                os << "Backend stage " << stageName << " failed: " << backendError;
-                reportProgress(overallBefore, 0, os.str());
-                error = os.str();
-                return false;
+    if (scriptBackendActive) {
+        std::cout << "[pipeline] " << backend->name()
+                  << " stages will execute during the encode phase."
+                  << std::endl;
+    } else {
+        for (EnhancementStage& stage : resolvedOrdered) {
+            if (stage.kind == StageKind::Interpolate ||
+                stage.kind == StageKind::Sharpen) {
+                continue;
             }
-        }
 
-        ++completedBackend;
-        const int overallAfter = (completedBackend * 100) / totalItems;
-        reportProgress(overallAfter, 100, stageName + " \u2014 complete");
+            const std::string stageName = toString(stage.kind);
+
+            if (!backend) {
+                // No backend available — stage deferred to FFmpeg.
+                ++deferredCount;
+                ++completedBackend;
+                std::cout << "[pipeline] " << stageName
+                          << " → FFmpeg filter (no backend)" << std::endl;
+                continue;
+            }
+
+            const int overallBefore = backendEligibleCount > 0
+                ? (completedBackend * kPreloadPct) / backendEligibleCount
+                : 0;
+            reportProgress(overallBefore, 0,
+                "Backend pass " + std::to_string(completedBackend + 1) + "/" +
+                std::to_string(backendEligibleCount) + ": " + stageName +
+                " via " + backend->name());
+
+            std::string backendError;
+            const StageResult result = backend->runStage(stage, backendError);
+
+            switch (result) {
+                case StageResult::Processed:
+                    stage.backendProcessed = true;
+                    ++aiProcessedCount;
+                    std::cout << "[pipeline] " << stageName
+                              << " → AI inference complete (" << backend->name() << ")"
+                              << std::endl;
+                    break;
+
+                case StageResult::Deferred:
+                    ++deferredCount;
+                    std::cout << "[pipeline] " << stageName
+                              << " → deferred to FFmpeg filter chain"
+                              << std::endl;
+                    break;
+
+                case StageResult::Error: {
+                    std::ostringstream os;
+                    os << "Backend stage " << stageName << " failed: " << backendError;
+                    reportProgress(overallBefore, 0, os.str());
+                    error = os.str();
+                    return false;
+                }
+
+                case StageResult::Cancelled:
+                    error = "Processing cancelled by user.";
+                    reportProgress(overallBefore, 0, error);
+                    return false;
+            }
+
+            ++completedBackend;
+            const int overallAfter = backendEligibleCount > 0
+                ? (completedBackend * kPreloadPct) / backendEligibleCount
+                : kPreloadPct;
+            reportProgress(overallAfter, 100, stageName + " \u2014 complete");
+        }
     }
 
     // ── Summary of processing modes ────────────────────────────────
@@ -233,10 +360,13 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     }
 
     // ── FFmpeg encode pass ─────────────────────────────────────────
-    const int encodeBase = (completedBackend * 100) / totalItems;
+    const int encodeBase = kPreloadPct;
     reportProgress(encodeBase, 0, "Starting FFmpeg encode pipeline\u2026");
 
-    // Wrap progressCb: encode task% maps overall from encodeBase to 100
+    // Wrap progressCb: encode task% maps from encodeBase (5%) to 100%.
+    // The inner FFmpeg/AI pipeline reports 0-100 as taskPct; we map that
+    // into the remaining 95% of overall progress so the bar moves
+    // proportionally to actual frame-processing work.
     VideoJob encodeJob = job;
     if (job.progressCb) {
         encodeJob.progressCb = [origCb = job.progressCb, encodeBase](

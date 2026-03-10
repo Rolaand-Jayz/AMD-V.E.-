@@ -6,24 +6,12 @@
 
 class QCheckBox;
 class QComboBox;
-class QDialogButtonBox;
+class QLabel;
+class QListWidget;
 class QLineEdit;
 class QSpinBox;
-class QTabWidget;
+class QStackedWidget;
 
-// ─────────────────────────────────────────────────────────────────
-// SettingsDialog
-// ─────────────────────────────────────────────────────────────────
-// Modal dialog for editing AppSettings.  Opens in a separate window
-// like ModelManagerDialog.  Changes are applied via the OK / Apply
-// buttons and persisted to ~/.config/ave/settings.ini.
-//
-// Sections:
-//   Inference   — global quantization default, default backend
-//   Compilation — GPU tuning, exhaustive search
-//   Encode      — codec, CRF, preset, thread count
-//   Interface   — verbose log
-// ─────────────────────────────────────────────────────────────────
 class SettingsDialog final : public QDialog {
     Q_OBJECT
 
@@ -32,30 +20,52 @@ class SettingsDialog final : public QDialog {
                             QWidget* parent = nullptr);
     ~SettingsDialog() override = default;
 
+  signals:
+    void settingsApplied();
+
   private slots:
     void onApplyClicked();
+    void onResetDefaults();
+    void onReloadDiagnostics();
+    void onOpenConfigDirectory();
+    void onOpenModelsDirectory();
 
   private:
     void buildUi();
-    void loadFromSettings();   // populate widgets from settings_
-    void applyToSettings();    // write widgets back to settings_ and save
+    void loadFromSettings();
+    void loadWidgetsFromSettings(const ave::AppSettings& settings);
+    void applyToSettings();
+    void refreshDiagnostics();
+    QString modelsDirectoryPath() const;
+    static QString configDirectoryPath();
 
     ave::AppSettings& settings_;
 
-    // ── Inference tab ─────────────────────────────────────────
-    QComboBox* globalQuantCombo_ = nullptr;
-    QComboBox* defaultBackendCombo_ = nullptr;
+    QListWidget*  navList_              = nullptr;
+    QStackedWidget* pageStack_          = nullptr;
 
-    // ── Compilation tab ───────────────────────────────────────
-    QCheckBox* gpuTuningCheck_    = nullptr;
-    QCheckBox* exhaustiveCheck_   = nullptr;
+    QLabel* settingsPathLabel_          = nullptr;
+    QLabel* modelsPathLabel_            = nullptr;
+    QLabel* rememberedPathsLabel_       = nullptr;
+    QLabel* backendSummaryLabel_        = nullptr;
+    QLabel* toolchainSummaryLabel_      = nullptr;
 
-    // ── Encode tab ────────────────────────────────────────────
-    QLineEdit* codecEdit_         = nullptr;
-    QSpinBox*  crfSpin_           = nullptr;
-    QLineEdit* presetEdit_        = nullptr;
-    QSpinBox*  threadsSpin_       = nullptr;
+    QComboBox* defaultBackendCombo_     = nullptr;
+    QComboBox* codecCombo_              = nullptr;
+    QLineEdit* profileEdit_             = nullptr;
+    QSpinBox*  crfSpin_                 = nullptr;
+    QLineEdit* presetEdit_              = nullptr;
+    QSpinBox*  threadsSpin_             = nullptr;
 
-    // ── Interface tab ─────────────────────────────────────────
-    QCheckBox* verboseLogCheck_   = nullptr;
+    QCheckBox* defaultDryRunCheck_      = nullptr;
+    QSpinBox*  previewDurationSpin_     = nullptr;
+    QSpinBox*  previewFrameIntervalSpin_ = nullptr;
+    QCheckBox* autoFillOutputCheck_     = nullptr;
+    QLineEdit* outputSuffixEdit_        = nullptr;
+    QCheckBox* rememberPathsCheck_      = nullptr;
+    QCheckBox* confirmRunCheck_         = nullptr;
+    QCheckBox* confirmClearPipelineCheck_ = nullptr;
+
+    QCheckBox* autoScrollLogCheck_      = nullptr;
+    QCheckBox* verboseLogCheck_         = nullptr;
 };

@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 // ─────────────────────────────────────────────────────────────────
 // filter_catalog.cpp — All embedded GLSL shaders & VS presets
 // ─────────────────────────────────────────────────────────────────
@@ -1625,6 +1622,39 @@ std::vector<const EmbeddedFilter*> filtersForStage(StageKind kind) {
     return result;
 }
 
+std::string displayNameForFilter(const ActiveFilter& filter) {
+    const EmbeddedFilter* entry = findFilter(filter.id);
+    if (entry == nullptr) {
+        return filter.id;
+    }
+
+    std::string label = entry->name + " [" + toString(entry->runtime) + "]";
+    if (!filter.paramValues.empty()) {
+        label += " {";
+        bool first = true;
+        for (const auto& param : entry->params) {
+            const auto it = filter.paramValues.find(param.key);
+            if (it == filter.paramValues.end()) {
+                continue;
+            }
+            if (!first) {
+                label += ", ";
+            }
+            first = false;
+            label += param.label + "=";
+            if (param.isInt) {
+                label += std::to_string(static_cast<int>(it->second));
+            } else {
+                std::ostringstream os;
+                os << it->second;
+                label += os.str();
+            }
+        }
+        label += "}";
+    }
+    return label;
+}
+
 std::string resolveSource(const EmbeddedFilter& filter,
                           const std::unordered_map<std::string, double>& paramValues) {
     std::string src = filter.source;
@@ -1656,5 +1686,3 @@ std::string resolveSource(const EmbeddedFilter& filter,
 }
 
 }  // namespace ave
-
-#endif // ── entire file disabled ──────────────────────────────

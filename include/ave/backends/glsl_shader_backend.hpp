@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 #pragma once
 
 // ─────────────────────────────────────────────────────────────────
@@ -26,6 +23,7 @@
 #include <vector>
 
 #include "ave/backend.hpp"
+#include "ave/filter_catalog.hpp"
 
 namespace ave {
 
@@ -48,7 +46,8 @@ class GlslShaderBackend final : public IAcceleratorBackend {
         const std::string& inputVideo,
         const std::string& outputVideo,
         const FrameProgressCb& progressCb,
-        std::string& error) override;
+        std::string& error,
+        const ProcessVideoOptions& opts = {}) override;
 
     // ── Extended API ────────────────────────────────────────────
 
@@ -57,7 +56,7 @@ class GlslShaderBackend final : public IAcceleratorBackend {
 
     // Accept enabled filters from the catalog UI.
     void setCatalogFilters(
-        const std::vector<ActiveFilter>& filters) override;
+        const std::vector<ActiveFilter>& filters);
 
   private:
     struct Impl;
@@ -65,5 +64,3 @@ class GlslShaderBackend final : public IAcceleratorBackend {
 };
 
 }  // namespace ave
-
-#endif // ── entire file disabled ──────────────────────────────

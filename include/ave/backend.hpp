@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -10,7 +12,10 @@ namespace ave {
 enum class BackendType {
     Auto,
     MiGraphX,
-    NcnnVulkan
+    NcnnVulkan,
+    VulkanCompute,
+    VapourSynth,
+    GlslShader
 };
 
 std::string toString(BackendType type);
@@ -32,13 +37,36 @@ struct BackendInfo {
 enum class StageResult {
     Processed,
     Deferred,
-    Error
+    Error,
+    Cancelled
 };
 
 // Progress callback for frame-by-frame AI processing.
 //   frac — fraction complete [0.0, 1.0]
 //   msg  — human-readable status string
 using FrameProgressCb = std::function<void(float frac, const std::string& msg)>;
+
+// Callback for delivering live preview frames during processing.
+//   rgb    — pointer to RGB24 pixel data (3 bytes per pixel, row-major)
+//   width  — frame width in pixels
+//   height — frame height in pixels
+// The data is only valid for the duration of the call.
+using FramePreviewCb = std::function<void(const std::uint8_t* rgb, int width, int height)>;
+
+// Options passed to processVideoFile for preview and control functionality.
+struct ProcessVideoOptions {
+    double previewDurationSec = 0.0;     ///< 0 = process entire video
+    FramePreviewCb framePreviewCb;       ///< Optional live frame preview callback
+    int previewFrameInterval = 15;       ///< Emit preview every N frames (reduces overhead)
+    std::atomic<bool>* cancelFlag = nullptr;  ///< Non-null → check each frame; true = stop
+    std::atomic<bool>* pauseFlag  = nullptr;  ///< Non-null → check each frame; true = sleep-wait
+    bool directOutputEncode = false;     ///< Backend may write the final delivery encode directly.
+    std::string outputCodec = "libx264";
+    std::string outputProfile;
+    int outputCrf = 18;
+    std::string outputPreset = "medium";
+    int outputThreads = 0;
+};
 
 class IAcceleratorBackend {
   public:
@@ -62,6 +90,7 @@ class IAcceleratorBackend {
     //   inputVideo  — path to the input video file.
     //   outputVideo — destination path for the processed video file.
     //   progressCb  — optional per-frame progress callback.
+    //   opts        — optional preview settings (duration limit, frame preview).
     //
     // Returns:
     //   Processed — all frames were enhanced via AI inference.
@@ -74,7 +103,8 @@ class IAcceleratorBackend {
         const std::string& inputVideo,
         const std::string& outputVideo,
         const FrameProgressCb& progressCb,
-        std::string& error) = 0;
+        std::string& error,
+        const ProcessVideoOptions& opts = {}) = 0;
 };
 
 }  // namespace ave

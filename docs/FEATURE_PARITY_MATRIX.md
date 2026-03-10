@@ -28,6 +28,7 @@ This matrix tracks the implementation status of the AMD C++ video enhancement pi
 | Category | Status | Notes |
 | --- | --- | --- |
 | MiGraphX / ROCm acceleration | Implemented | Full ONNX load, compile, and inference when `-DAVE_HAVE_MIGRAPHX=ON`; model path validation without library present. |
+| Vulkan Compute backend | Implemented | GPU stage execution via Vulkan compute shaders when `-DAVE_HAVE_VULKAN=ON`. |
 | NCNN Vulkan fallback | Implemented | Full model load path when `-DAVE_HAVE_NCNN=ON`; Vulkan GPU detection; FFmpeg fallback when library absent. |
 | CUDA / NVIDIA support | Removed | Deliberately unsupported by design. |
 | Python runtime backend | Removed | Deliberately unsupported by design. |
@@ -40,6 +41,6 @@ This matrix tracks the implementation status of the AMD C++ video enhancement pi
 | Interpolation last before encode | Implemented | Enforced by deterministic planner; covered by unit tests. |
 | Stackable adjustable enhancements | Implemented | Per-stage typed parameters; sliders in GUI; `--stage key=value` in CLI. |
 | Model selection per stage | Implemented | 26 bundled model entries; per-stage dropdown in GUI; `model=<id>` param in CLI. |
-| Model download / convert / optimise | Implemented | ModelManager with curl downloads, `migraphx-driver` compilation, hardware optimisation. |
+| Model download / MiGraphX compile / cache | Implemented | ModelManager with curl downloads, ONNX export for supported PyTorch models, and cached `.mxr` compilation through `migraphx-driver`. |
 | GUI with toggle controls | Implemented | Qt6 GUI, animated ToggleSwitch widget, per-stage sliders, drag-reorder pipeline. |
 | Profile save/load | Implemented | JSON profiles with schema versioning. |

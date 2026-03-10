@@ -120,11 +120,10 @@ struct ArtifactManifestFields {
     std::string onnxFileSizeStr;  // std::to_string(file size in bytes)
     std::string onnxMtimeStr;     // std::to_string(mtime as epoch seconds)
     std::string offloadCopy;      // "0" or "1"
-    std::string fastMath;         // "0" or "1"
-    std::string exhaustiveTune;   // "0" or "1"
-    std::string precision;        // "fp32", "fp16", "int8", …
+    std::string precision;        // "fp32" or "fp16"
     std::string disableMlir;      // MIGRAPHX_DISABLE_MLIR env var value or "0"
     std::string enableNhwc;       // MIGRAPHX_ENABLE_NHWC env var value or "0"
+    std::string enableCk;         // MIGRAPHX_ENABLE_CK env var value or "0"
 };
 
 // Write a manifest file.  Overwrites any existing manifest.

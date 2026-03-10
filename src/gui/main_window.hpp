@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -13,7 +14,9 @@
 #include "ave/model_manager.hpp"
 #include "ave/planner.hpp"
 
+class FilterBrowser;
 class QComboBox;
+class QCloseEvent;
 class QDoubleSpinBox;
 class QDragEnterEvent;
 class QDropEvent;
@@ -53,6 +56,7 @@ class MainWindow final : public QMainWindow {
     ~MainWindow() override = default;
 
   protected:
+    void closeEvent(QCloseEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
@@ -70,10 +74,12 @@ class MainWindow final : public QMainWindow {
     QWidget* buildEmptyPanel(QWidget* parent);
 
     // ── Refresh helpers ──────────────────────────────────────────
-    void refreshModelCombo();        // populate model dropdown for current kind
+    void refreshModelFamilies();
     void refreshParamPanel();        // switch stacked widget page
+    void refreshStageBuilderActions();
     void refreshRequestedStages();
     void refreshPlannedStages();
+    void refreshActiveFilters();
     void refreshCommandPreview();
 
     // ── Stage operations ─────────────────────────────────────────
@@ -85,8 +91,10 @@ class MainWindow final : public QMainWindow {
 
     // ── Job ──────────────────────────────────────────────────────
     void runJob();
+    void runPreview();
     void probeBackends();
     void openModelManager();
+    void compileSelectedModel();
     void openSettings();
 
     // ── Profiles ─────────────────────────────────────────────────
@@ -96,9 +104,22 @@ class MainWindow final : public QMainWindow {
 
     // ── Utilities ────────────────────────────────────────────────
     void appendLog(const QString& line);
+    void applySettingsToUi(bool restoreRememberedPaths);
+    void persistUiStateToSettings();
+    QString suggestedOutputPathForInput(const QString& inputPath,
+                                        const QString& suffixOverride = QString()) const;
+    void applySuggestedOutputPath(const QString& inputPath, bool force);
+    void setManagedOutputPath(const QString& path, bool autoManaged);
     void setRunning(bool running);
     std::optional<ave::VideoJob> buildJob(QString& error) const;
-    ave::EnhancementStage buildStageFromEditor() const;
+    void storeSelectedFamilyCapabilityDraft();
+    std::optional<ave::StageKind> selectedFamilyCapabilityKind() const;
+    std::optional<std::string> selectedFamilyCapabilityModelId() const;
+    ave::EnhancementStage defaultDraftStage(ave::StageKind kind,
+                                            const std::string& modelId) const;
+    ave::EnhancementStage captureEditorStage(ave::StageKind kind,
+                                             const std::string& modelId) const;
+    void loadStageDraftIntoEditor(const ave::EnhancementStage& stage);
     static QString stageToDisplay(const ave::EnhancementStage& stage);
     static QString stageToCommandSpec(const ave::EnhancementStage& stage);
 
@@ -111,18 +132,23 @@ class MainWindow final : public QMainWindow {
     // ── I/O ──────────────────────────────────────────────────────
     QLineEdit* inputPathEdit_  = nullptr;
     QLineEdit* outputPathEdit_ = nullptr;
+    bool outputPathAutoManaged_ = true;
+    bool updatingOutputPath_ = false;
 
     // ── Encode settings ──────────────────────────────────────────
-    QComboBox*    backendCombo_ = nullptr;
-    QLineEdit*    codecEdit_    = nullptr;
-    QSpinBox*     crfSpin_      = nullptr;
-    QLineEdit*    presetEdit_   = nullptr;
-    ToggleSwitch* dryRunToggle_ = nullptr;
+    QComboBox*    backendCombo_  = nullptr;
+    QComboBox*    codecCombo_    = nullptr;
+    QComboBox*    profileCombo_  = nullptr;
+    QSpinBox*     crfSpin_       = nullptr;
+    QComboBox*    presetCombo_   = nullptr;
+    ToggleSwitch* dryRunToggle_  = nullptr;
 
     // ── Stage builder ────────────────────────────────────────────
-    QComboBox*     stageKindCombo_  = nullptr;
-    QComboBox*     modelCombo_      = nullptr;   // model for current kind
+    QComboBox*     modelFamilyCombo_ = nullptr;
+    QListWidget*   familyCapabilitiesView_ = nullptr;
     QStackedWidget* paramStack_     = nullptr;   // one page per StageKind
+    QLabel*        modelStatusLabel_ = nullptr;
+    QLabel*        capabilityEditorLabel_ = nullptr;
 
     // Strength panel widgets
     QSlider*       strengthSlider_  = nullptr;
@@ -158,6 +184,7 @@ class MainWindow final : public QMainWindow {
     // ── Pipeline list ─────────────────────────────────────────────
     QListWidget* requestedStagesView_ = nullptr;   // user-order, drag-reorder
     QListWidget* plannedStagesView_   = nullptr;   // planner order
+    QListWidget* activeFiltersView_   = nullptr;   // enabled catalog filters
 
     // ── Progress ──────────────────────────────────────────────
     QProgressBar* progressBar_     = nullptr;  ///< Overall job progress (0–100)
@@ -167,18 +194,35 @@ class MainWindow final : public QMainWindow {
 
     // ── Action buttons ────────────────────────────────────────────
     QPushButton* runButton_         = nullptr;
+    QPushButton* previewButton_     = nullptr;   ///< 10-sec preview run
+    QPushButton* pauseButton_       = nullptr;   ///< Pause/resume processing
+    QPushButton* cancelButton_      = nullptr;   ///< Cancel processing
+    QPushButton* addStageButton_    = nullptr;
+    QPushButton* compileModelButton_ = nullptr;
     QPushButton* removeStageButton_ = nullptr;
     QPushButton* moveUpButton_      = nullptr;
     QPushButton* moveDownButton_    = nullptr;
     QPushButton* clearStagesButton_ = nullptr;
+
+    // ── Preview ───────────────────────────────────────────────────
+    QSpinBox*  previewDurationSpin_ = nullptr;   ///< Preview clip length (seconds)
+    QLabel*    framePreviewLabel_   = nullptr;    ///< Live frame display
 
     // ── Utilities bar ─────────────────────────────────────────────
     QComboBox* quickTemplateCombo_  = nullptr;
     QLineEdit* commandPreviewEdit_  = nullptr;
     QPlainTextEdit* logView_        = nullptr;
 
+    // ── Filter browser ─────────────────────────────────────────
+    FilterBrowser* filterBrowser_   = nullptr;
+
     // ── State ─────────────────────────────────────────────────────
     std::vector<ave::EnhancementStage> stages_;
+    std::vector<ave::ManagedModel> currentFamilyModels_;
+    std::map<ave::StageKind, ave::EnhancementStage> familyDraftStages_;
+    std::optional<ave::StageKind> activeFamilyCapability_;
     ave::PipelinePlanner planner_;
     std::atomic<bool> isRunning_{false};
+    std::atomic<bool> cancelFlag_{false};
+    std::atomic<bool> pauseFlag_{false};
 };

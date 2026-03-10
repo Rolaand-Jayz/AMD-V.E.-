@@ -73,12 +73,40 @@ void rgb24ToNchwFp32(const std::uint8_t* rgb,
                      int width, int height,
                      std::vector<float>& tensor);
 
+// ── RGB24 → fp16 NCHW tensor ────────────────────────────────────
+// Converts interleaved RGB24 uint8 [H,W,3] to IEEE-754 binary16 bits
+// in NCHW layout [1,3,H,W] normalised to [0,1].
+void rgb24ToNchwFp16(const std::uint8_t* rgb,
+                     int width, int height,
+                     std::vector<std::uint16_t>& tensor);
+
 // ── fp32 NCHW tensor → RGB24 ────────────────────────────────────
 // Converts a contiguous fp32 NCHW tensor [1,C,H,W] (C≥3, values
 // in [0,1]) back to interleaved RGB24 uint8.  Clamps to [0,255].
 void nchwFp32ToRgb24(const float* tensor,
                      int channels, int width, int height,
                      std::vector<std::uint8_t>& rgb);
+
+// ── fp16 NCHW tensor → RGB24 ────────────────────────────────────
+// Converts IEEE-754 binary16 NCHW [1,C,H,W] (C≥3, values in [0,1]) back
+// to interleaved RGB24 uint8. Clamps to [0,255].
+void nchwFp16ToRgb24(const std::uint16_t* tensor,
+                     int channels, int width, int height,
+                     std::vector<std::uint8_t>& rgb);
+
+// ── AVFrame conversion utilities ─────────────────────────────────
+// Convert any AVFrame to RGB24 bytes using swscale.
+// Returns false on conversion failure.
+bool avFrameToRgb24(const AVFrame* frame,
+                    int width, int height,
+                    std::vector<std::uint8_t>& rgb,
+                    std::string& error);
+
+// Create a new AVFrame (YUV420P) from RGB24 bytes.
+// Caller owns the returned frame (must call av_frame_free).
+AVFrame* rgb24ToAvFrame(const std::uint8_t* rgb,
+                        int width, int height,
+                        std::string& error);
 
 // ── Directory listing ───────────────────────────────────────────
 // Returns a sorted vector of all .png file paths in a directory.

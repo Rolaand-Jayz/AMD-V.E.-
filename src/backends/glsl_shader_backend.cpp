@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 // ─────────────────────────────────────────────────────────────────
 // GLSL Shader Backend – full implementation
 // Applies GLSL fragment/compute shaders to video frames via
@@ -164,53 +161,6 @@ std::vector<std::string> writeCatalogShaders(
     return result;
 }
 
-// Build an FFmpeg command to apply GLSL shaders via libplacebo.
-std::string buildLibplaceboCommand(const std::vector<std::string>& shaderPaths,
-                                    const std::string& inputPattern,
-                                    const std::string& outputPattern,
-                                    int width, int height) {
-    std::ostringstream cmd;
-    cmd << "ffmpeg -hide_banner -loglevel warning -y "
-        << "-i \"" << inputPattern << "\" ";
-
-    // Build libplacebo filter string with shader chain.
-    cmd << "-vf \"";
-    for (std::size_t i = 0; i < shaderPaths.size(); ++i) {
-        if (i > 0) { cmd << ","; }
-        cmd << "libplacebo=custom_shader_path='" << shaderPaths[i] << "'";
-        if (width > 0 && height > 0) {
-            cmd << ":w=" << width << ":h=" << height;
-        }
-    }
-    cmd << "\" ";
-
-    cmd << "\"" << outputPattern << "\"";
-    return cmd.str();
-}
-
-// Build an mpv command to apply GLSL shaders as fallback.
-std::string buildMpvCommand(const std::vector<std::string>& shaderPaths,
-                             const std::string& inputPattern,
-                             const std::string& outputDir,
-                             int width, int height) {
-    std::ostringstream cmd;
-    cmd << "mpv --no-config --vo=gpu-next --gpu-api=vulkan "
-        << "--no-audio --no-sub ";
-
-    // Add shader files.
-    for (const auto& sp : shaderPaths) {
-        cmd << "--glsl-shader=\"" << sp << "\" ";
-    }
-
-    if (width > 0 && height > 0) {
-        cmd << "--vf=scale=" << width << ":" << height << " ";
-    }
-
-    cmd << "--o=\"" << outputDir << "/%08d.png\" "
-        << "\"" << inputPattern << "\"";
-    return cmd.str();
-}
-
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────
@@ -290,18 +240,115 @@ bool GlslShaderBackend::initialize(std::string& error) {
 
 StageResult GlslShaderBackend::runStage(const EnhancementStage& /*stage*/,
                                          std::string& /*error*/) {
-    // Single-stage pass-through; actual work is in processFrameDir.
+    // Pre-validation only; actual work is in processVideoFile.
     return StageResult::Deferred;
 }
 
+StageResult GlslShaderBackend::processVideoFile(
+        const EnhancementStage& stage,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
+        const FrameProgressCb& progressCb,
+        std::string& error,
+        const ProcessVideoOptions& opts) {
+    if (!impl_->initialised) {
+        if (!initialize(error)) {
+            return StageResult::Deferred;
+        }
+    }
+
+    // Resolve shaders: user-specified paths + catalog-embedded shaders.
+    std::vector<std::string> shaderPaths = resolveShaders(stage);
+    auto catalogPaths = writeCatalogShaders(impl_->catalogFilters, stage.kind);
+    shaderPaths.insert(shaderPaths.end(), catalogPaths.begin(), catalogPaths.end());
+
+    if (shaderPaths.empty()) {
+        // No shaders available for this stage — defer to FFmpeg filters.
+        return StageResult::Deferred;
+    }
+
+    // Determine target output dimensions (if upscaling).
+    int outW = 0;
+    int outH = 0;
+    {
+        auto wit = stage.params.find("width");
+        auto hit = stage.params.find("height");
+        if (wit != stage.params.end()) {
+            if (const auto* d = std::get_if<std::int64_t>(&wit->second))
+                outW = static_cast<int>(*d);
+        }
+        if (hit != stage.params.end()) {
+            if (const auto* d = std::get_if<std::int64_t>(&hit->second))
+                outH = static_cast<int>(*d);
+        }
+    }
+
+    if (progressCb) { progressCb(0.0F, "Applying GLSL shaders..."); }
+
+    if (impl_->hasLibplacebo) {
+        // ── Direct FFmpeg libplacebo pipeline ────────────────────
+        std::ostringstream cmd;
+        cmd << "ffmpeg -hide_banner -loglevel error -y ";
+        if (opts.previewDurationSec > 0.0) {
+            cmd << "-t " << opts.previewDurationSec << " ";
+        }
+        cmd << "-i \"" << inputVideo << "\" -vf \"";
+        for (std::size_t i = 0; i < shaderPaths.size(); ++i) {
+            if (i > 0) { cmd << ","; }
+            cmd << "libplacebo=custom_shader_path='" << shaderPaths[i] << "'";
+            if (outW > 0 && outH > 0 && i == shaderPaths.size() - 1) {
+                cmd << ":w=" << outW << ":h=" << outH;
+            }
+        }
+        cmd << "\" -c:v libx264 -crf 0 -preset ultrafast -c:a copy "
+            << "\"" << outputVideo << "\" 2>&1";
+
+        std::cout << "[glsl] Running libplacebo pipeline: "
+                  << shaderPaths.size() << " shaders" << std::endl;
+        const int rc = std::system(cmd.str().c_str());
+        if (rc != 0) {
+            error = "FFmpeg libplacebo exited with code " + std::to_string(rc);
+            return StageResult::Error;
+        }
+    } else if (impl_->hasMpv) {
+        // ── mpv GPU shader pipeline ─────────────────────────────
+        std::ostringstream cmd;
+        cmd << "mpv --no-config --vo=gpu-next --gpu-api=vulkan "
+            << "--no-audio --no-sub ";
+        for (const auto& sp : shaderPaths) {
+            cmd << "--glsl-shader=\"" << sp << "\" ";
+        }
+        if (outW > 0 && outH > 0) {
+            cmd << "--vf=scale=" << outW << ":" << outH << " ";
+        }
+        cmd << "--o=\"" << outputVideo << "\" "
+            << "--of=mp4 --ovc=libx264 --ovcopts=crf=0,preset=ultrafast ";
+        if (opts.previewDurationSec > 0.0) {
+            cmd << "--end=" << opts.previewDurationSec << " ";
+        }
+        cmd << "\"" << inputVideo << "\" 2>&1";
+
+        std::cout << "[glsl] Running mpv pipeline: "
+                  << shaderPaths.size() << " shaders" << std::endl;
+        const int rc = std::system(cmd.str().c_str());
+        if (rc != 0) {
+            error = "mpv shader processing exited with code " + std::to_string(rc);
+            return StageResult::Error;
+        }
+    } else {
+        error = "No GLSL runtime available (need ffmpeg with libplacebo or mpv).";
+        return StageResult::Deferred;
+    }
+
+    if (progressCb) { progressCb(1.0F, "GLSL shader processing complete."); }
+    std::cout << "[glsl] Done: " << toString(stage.kind)
+              << " with " << shaderPaths.size() << " shaders" << std::endl;
+    return StageResult::Processed;
+}
 
 void GlslShaderBackend::setCatalogFilters(
         const std::vector<ActiveFilter>& filters) {
     impl_->catalogFilters = filters;
 }
 
-
-
 }  // namespace ave
-
-#endif // ── entire file disabled ──────────────────────────────

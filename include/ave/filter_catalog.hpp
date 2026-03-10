@@ -1,6 +1,3 @@
-// DISABLED: VapourSynth/GLSL/FilterCatalog feature — commented out, not removed.
-#if 0  // ── entire file disabled ──────────────────────────────
-
 #pragma once
 
 // ─────────────────────────────────────────────────────────────────
@@ -95,11 +92,12 @@ std::vector<const EmbeddedFilter*> filtersForRuntime(FilterRuntime rt);
 // Get all filters for a given stage kind.
 std::vector<const EmbeddedFilter*> filtersForStage(StageKind kind);
 
+// Build a concise display label for an enabled filter.
+std::string displayNameForFilter(const ActiveFilter& filter);
+
 // Resolve a shader source with parameter substitution.
 // Placeholders like {{STRENGTH}} are replaced by paramValues.
 std::string resolveSource(const EmbeddedFilter& filter,
                           const std::unordered_map<std::string, double>& paramValues);
 
 }  // namespace ave
-
-#endif // ── entire file disabled ──────────────────────────────
