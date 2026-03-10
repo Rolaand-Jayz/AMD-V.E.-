@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -46,6 +48,19 @@ namespace {
 // waits for the actual input frame size before producing inference artifacts.
 constexpr int kDefaultBaselineCompileWidth = 192;
 constexpr int kDefaultBaselineCompileHeight = 192;
+constexpr int kDefaultMiopenCompileParallelCap = 8;
+
+enum class MiGraphXCompileProfile {
+    Fast,
+    Balanced,
+    Exhaustive,
+};
+
+struct MiGraphXDriverEnv {
+    std::vector<std::pair<std::string, std::string>> effective;
+    std::vector<std::pair<std::string, std::string>> overrides;
+    MiGraphXCompileProfile profile = MiGraphXCompileProfile::Fast;
+};
 
 std::string defaultModelsDir() {
     const char* home = std::getenv("HOME");
@@ -192,6 +207,145 @@ int baselineCompileWidth() {
 int baselineCompileHeight() {
     return readPositiveIntEnv("AVE_MIGRAPHX_BASELINE_HEIGHT",
                               kDefaultBaselineCompileHeight, 32, 4096);
+}
+
+std::optional<std::string> readNonEmptyEnv(const char* name) {
+    if (const char* raw = std::getenv(name); raw != nullptr && *raw != '\0') {
+        return std::string(raw);
+    }
+    return std::nullopt;
+}
+
+std::string defaultAveCacheDir() {
+    const char* home = std::getenv("HOME");
+    if (home != nullptr) {
+        return std::string(home) + "/.cache/ave";
+    }
+    return "/tmp/ave_cache";
+}
+
+std::filesystem::path defaultMiGraphXProblemCachePath() {
+    return std::filesystem::path(defaultAveCacheDir()) / "migraphx" / "problem_cache.json";
+}
+
+std::filesystem::path defaultMiopenUserDbPath() {
+    const char* home = std::getenv("HOME");
+    if (home != nullptr) {
+        return std::filesystem::path(home) / ".config" / "miopen";
+    }
+    return std::filesystem::path("/tmp/miopen_user_db");
+}
+
+std::filesystem::path defaultMiopenCacheDir() {
+    const char* home = std::getenv("HOME");
+    if (home != nullptr) {
+        return std::filesystem::path(home) / ".cache" / "miopen";
+    }
+    return std::filesystem::path("/tmp/miopen_cache");
+}
+
+int defaultMiopenCompileParallelLevel() {
+    unsigned int hwThreads = std::thread::hardware_concurrency();
+    if (hwThreads == 0u) {
+        hwThreads = 4u;
+    }
+    const unsigned int halfThreads = std::max(1u, hwThreads / 2u);
+    return static_cast<int>(std::min(halfThreads,
+                                     static_cast<unsigned int>(kDefaultMiopenCompileParallelCap)));
+}
+
+MiGraphXCompileProfile defaultMiGraphXCompileProfile() {
+    const auto rawProfile = readNonEmptyEnv("AVE_MIGRAPHX_COMPILE_PROFILE");
+    if (!rawProfile.has_value()) {
+        return MiGraphXCompileProfile::Fast;
+    }
+
+    std::string value = *rawProfile;
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (value == "balanced" || value == "default" || value == "dynamic_hybrid") {
+        return MiGraphXCompileProfile::Balanced;
+    }
+    if (value == "exhaustive" || value == "full" || value == "normal") {
+        return MiGraphXCompileProfile::Exhaustive;
+    }
+    return MiGraphXCompileProfile::Fast;
+}
+
+std::string miGraphXCompileProfileLabel(MiGraphXCompileProfile profile) {
+    switch (profile) {
+        case MiGraphXCompileProfile::Fast: return "fast";
+        case MiGraphXCompileProfile::Balanced: return "balanced";
+        case MiGraphXCompileProfile::Exhaustive: return "exhaustive";
+    }
+    return "fast";
+}
+
+std::string defaultMiopenFindMode(MiGraphXCompileProfile profile) {
+    switch (profile) {
+        case MiGraphXCompileProfile::Fast: return "FAST";
+        case MiGraphXCompileProfile::Balanced: return "DYNAMIC_HYBRID";
+        case MiGraphXCompileProfile::Exhaustive: return "NORMAL";
+    }
+    return "FAST";
+}
+
+void appendEffectiveEnv(MiGraphXDriverEnv& env,
+                        const std::string& name,
+                        const std::string& value) {
+    env.effective.emplace_back(name, value);
+    const char* current = std::getenv(name.c_str());
+    if (current == nullptr || value != current) {
+        env.overrides.emplace_back(name, value);
+    }
+}
+
+MiGraphXDriverEnv buildMiGraphXDriverEnv() {
+    MiGraphXDriverEnv env;
+    env.profile = defaultMiGraphXCompileProfile();
+
+    const std::string problemCache = readNonEmptyEnv("AVE_MIGRAPHX_PROBLEM_CACHE")
+        .value_or(readNonEmptyEnv("MIGRAPHX_PROBLEM_CACHE")
+                      .value_or(defaultMiGraphXProblemCachePath().string()));
+    const std::string miopenUserDb = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_USER_DB_PATH")
+        .value_or(readNonEmptyEnv("MIOPEN_USER_DB_PATH")
+                      .value_or(defaultMiopenUserDbPath().string()));
+    const std::string miopenCache = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_CACHE_DIR")
+        .value_or(readNonEmptyEnv("MIOPEN_CUSTOM_CACHE_DIR")
+                      .value_or(defaultMiopenCacheDir().string()));
+    const std::string miopenFindMode = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_FIND_MODE")
+        .value_or(readNonEmptyEnv("MIOPEN_FIND_MODE")
+                      .value_or(defaultMiopenFindMode(env.profile)));
+    const std::string miopenCompileParallel = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_COMPILE_PARALLEL_LEVEL")
+        .value_or(readNonEmptyEnv("MIOPEN_COMPILE_PARALLEL_LEVEL")
+                      .value_or(std::to_string(defaultMiopenCompileParallelLevel())));
+
+    ensureDir(std::filesystem::path(problemCache).parent_path());
+    ensureDir(std::filesystem::path(miopenUserDb));
+    ensureDir(std::filesystem::path(miopenCache));
+
+    appendEffectiveEnv(env, "MIGRAPHX_PROBLEM_CACHE", problemCache);
+    appendEffectiveEnv(env, "MIOPEN_USER_DB_PATH", miopenUserDb);
+    appendEffectiveEnv(env, "MIOPEN_CUSTOM_CACHE_DIR", miopenCache);
+    appendEffectiveEnv(env, "MIOPEN_FIND_MODE", miopenFindMode);
+    appendEffectiveEnv(env, "MIOPEN_COMPILE_PARALLEL_LEVEL", miopenCompileParallel);
+
+    if (const auto visibleDevices = readNonEmptyEnv("AVE_MIGRAPHX_VISIBLE_DEVICES");
+        visibleDevices.has_value()) {
+        appendEffectiveEnv(env, "ROCR_VISIBLE_DEVICES", *visibleDevices);
+        appendEffectiveEnv(env, "HIP_VISIBLE_DEVICES", *visibleDevices);
+    }
+
+    return env;
+}
+
+std::string formatMiGraphXDriverEnv(const MiGraphXDriverEnv& env) {
+    std::ostringstream out;
+    out << "profile=" << miGraphXCompileProfileLabel(env.profile);
+    for (const auto& [name, value] : env.effective) {
+        out << "\n" << name << "=" << value;
+    }
+    return out.str();
 }
 
 #ifdef AVE_HAVE_MIGRAPHX
@@ -909,6 +1063,9 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
         return false;
     }
 
+    const MiGraphXDriverEnv driverEnv = buildMiGraphXDriverEnv();
+    const std::string driverEnvSummary = formatMiGraphXDriverEnv(driverEnv);
+
     if (progressCb) { progressCb(modelId, 0.02f, "Inspecting ONNX input tensors…"); }
 
     std::ostringstream cmd;
@@ -951,13 +1108,26 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
     } else {
         wrappedCmd << cmd.str();
     }
-    const std::string cmdStr = wrappedCmd.str() + " 2>&1";
+    std::ostringstream commandWithEnv;
+    if (!driverEnv.overrides.empty()) {
+        commandWithEnv << "env";
+        for (const auto& [name, value] : driverEnv.overrides) {
+            commandWithEnv << ' ' << shellQuote(name + "=" + value);
+        }
+        commandWithEnv << ' ';
+    }
+    commandWithEnv << wrappedCmd.str();
+    const std::string cmdStr = commandWithEnv.str() + " 2>&1";
 
     if (progressCb && usedDimParamFallback) {
         progressCb(modelId, 0.03f,
             "ONNX input inspection failed; using symbolic dimension fallback…");
     }
-    if (progressCb) { progressCb(modelId, 0.05f, "Launching migraphx-driver…"); }
+    if (progressCb) {
+        progressCb(modelId, 0.05f,
+            "Launching migraphx-driver (" + miGraphXCompileProfileLabel(driverEnv.profile)
+            + " compile profile)…");
+    }
 
     std::atomic<bool> compileDone{false};
     std::atomic<int> compileExit{-1};
@@ -1048,6 +1218,7 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
         if (!inputProbeError.empty()) {
             msg << "\nInput inspection note:\n" << inputProbeError;
         }
+        msg << "\nCompile environment:\n" << driverEnvSummary;
         if (!driverOutput.empty()) {
             msg << "\nDriver output:\n" << driverOutput;
         }

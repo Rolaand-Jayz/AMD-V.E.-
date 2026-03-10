@@ -84,6 +84,14 @@ For MiGraphX, first use may trigger a compile step. Those compiled artifacts are
 - Mixed iGPU+dGPU systems may need `HIP_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES`
 - On unsupported ROCm distributions, backend behavior is best-effort
 
+MiGraphX compile tuning:
+
+- `AVE_MIGRAPHX_COMPILE_PROFILE=fast|balanced|exhaustive`
+- `AVE_MIGRAPHX_PROBLEM_CACHE=/path/to/problem_cache.json`
+- `AVE_MIGRAPHX_MIOPEN_FIND_MODE=FAST|DYNAMIC_HYBRID|NORMAL`
+- `AVE_MIGRAPHX_MIOPEN_COMPILE_PARALLEL_LEVEL=<n>`
+- `AVE_MIGRAPHX_VISIBLE_DEVICES=<gpu-list>`
+
 ## Docs
 
 - `docs/FEATURE_PARITY_MATRIX.md`
