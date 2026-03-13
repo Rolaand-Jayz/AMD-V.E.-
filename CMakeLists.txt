@@ -262,3 +262,12 @@ target_include_directories(planner_tests PRIVATE include)
 target_compile_definitions(planner_tests PRIVATE ${AVE_COMPILE_DEFS})
 ave_add_warnings(planner_tests)
 add_test(NAME planner_tests COMMAND planner_tests)
+
+add_executable(tensor_contract_tests
+    tests/tensor_contract_tests.cpp
+    src/tensor_contract.cpp
+)
+target_include_directories(tensor_contract_tests PRIVATE include)
+target_compile_definitions(tensor_contract_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(tensor_contract_tests)
+add_test(NAME tensor_contract_tests COMMAND tensor_contract_tests)

@@ -922,9 +922,10 @@ struct MiGraphXBackend::Impl {
             for (const auto len : shape.lengths()) {
                 c.shape.dims.push_back(static_cast<std::int64_t>(len));
             }
-            // MiGraphX default layout is NCHW; honour NHWC env var
-            const bool nhwcEnv = std::getenv("MIGRAPHX_ENABLE_NHWC") != nullptr;
-            c.layout = nhwcEnv ? TensorLayout::NHWC : TensorLayout::NCHW;
+            c.layout = inferTensorLayout(c.shape.dims);
+            if (c.layout == TensorLayout::Unknown) {
+                c.layout = TensorLayout::NCHW;
+            }
             result.push_back(std::move(c));
         }
         return result;
@@ -1085,8 +1086,10 @@ struct MiGraphXBackend::Impl {
                 for (const auto len : outShapes[i].lengths()) {
                     oc.shape.dims.push_back(static_cast<std::int64_t>(len));
                 }
-                const bool nhwcEnv = std::getenv("MIGRAPHX_ENABLE_NHWC") != nullptr;
-                oc.layout = nhwcEnv ? TensorLayout::NHWC : TensorLayout::NCHW;
+                oc.layout = inferTensorLayout(oc.shape.dims);
+                if (oc.layout == TensorLayout::Unknown) {
+                    oc.layout = TensorLayout::NCHW;
+                }
                 mp.outputContracts.push_back(std::move(oc));
             }
 
