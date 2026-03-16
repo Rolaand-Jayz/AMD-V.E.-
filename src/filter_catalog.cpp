@@ -771,6 +771,234 @@ vec4 hook() {
 }
 )";
 
+// ── Live-action oriented GLSL profiles ─────────────────────────
+
+static const char* const kGlslLiveActionClarity = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Live-Action Clarity
+
+vec4 hook() {
+    float strength = {{STRENGTH}};
+    float protect = {{HIGHLIGHT_PROTECT}};
+    vec3 c = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 blur = vec3(0.0);
+    float total = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float w = (x == 0 && y == 0) ? 4.0 : 1.0;
+            blur += HOOKED_texOff(vec2(float(x), float(y))).rgb * w;
+            total += w;
+        }
+    }
+    blur /= total;
+
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float highlightMask = 1.0 - smoothstep(0.55, 0.95 - protect * 0.2, luma);
+    vec3 detail = c - blur;
+    vec3 result = c + detail * strength * highlightMask;
+    return vec4(clamp(result, 0.0, 1.0), 1.0);
+}
+)";
+
+static const char* const kGlslMicroContrastLive = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Micro Contrast Pop
+
+vec4 hook() {
+    float strength = {{STRENGTH}};
+    vec3 c = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 small = vec3(0.0);
+    vec3 large = vec3(0.0);
+    float smallTotal = 0.0;
+    float largeTotal = 0.0;
+
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float w = (x == 0 && y == 0) ? 4.0 : 1.0;
+            small += HOOKED_texOff(vec2(float(x), float(y))).rgb * w;
+            smallTotal += w;
+        }
+    }
+    for (int x = -2; x <= 2; x++) {
+        for (int y = -2; y <= 2; y++) {
+            large += HOOKED_texOff(vec2(float(x), float(y))).rgb;
+            largeTotal += 1.0;
+        }
+    }
+
+    small /= smallTotal;
+    large /= largeTotal;
+
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float midMask = smoothstep(0.08, 0.22, luma) * (1.0 - smoothstep(0.72, 0.92, luma));
+    vec3 result = c + (small - large) * strength * midMask;
+    return vec4(clamp(result, 0.0, 1.0), 1.0);
+}
+)";
+
+static const char* const kGlslChromaCleanup = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Chroma Noise Cleanup
+
+vec3 rgb_to_yuv(vec3 c) {
+    return vec3(
+        dot(c, vec3(0.2126, 0.7152, 0.0722)),
+        dot(c, vec3(-0.114572, -0.385428, 0.5)),
+        dot(c, vec3(0.5, -0.454153, -0.045847))
+    );
+}
+
+vec3 yuv_to_rgb(vec3 c) {
+    return vec3(
+        c.x + 1.5748 * c.z,
+        c.x - 0.187324 * c.y - 0.468124 * c.z,
+        c.x + 1.8556 * c.y
+    );
+}
+
+vec4 hook() {
+    float strength = {{STRENGTH}};
+    vec3 center = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 centerYuv = rgb_to_yuv(center);
+    vec2 chroma = vec2(0.0);
+    float total = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec3 sampleYuv = rgb_to_yuv(HOOKED_texOff(vec2(float(x), float(y))).rgb);
+            float w = (x == 0 && y == 0) ? 2.0 : 1.0;
+            chroma += sampleYuv.yz * w;
+            total += w;
+        }
+    }
+    chroma /= total;
+    vec3 cleaned = vec3(centerYuv.x, mix(centerYuv.yz, chroma, strength));
+    return vec4(clamp(yuv_to_rgb(cleaned), 0.0, 1.0), 1.0);
+}
+)";
+
+static const char* const kGlslLowLightCleanup = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Low-Light Cleanup
+
+vec4 hook() {
+    float strength = {{STRENGTH}};
+    float detail_return = {{DETAIL_RETURN}};
+    vec3 c = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 blur = vec3(0.0);
+    float total = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float w = (x == 0 && y == 0) ? 3.0 : 1.0;
+            blur += HOOKED_texOff(vec2(float(x), float(y))).rgb * w;
+            total += w;
+        }
+    }
+    blur /= total;
+
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float shadowMask = 1.0 - smoothstep(0.12, 0.45, luma);
+    vec3 denoised = mix(c, blur, strength * shadowMask);
+    vec3 detail = c - blur;
+    vec3 result = denoised + detail * detail_return * (1.0 - shadowMask * 0.4);
+    return vec4(clamp(result, 0.0, 1.0), 1.0);
+}
+)";
+
+static const char* const kGlslShadowRecovery = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Shadow Recovery
+
+vec4 hook() {
+    float lift = {{LIFT}};
+    float pivot = {{PIVOT}};
+    vec4 c = HOOKED_texOff(vec2(0.0, 0.0));
+    float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float shadowMask = 1.0 - smoothstep(pivot, pivot + 0.25, luma);
+    vec3 lifted = c.rgb + shadowMask * lift * (1.0 - c.rgb);
+    return vec4(clamp(lifted, 0.0, 1.0), c.a);
+}
+)";
+
+static const char* const kGlslHighlightRolloff = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Highlight Rolloff
+
+vec4 hook() {
+    float threshold = {{THRESHOLD}};
+    float rolloff = {{ROLLOFF}};
+    vec4 c = HOOKED_texOff(vec2(0.0, 0.0));
+    vec3 base = min(c.rgb, vec3(threshold));
+    vec3 above = max(c.rgb - vec3(threshold), vec3(0.0));
+    vec3 compressed = base + above / (1.0 + above * (2.0 + rolloff * 6.0));
+    return vec4(clamp(compressed, 0.0, 1.0), c.a);
+}
+)";
+
+static const char* const kGlslTextureRecover = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Texture Recover
+
+vec4 hook() {
+    float amount = {{AMOUNT}};
+    float clamp_amt = {{CLAMP}};
+    vec3 c = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 blur = vec3(0.0);
+    float total = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float w = (x == 0 && y == 0) ? 4.0 : 1.0;
+            blur += HOOKED_texOff(vec2(float(x), float(y))).rgb * w;
+            total += w;
+        }
+    }
+    blur /= total;
+    vec3 detail = clamp(c - blur, vec3(-clamp_amt), vec3(clamp_amt));
+    vec3 result = c + detail * amount;
+    return vec4(clamp(result, 0.0, 1.0), 1.0);
+}
+)";
+
+static const char* const kGlslCompressionRescue = R"(
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Compression Rescue
+
+vec4 hook() {
+    float deblock = {{DEBLOCK}};
+    float deband = {{DEBAND}};
+    vec3 c = HOOKED_texOff(vec2(0.0, 0.0)).rgb;
+    vec3 avg = vec3(0.0);
+    vec3 mn = c;
+    vec3 mx = c;
+    float total = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec3 s = HOOKED_texOff(vec2(float(x), float(y))).rgb;
+            avg += s;
+            mn = min(mn, s);
+            mx = max(mx, s);
+            total += 1.0;
+        }
+    }
+    avg /= total;
+
+    float blockMask = max(step(7.5, mod(gl_FragCoord.x, 8.0)),
+                          step(7.5, mod(gl_FragCoord.y, 8.0)));
+    float localVar = length(mx - mn);
+    float flatMask = 1.0 - smoothstep(0.04, 0.12, localVar);
+    float smoothAmt = clamp(blockMask * deblock + flatMask * deband, 0.0, 1.0);
+    vec3 result = mix(c, avg, smoothAmt);
+    return vec4(clamp(result, 0.0, 1.0), 1.0);
+}
+)";
+
 // ═════════════════════════════════════════════════════════════════
 //  VapourSynth Script Sources
 // ═════════════════════════════════════════════════════════════════
@@ -1060,8 +1288,149 @@ try:
     clip = core.focus2.TemporalSoften2(clip, radius=radius,
         luma_threshold=luma_threshold, chroma_threshold=chroma_threshold)
 except:
-    clip = core.focus.TemporalSoften(clip, radius=radius,
+clip = core.focus.TemporalSoften(clip, radius=radius,
         luma_threshold=luma_threshold, chroma_threshold=chroma_threshold)
+clip.set_output()
+)";
+
+// ── Live-action oriented VapourSynth profiles ──────────────────
+
+static const char* const kVsLiveActionCleanup = R"(
+# Live-Action Cleanup
+import vapoursynth as vs
+core = vs.core
+clip = video
+strength = {{STRENGTH}}
+detail_return = {{DETAIL_RETURN}}
+try:
+    den = core.knlm.KNLMeansCL(clip, d=1, a=2, s=4, h=strength, device_type='gpu')
+except:
+    try:
+        den = core.knlm.KNLMeansCL(clip, d=1, a=2, s=4, h=strength, device_type='cpu')
+    except:
+        den = core.std.BoxBlur(clip, hradius=1, hpasses=1, vradius=1, vpasses=1)
+detail = core.std.MakeDiff(clip, den)
+detail = core.std.Expr([detail], 'x 128 - {{DETAIL_RETURN}} * 128 +')
+clip = core.std.MergeDiff(den, detail)
+clip.set_output()
+)";
+
+static const char* const kVsLowLightCleanup = R"(
+# Low-Light Cleanup
+import vapoursynth as vs
+core = vs.core
+clip = video
+strength = {{STRENGTH}}
+shadow_gamma = {{SHADOW_GAMMA}}
+detail_return = {{DETAIL_RETURN}}
+try:
+    den = core.dfttest.DFTTest(clip, sigma=strength, tbsize=1)
+except:
+    den = core.std.BoxBlur(clip, hradius=1, hpasses=2, vradius=1, vpasses=2)
+den = core.std.Levels(den, min_in=0, max_in=255, gamma=shadow_gamma, min_out=0, max_out=255)
+detail = core.std.MakeDiff(clip, den)
+detail = core.std.Expr([detail], 'x 128 - {{DETAIL_RETURN}} * 128 +')
+clip = core.std.MergeDiff(den, detail)
+clip.set_output()
+)";
+
+static const char* const kVsChromaCleanup = R"(
+# Chroma Cleanup
+import vapoursynth as vs
+core = vs.core
+clip = video
+radius = int({{RADIUS}})
+orig = clip
+src_fmt = clip.format.id if clip.format is not None else None
+was_rgb = clip.format is not None and clip.format.color_family == vs.RGB
+if was_rgb:
+    work = core.resize.Bicubic(clip, format=vs.YUV444P16, matrix_s='709')
+else:
+    work = clip
+y = core.std.ShufflePlanes(work, 0, vs.GRAY)
+u = core.std.ShufflePlanes(work, 1, vs.GRAY)
+v = core.std.ShufflePlanes(work, 2, vs.GRAY)
+u = core.std.BoxBlur(u, hradius=radius, hpasses=1, vradius=radius, vpasses=1)
+v = core.std.BoxBlur(v, hradius=radius, hpasses=1, vradius=radius, vpasses=1)
+work = core.std.ShufflePlanes([y, u, v], [0, 0, 0], vs.YUV)
+if was_rgb and src_fmt is not None:
+    clip = core.resize.Bicubic(work, format=src_fmt, matrix_in_s='709')
+else:
+    clip = work
+clip.set_output()
+)";
+
+static const char* const kVsLocalContrast = R"(
+# Local Contrast
+import vapoursynth as vs
+core = vs.core
+clip = video
+radius = int({{RADIUS}})
+strength = {{STRENGTH}}
+blur = core.std.BoxBlur(clip, hradius=radius, hpasses=1, vradius=radius, vpasses=1)
+detail = core.std.MakeDiff(clip, blur)
+detail = core.std.Expr([detail], 'x 128 - {{STRENGTH}} * 128 +')
+clip = core.std.MergeDiff(clip, detail)
+clip.set_output()
+)";
+
+static const char* const kVsShadowLift = R"(
+# Shadow Lift
+import vapoursynth as vs
+core = vs.core
+clip = video
+gamma = {{GAMMA}}
+clip = core.std.Levels(clip, min_in=0, max_in=255, gamma=gamma, min_out=0, max_out=255)
+clip.set_output()
+)";
+
+static const char* const kVsHighlightRolloff = R"(
+# Highlight Rolloff
+import vapoursynth as vs
+core = vs.core
+clip = video
+clip = core.std.Expr([clip], 'x {{THRESHOLD}} > {{THRESHOLD}} x {{THRESHOLD}} - 1 {{ROLLOFF}} + / + x ?')
+clip.set_output()
+)";
+
+static const char* const kVsGrainRetainCleanup = R"(
+# Grain-Retain Cleanup
+import vapoursynth as vs
+core = vs.core
+clip = video
+strength = {{STRENGTH}}
+grain_keep = {{GRAIN_KEEP}}
+try:
+    den = core.knlm.KNLMeansCL(clip, d=1, a=2, s=4, h=strength, device_type='gpu')
+except:
+    den = core.std.BoxBlur(clip, hradius=1, hpasses=1, vradius=1, vpasses=1)
+detail = core.std.MakeDiff(clip, den)
+detail = core.std.Expr([detail], 'x 128 - {{GRAIN_KEEP}} * 128 +')
+clip = core.std.MergeDiff(den, detail)
+clip.set_output()
+)";
+
+static const char* const kVsCompressionRescue = R"(
+# Compression Rescue
+import vapoursynth as vs
+core = vs.core
+clip = video
+deblock_q = int({{DEBLOCK_Q}})
+detail_return = {{DETAIL_RETURN}}
+try:
+    work = core.deblock.Deblock(clip, quant=deblock_q, aoffset=0, boffset=0)
+except:
+    work = core.std.BoxBlur(clip, hradius=1, hpasses=1, vradius=1, vpasses=1)
+try:
+    work = core.neo_f3kdb.Deband(work, range=15, y=48, cb=32, cr=32, grainy=0, grainc=0)
+except:
+    try:
+        work = core.f3kdb.Deband(work, range=15, y=48, cb=32, cr=32, grainy=0, grainc=0)
+    except:
+        work = core.std.BoxBlur(work, hradius=1, hpasses=1, vradius=1, vpasses=1)
+detail = core.std.MakeDiff(clip, work)
+detail = core.std.Expr([detail], 'x 128 - {{DETAIL_RETURN}} * 128 +')
+clip = core.std.MergeDiff(work, detail)
 clip.set_output()
 )";
 
@@ -1377,6 +1746,86 @@ std::vector<EmbeddedFilter> buildCatalog() {
          {"SHIFT_B", "Blue Shift", "Blue channel radial offset", -5.0, 5.0, 0.0, 0.1, false}}
     });
 
+    // ── GLSL Live-action Profiles ──────────────────────────────
+
+    filters.push_back({
+        "glsl.liveaction_clarity",
+        "Live-Action Clarity",
+        "Natural detail lift for realistic footage with highlight protection.",
+        FilterCategory::Sharpen, FilterRuntime::Glsl, StageKind::Sharpen, 12,
+        kGlslLiveActionClarity,
+        {{"STRENGTH", "Strength", "Local detail lift", 0.1, 2.0, 0.55, 0.05, false},
+         {"HIGHLIGHT_PROTECT", "Highlight Protect", "Reduce sharpening in bright areas", 0.0, 1.0, 0.5, 0.05, false}}
+    });
+
+    filters.push_back({
+        "glsl.micro_contrast_live",
+        "Micro Contrast Pop",
+        "Boost small-scale live-action texture without a hard sharpened look.",
+        FilterCategory::Sharpen, FilterRuntime::Glsl, StageKind::Sharpen, 14,
+        kGlslMicroContrastLive,
+        {{"STRENGTH", "Strength", "Micro-contrast enhancement", 0.1, 2.0, 0.45, 0.05, false}}
+    });
+
+    filters.push_back({
+        "glsl.texture_recover",
+        "Texture Recover",
+        "Recover fine texture after denoising or compression cleanup.",
+        FilterCategory::Sharpen, FilterRuntime::Glsl, StageKind::Sharpen, 16,
+        kGlslTextureRecover,
+        {{"AMOUNT", "Amount", "Texture restoration strength", 0.1, 2.0, 0.5, 0.05, false},
+         {"CLAMP", "Clamp", "Limit per-pixel overshoot", 0.01, 0.25, 0.08, 0.01, false}}
+    });
+
+    filters.push_back({
+        "glsl.chroma_cleanup",
+        "Chroma Cleanup",
+        "Clean colour speckle and chroma crawl common in real-world footage.",
+        FilterCategory::Denoise, FilterRuntime::Glsl, StageKind::Denoise, 12,
+        kGlslChromaCleanup,
+        {{"STRENGTH", "Strength", "Chroma smoothing amount", 0.0, 1.0, 0.55, 0.05, false}}
+    });
+
+    filters.push_back({
+        "glsl.lowlight_cleanup",
+        "Low-Light Cleanup",
+        "Shadow-weighted cleanup tuned for high-ISO realistic footage.",
+        FilterCategory::Denoise, FilterRuntime::Glsl, StageKind::Denoise, 14,
+        kGlslLowLightCleanup,
+        {{"STRENGTH", "Strength", "Shadow denoise amount", 0.1, 1.0, 0.55, 0.05, false},
+         {"DETAIL_RETURN", "Detail Return", "How much texture to put back", 0.0, 1.0, 0.35, 0.05, false}}
+    });
+
+    filters.push_back({
+        "glsl.shadow_recovery",
+        "Shadow Recovery",
+        "Lift dark regions without flattening the rest of the shot.",
+        FilterCategory::ColorCorrection, FilterRuntime::Glsl, StageKind::ColorFix, 12,
+        kGlslShadowRecovery,
+        {{"LIFT", "Lift", "Shadow lift intensity", 0.0, 1.0, 0.18, 0.02, false},
+         {"PIVOT", "Pivot", "Upper limit of the lifted range", 0.05, 0.45, 0.22, 0.01, false}}
+    });
+
+    filters.push_back({
+        "glsl.highlight_rolloff",
+        "Highlight Rolloff",
+        "Compress clipped-looking highlights for more natural live-action tone.",
+        FilterCategory::ColorCorrection, FilterRuntime::Glsl, StageKind::ColorFix, 14,
+        kGlslHighlightRolloff,
+        {{"THRESHOLD", "Threshold", "Where highlight compression starts", 0.55, 0.95, 0.78, 0.01, false},
+         {"ROLLOFF", "Rolloff", "Compression strength above threshold", 0.1, 2.0, 0.65, 0.05, false}}
+    });
+
+    filters.push_back({
+        "glsl.compression_rescue",
+        "Compression Rescue",
+        "Combined deblock/deband cleanup for compressed live-action sources.",
+        FilterCategory::Restoration, FilterRuntime::Glsl, StageKind::RemoveArtifacts, 12,
+        kGlslCompressionRescue,
+        {{"DEBLOCK", "Deblock", "Strength near block boundaries", 0.0, 1.0, 0.45, 0.05, false},
+         {"DEBAND", "Deband", "Flat-area smoothing for posterization", 0.0, 1.0, 0.35, 0.05, false}}
+    });
+
     // ═════════════════════════════════════════════════════════════
     //  VapourSynth Filters
     // ═════════════════════════════════════════════════════════════
@@ -1563,6 +2012,87 @@ std::vector<EmbeddedFilter> buildCatalog() {
         FilterCategory::ColorCorrection, FilterRuntime::VapourSynth, StageKind::ColorFix, 20,
         kVsAutoWhiteBalance,
         {{"STRENGTH", "Strength", "Correction intensity", 0.1, 2.0, 1.0, 0.1, false}}
+    });
+
+    // ── VS Live-action Profiles ────────────────────────────────
+
+    filters.push_back({
+        "vs.liveaction_cleanup",
+        "Live-Action Cleanup",
+        "General-purpose detail-preserving cleanup profile for realistic footage.",
+        FilterCategory::Denoise, FilterRuntime::VapourSynth, StageKind::Denoise, 12,
+        kVsLiveActionCleanup,
+        {{"STRENGTH", "Strength", "Primary denoise intensity", 0.2, 6.0, 1.6, 0.1, false},
+         {"DETAIL_RETURN", "Detail Return", "How much original texture to restore", 0.0, 1.0, 0.35, 0.05, false}}
+    });
+
+    filters.push_back({
+        "vs.lowlight_cleanup",
+        "Low-Light Cleanup",
+        "Stronger cleanup profile for dark, noisy live-action footage.",
+        FilterCategory::Denoise, FilterRuntime::VapourSynth, StageKind::Denoise, 14,
+        kVsLowLightCleanup,
+        {{"STRENGTH", "Strength", "Noise reduction intensity", 1.0, 12.0, 4.5, 0.5, false},
+         {"SHADOW_GAMMA", "Shadow Gamma", "Post-cleanup shadow lift", 0.6, 1.2, 0.9, 0.05, false},
+         {"DETAIL_RETURN", "Detail Return", "Texture restored after denoising", 0.0, 1.0, 0.25, 0.05, false}}
+    });
+
+    filters.push_back({
+        "vs.chroma_cleanup",
+        "Chroma Cleanup",
+        "Reduce chroma noise and colour crawl while keeping luma detail.",
+        FilterCategory::Denoise, FilterRuntime::VapourSynth, StageKind::Denoise, 16,
+        kVsChromaCleanup,
+        {{"RADIUS", "Radius", "Blur radius for chroma planes", 1.0, 4.0, 2.0, 1.0, true}}
+    });
+
+    filters.push_back({
+        "vs.grain_retain_cleanup",
+        "Grain-Retain Cleanup",
+        "Denoise live footage while deliberately keeping some organic grain texture.",
+        FilterCategory::Denoise, FilterRuntime::VapourSynth, StageKind::Denoise, 18,
+        kVsGrainRetainCleanup,
+        {{"STRENGTH", "Strength", "Base denoise amount", 0.2, 6.0, 1.4, 0.1, false},
+         {"GRAIN_KEEP", "Grain Keep", "How much high-frequency detail to retain", 0.0, 1.0, 0.55, 0.05, false}}
+    });
+
+    filters.push_back({
+        "vs.local_contrast",
+        "Local Contrast",
+        "Add natural punch and clarity to realistic footage without hard edges.",
+        FilterCategory::Sharpen, FilterRuntime::VapourSynth, StageKind::Sharpen, 12,
+        kVsLocalContrast,
+        {{"RADIUS", "Radius", "Contrast neighborhood radius", 1.0, 5.0, 2.0, 1.0, true},
+         {"STRENGTH", "Strength", "Local contrast amount", 0.0, 1.0, 0.3, 0.05, false}}
+    });
+
+    filters.push_back({
+        "vs.shadow_lift",
+        "Shadow Lift",
+        "Lift dark live-action footage using a conservative gamma adjustment.",
+        FilterCategory::ColorCorrection, FilterRuntime::VapourSynth, StageKind::ColorFix, 12,
+        kVsShadowLift,
+        {{"GAMMA", "Gamma", "Lower values lift shadows more", 0.55, 1.0, 0.82, 0.05, false}}
+    });
+
+    filters.push_back({
+        "vs.highlight_rolloff",
+        "Highlight Rolloff",
+        "Compress harsh highlights for a less clipped look.",
+        FilterCategory::ColorCorrection, FilterRuntime::VapourSynth, StageKind::ColorFix, 14,
+        kVsHighlightRolloff,
+        {{"THRESHOLD", "Threshold", "Brightness level where rolloff starts", 160.0, 245.0, 215.0, 1.0, true},
+         {"ROLLOFF", "Rolloff", "Compression strength", 0.1, 3.0, 0.8, 0.1, false}}
+    });
+
+    filters.push_back({
+        "vs.compression_rescue",
+        "Compression Rescue",
+        "Composite deblock/deband/detail-return profile for compressed live-action sources.",
+        FilterCategory::Restoration, FilterRuntime::VapourSynth, StageKind::RestoreCompression, 12,
+        kVsCompressionRescue,
+        {{"DEBLOCK_Q", "Deblock Q", "Deblock aggressiveness", 10.0, 50.0, 24.0, 1.0, true},
+         {"DETAIL_RETURN", "Detail Return", "Texture restored after rescue", 0.0, 1.0, 0.3, 0.05, false}}
     });
 
     return filters;

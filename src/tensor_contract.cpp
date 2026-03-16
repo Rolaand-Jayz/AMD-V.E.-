@@ -34,6 +34,27 @@ std::string toString(TensorDtype dtype) {
     return "Unknown";
 }
 
+TensorLayout inferTensorLayout(const std::vector<std::int64_t>& dims) {
+    if (dims.size() == 4) {
+        if (dims[1] > 0 && dims[1] <= 4) {
+            return TensorLayout::NCHW;
+        }
+        if (dims[3] > 0 && dims[3] <= 4) {
+            return TensorLayout::NHWC;
+        }
+        return TensorLayout::NCHW;
+    }
+    if (dims.size() == 3) {
+        if (dims[0] > 0 && dims[0] <= 4) {
+            return TensorLayout::CHW;
+        }
+        if (dims[2] > 0 && dims[2] <= 4) {
+            return TensorLayout::HWC;
+        }
+    }
+    return TensorLayout::Unknown;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // TensorShape
 // ─────────────────────────────────────────────────────────────────

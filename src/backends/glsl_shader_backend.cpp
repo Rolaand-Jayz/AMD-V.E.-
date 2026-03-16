@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -50,6 +51,18 @@ bool commandInPathGL(const std::string& cmd) {
         start = end + 1;
     }
     return false;
+}
+
+std::string quoteArgGL(const std::string& value) {
+    std::string out = "\"";
+    for (const char ch : value) {
+        if (ch == '\\' || ch == '"') {
+            out.push_back('\\');
+        }
+        out.push_back(ch);
+    }
+    out.push_back('"');
+    return out;
 }
 
 // Check if ffmpeg was built with libplacebo support.
@@ -189,6 +202,9 @@ GlslShaderBackend::~GlslShaderBackend() = default;
 
 BackendType GlslShaderBackend::type() const { return BackendType::GlslShader; }
 std::string GlslShaderBackend::name() const { return "GLSL Shader"; }
+bool GlslShaderBackend::supportsDirectOutputEncode() const {
+    return impl_->initialised ? impl_->hasLibplacebo : ffmpegHasLibplacebo();
+}
 
 bool GlslShaderBackend::isAvailable(std::string& reason) const {
     const bool placebo = ffmpegHasLibplacebo();
@@ -286,13 +302,19 @@ StageResult GlslShaderBackend::processVideoFile(
     if (progressCb) { progressCb(0.0F, "Applying GLSL shaders..."); }
 
     if (impl_->hasLibplacebo) {
+        const bool directOutputEncode = opts.directOutputEncode;
+
         // ── Direct FFmpeg libplacebo pipeline ────────────────────
         std::ostringstream cmd;
         cmd << "ffmpeg -hide_banner -loglevel error -y ";
         if (opts.previewDurationSec > 0.0) {
             cmd << "-t " << opts.previewDurationSec << " ";
         }
-        cmd << "-i \"" << inputVideo << "\" -vf \"";
+        cmd << "-i " << quoteArgGL(inputVideo) << ' ';
+        if (directOutputEncode) {
+            cmd << "-i " << quoteArgGL(inputVideo) << ' ';
+        }
+        cmd << "-vf \"";
         for (std::size_t i = 0; i < shaderPaths.size(); ++i) {
             if (i > 0) { cmd << ","; }
             cmd << "libplacebo=custom_shader_path='" << shaderPaths[i] << "'";
@@ -300,11 +322,34 @@ StageResult GlslShaderBackend::processVideoFile(
                 cmd << ":w=" << outW << ":h=" << outH;
             }
         }
-        cmd << "\" -c:v libx264 -crf 0 -preset ultrafast -c:a copy "
-            << "\"" << outputVideo << "\" 2>&1";
+        if (directOutputEncode) {
+            cmd << ",format=yuv420p";
+        }
+        cmd << "\" ";
+
+        if (directOutputEncode) {
+            cmd << "-map 0:v:0 -map 1:a? "
+                << "-c:v " << opts.outputCodec << ' '
+                << "-crf " << opts.outputCrf << ' '
+                << "-preset " << opts.outputPreset << ' ';
+            if (!opts.outputProfile.empty()) {
+                cmd << "-profile:v " << opts.outputProfile << ' ';
+            }
+            if (opts.outputThreads > 0) {
+                cmd << "-threads " << opts.outputThreads << ' ';
+            }
+            cmd << "-c:a copy -shortest ";
+        } else {
+            cmd << "-map 0:v:0 -map 0:a? "
+                << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy ";
+        }
+
+        cmd << quoteArgGL(outputVideo) << " 2>&1";
 
         std::cout << "[glsl] Running libplacebo pipeline: "
-                  << shaderPaths.size() << " shaders" << std::endl;
+                  << shaderPaths.size() << " shaders"
+                  << (directOutputEncode ? " with direct final encode" : "")
+                  << std::endl;
         const int rc = std::system(cmd.str().c_str());
         if (rc != 0) {
             error = "FFmpeg libplacebo exited with code " + std::to_string(rc);

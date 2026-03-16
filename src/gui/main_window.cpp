@@ -115,6 +115,15 @@ struct ModelFamilyInfo {
     const char* name;
 };
 
+struct FilterPresetDefinition {
+    const char* id;
+    const char* name;
+    ave::BackendType backend;
+    const char* description;
+    std::vector<ave::StageKind> requiredStages;
+    std::vector<ave::ActiveFilter> filters;
+};
+
 ModelFamilyInfo modelFamilyInfoForId(const std::string& modelId) {
     static const std::unordered_map<std::string, ModelFamilyInfo> map = {
         {"nomos2-otf-x4", {"nomos2-otf", "Nomos2 OTF ESRGAN"}},
@@ -122,6 +131,12 @@ ModelFamilyInfo modelFamilyInfoForId(const std::string& modelId) {
         {"realesrgan-x4-general", {"realesrgan-x4", "Real-ESRGAN x4"}},
         {"realesrgan-x4plus-pth", {"realesrgan-x4plus-pth", "Real-ESRGAN x4+ (PyTorch)"}},
         {"realesrgan-x4-axera", {"realesrgan-x4-axera", "Real-ESRGAN x4 (AXERA export)"}},
+        {"openproteus-compact-x2", {"openproteus-compact-x2", "OpenProteus Compact x2"}},
+        {"realesrgan-x4plus-ncnn", {"realesrgan-x4plus-ncnn", "Real-ESRGAN x4+ NCNN"}},
+        {"realesrgan-x4plus-anime-ncnn", {"realesrgan-x4plus-anime-ncnn", "Real-ESRGAN x4+ Anime NCNN"}},
+        {"realesr-animevideov3-x2-ncnn", {"realesr-animevideov3-x2-ncnn", "Real-ESRGAN AnimeVideo v3 x2 NCNN"}},
+        {"realesr-animevideov3-x3-ncnn", {"realesr-animevideov3-x3-ncnn", "Real-ESRGAN AnimeVideo v3 x3 NCNN"}},
+        {"realesr-animevideov3-x4-ncnn", {"realesr-animevideov3-x4-ncnn", "Real-ESRGAN AnimeVideo v3 x4 NCNN"}},
         {"realesrnet-x2plus", {"realesrnet-x2plus", "Real-ESRNet x2+"}},
         {"nmkd-siax-x4", {"nmkd-siax-x4", "NMKD Siax 200k"}},
         {"ultrasharp-x4", {"ultrasharp-x4", "UltraSharp x4"}},
@@ -218,7 +233,8 @@ bool isReadyForBackend(const ave::ManagedModel& model, ave::BackendType backend)
     if (backend == ave::BackendType::NcnnVulkan) {
         return model.state == ave::ModelState::Downloaded &&
                isNcnnCompatibleFormat(model.entry.sourceFormat) &&
-               !model.downloadedPath.empty();
+               !model.downloadedPath.empty() &&
+               !model.downloadedPathAux.empty();
     }
     if (backend == ave::BackendType::Auto) {
         return isReadyForBackend(model, ave::BackendType::MiGraphX) ||
@@ -375,6 +391,188 @@ QString quoteArg(const QString& s) {
     return out;
 }
 
+ave::ActiveFilter makePresetFilter(
+        const char* id,
+        std::initializer_list<std::pair<const char*, double>> params = {}) {
+    ave::ActiveFilter filter;
+    filter.id = id;
+    filter.enabled = true;
+    for (const auto& [key, value] : params) {
+        filter.paramValues[key] = value;
+    }
+    return filter;
+}
+
+ave::EnhancementStage makePresetStage(const ave::StageKind kind) {
+    ave::EnhancementStage stage;
+    stage.kind = kind;
+
+    switch (kind) {
+        case ave::StageKind::RestoreCompression:
+            stage.params["strength"] = 0.85;
+            break;
+        case ave::StageKind::RemoveArtifacts:
+            stage.params["strength"] = 0.75;
+            break;
+        case ave::StageKind::Denoise:
+            stage.params["strength"] = 0.65;
+            break;
+        case ave::StageKind::Deblur:
+            stage.params["strength"] = 0.55;
+            break;
+        case ave::StageKind::Dehalo:
+            stage.params["strength"] = 0.45;
+            break;
+        case ave::StageKind::ColorFix:
+            stage.params["contrast"] = 1.0;
+            stage.params["brightness"] = 1.0;
+            stage.params["saturation"] = 1.0;
+            stage.params["gamma"] = 1.0;
+            stage.params["vibrance"] = 1.0;
+            break;
+        case ave::StageKind::Upscale:
+            stage.params["width"] = std::int64_t{3840};
+            stage.params["height"] = std::int64_t{2160};
+            break;
+        case ave::StageKind::Sharpen:
+            stage.params["amount"] = 0.45;
+            break;
+        case ave::StageKind::Interpolate:
+            stage.params["fps"] = std::int64_t{60};
+            stage.params["scene_detect"] = true;
+            break;
+    }
+    return stage;
+}
+
+QString describePresetStages(const std::vector<ave::StageKind>& stages) {
+    QStringList labels;
+    for (const auto kind : stages) {
+        labels << stageTitle(kind);
+    }
+    labels.removeDuplicates();
+    return labels.isEmpty() ? QStringLiteral("no extra stages")
+                            : labels.join(QStringLiteral(", "));
+}
+
+const std::vector<FilterPresetDefinition>& filterPresetDefinitions() {
+    static const std::vector<FilterPresetDefinition> presets = {
+        {
+            "glsl_natural_detail",
+            "GLSL Natural Detail Restore",
+            ave::BackendType::GlslShader,
+            "Gentle live-action cleanup for footage that is mostly clean but a little soft or flat.",
+            {ave::StageKind::Denoise, ave::StageKind::Sharpen, ave::StageKind::ColorFix},
+            {
+                makePresetFilter("glsl.chroma_cleanup", {{"STRENGTH", 0.40}}),
+                makePresetFilter("glsl.liveaction_clarity", {{"STRENGTH", 0.50}, {"HIGHLIGHT_PROTECT", 0.60}}),
+                makePresetFilter("glsl.texture_recover", {{"AMOUNT", 0.45}, {"CLAMP", 0.07}}),
+                makePresetFilter("glsl.highlight_rolloff", {{"THRESHOLD", 0.80}, {"ROLLOFF", 0.50}})
+            }
+        },
+        {
+            "glsl_lowlight",
+            "GLSL Low-Light Rescue",
+            ave::BackendType::GlslShader,
+            "For noisy real footage with crushed shadows and bright practical lights.",
+            {ave::StageKind::Denoise, ave::StageKind::ColorFix, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("glsl.lowlight_cleanup", {{"STRENGTH", 0.70}, {"DETAIL_RETURN", 0.30}}),
+                makePresetFilter("glsl.chroma_cleanup", {{"STRENGTH", 0.60}}),
+                makePresetFilter("glsl.shadow_recovery", {{"LIFT", 0.24}, {"PIVOT", 0.24}}),
+                makePresetFilter("glsl.highlight_rolloff", {{"THRESHOLD", 0.76}, {"ROLLOFF", 0.80}}),
+                makePresetFilter("glsl.texture_recover", {{"AMOUNT", 0.35}, {"CLAMP", 0.06}})
+            }
+        },
+        {
+            "glsl_compression",
+            "GLSL Compression Rescue",
+            ave::BackendType::GlslShader,
+            "For streaming rips, webcam captures, and blocky delivery files that need cleanup before sharpening.",
+            {ave::StageKind::RestoreCompression, ave::StageKind::RemoveArtifacts, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("glsl.deblock", {{"STRENGTH", 0.70}}),
+                makePresetFilter("glsl.compression_rescue", {{"DEBLOCK", 0.55}, {"DEBAND", 0.45}}),
+                makePresetFilter("glsl.dering", {{"THRESHOLD", 0.10}, {"BLEND", 0.65}}),
+                makePresetFilter("glsl.liveaction_clarity", {{"STRENGTH", 0.35}, {"HIGHLIGHT_PROTECT", 0.70}})
+            }
+        },
+        {
+            "glsl_tone_recovery",
+            "GLSL Tone Recovery",
+            ave::BackendType::GlslShader,
+            "A lighter stack for shots with harsh highlights, weak midtone contrast, and underexposed shadows.",
+            {ave::StageKind::ColorFix, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("glsl.shadow_recovery", {{"LIFT", 0.20}, {"PIVOT", 0.22}}),
+                makePresetFilter("glsl.highlight_rolloff", {{"THRESHOLD", 0.79}, {"ROLLOFF", 0.75}}),
+                makePresetFilter("glsl.micro_contrast_live", {{"STRENGTH", 0.30}})
+            }
+        },
+        {
+            "vs_liveaction_cleanup",
+            "VapourSynth Live-Action Cleanup",
+            ave::BackendType::VapourSynth,
+            "Balanced VapourSynth stack for realistic footage that needs cleanup without becoming waxy.",
+            {ave::StageKind::Denoise, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("vs.liveaction_cleanup", {{"STRENGTH", 1.7}, {"DETAIL_RETURN", 0.35}}),
+                makePresetFilter("vs.chroma_cleanup", {{"RADIUS", 2.0}}),
+                makePresetFilter("vs.local_contrast", {{"RADIUS", 2.0}, {"STRENGTH", 0.28}})
+            }
+        },
+        {
+            "vs_lowlight_rescue",
+            "VapourSynth Low-Light Rescue",
+            ave::BackendType::VapourSynth,
+            "Heavier shadow cleanup for dark live-action footage with sensor noise and colour blotches.",
+            {ave::StageKind::Denoise, ave::StageKind::ColorFix, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("vs.lowlight_cleanup", {{"STRENGTH", 5.0}, {"SHADOW_GAMMA", 0.88}, {"DETAIL_RETURN", 0.25}}),
+                makePresetFilter("vs.chroma_cleanup", {{"RADIUS", 2.0}}),
+                makePresetFilter("vs.shadow_lift", {{"GAMMA", 0.80}}),
+                makePresetFilter("vs.local_contrast", {{"RADIUS", 2.0}, {"STRENGTH", 0.22}})
+            }
+        },
+        {
+            "vs_broadcast_rescue",
+            "VapourSynth Broadcast Compression Rescue",
+            ave::BackendType::VapourSynth,
+            "For broadcast captures and old encodes with ringing, deblocking needs, and flat contrast.",
+            {ave::StageKind::RestoreCompression, ave::StageKind::Denoise, ave::StageKind::Sharpen, ave::StageKind::ColorFix},
+            {
+                makePresetFilter("vs.compression_rescue", {{"DEBLOCK_Q", 26.0}, {"DETAIL_RETURN", 0.32}}),
+                makePresetFilter("vs.liveaction_cleanup", {{"STRENGTH", 1.5}, {"DETAIL_RETURN", 0.30}}),
+                makePresetFilter("vs.highlight_rolloff", {{"THRESHOLD", 212.0}, {"ROLLOFF", 0.90}}),
+                makePresetFilter("vs.local_contrast", {{"RADIUS", 2.0}, {"STRENGTH", 0.25}})
+            }
+        },
+        {
+            "vs_grain_retain",
+            "VapourSynth Grain-Retain Cleanup",
+            ave::BackendType::VapourSynth,
+            "Keeps some organic texture while still cleaning real camera footage.",
+            {ave::StageKind::Denoise, ave::StageKind::Sharpen},
+            {
+                makePresetFilter("vs.grain_retain_cleanup", {{"STRENGTH", 1.5}, {"GRAIN_KEEP", 0.60}}),
+                makePresetFilter("vs.chroma_cleanup", {{"RADIUS", 1.0}}),
+                makePresetFilter("vs.local_contrast", {{"RADIUS", 2.0}, {"STRENGTH", 0.20}})
+            }
+        }
+    };
+    return presets;
+}
+
+const FilterPresetDefinition* findFilterPresetDefinition(const QString& id) {
+    const std::string wanted = id.trimmed().toStdString();
+    for (const auto& preset : filterPresetDefinitions()) {
+        if (preset.id == wanted) {
+            return &preset;
+        }
+    }
+    return nullptr;
+}
+
 std::vector<ave::EnhancementStage> quickTemplateStages(int index) {
     std::vector<ave::EnhancementStage> out;
     if (index == 1) {
@@ -429,6 +627,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     applySettingsToUi(true);
     wireActions();
+    updateFilterPresetDescription();
 
     modelManager_.refresh();
     refreshModelFamilies();
@@ -947,6 +1146,24 @@ void MainWindow::buildUi() {
     auto* filterCatalogLayout = new QVBoxLayout(filterCatalogPane);
     filterCatalogLayout->setContentsMargins(0, 0, 0, 0);
     filterCatalogLayout->setSpacing(6);
+    auto* presetRow = new QHBoxLayout;
+    filterPresetCombo_ = new QComboBox(filterCatalogPane);
+    filterPresetCombo_->addItem(QStringLiteral("Manual / current selection"), QString());
+    for (const auto& preset : filterPresetDefinitions()) {
+        filterPresetCombo_->addItem(QString::fromUtf8(preset.name),
+                                    QString::fromUtf8(preset.id));
+    }
+    auto* applyPresetButton = new QPushButton(QStringLiteral("Apply Preset"), filterCatalogPane);
+    auto* clearFiltersButton = new QPushButton(QStringLiteral("Clear Filters"), filterCatalogPane);
+    presetRow->addWidget(new QLabel(QStringLiteral("Quick Preset:"), filterCatalogPane));
+    presetRow->addWidget(filterPresetCombo_, 1);
+    presetRow->addWidget(applyPresetButton);
+    presetRow->addWidget(clearFiltersButton);
+    filterCatalogLayout->addLayout(presetRow);
+    filterPresetDescriptionLabel_ = new QLabel(filterCatalogPane);
+    filterPresetDescriptionLabel_->setWordWrap(true);
+    filterPresetDescriptionLabel_->setStyleSheet("color: #555;");
+    filterCatalogLayout->addWidget(filterPresetDescriptionLabel_);
     filterBrowser_ = new FilterBrowser(filterCatalogPane);
     filterCatalogLayout->addWidget(filterBrowser_, 1);
 
@@ -973,6 +1190,11 @@ void MainWindow::buildUi() {
     filtersSplit->setStretchFactor(1, 1);
     filtersTabLayout->addWidget(filtersSplit, 1);
     pipelineTabs->addTab(filtersTab, "Filters");
+
+    connect(applyPresetButton, &QPushButton::clicked,
+            this, &MainWindow::applySelectedFilterPreset);
+    connect(clearFiltersButton, &QPushButton::clicked,
+            this, &MainWindow::clearCatalogFilters);
 
     pipelineLayout->addWidget(pipelineTabs, 1);
     leftLayout->addWidget(pipelineGroup, 1);
@@ -1177,7 +1399,19 @@ void MainWindow::wireActions() {
         refreshStageBuilderActions();
         ref();
     });
+    connect(filterPresetCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+        updateFilterPresetDescription();
+    });
     connect(filterBrowser_,  &FilterBrowser::filtersChanged, this, [this]() {
+        if (!updatingFilterPresetUi_ && filterPresetCombo_ != nullptr &&
+            filterPresetCombo_->currentIndex() > 0) {
+            const QSignalBlocker blocker(filterPresetCombo_);
+            filterPresetCombo_->setCurrentIndex(0);
+            updateFilterPresetDescription();
+        }
+        if (!updatingFilterPresetUi_) {
+            alignManualFilterSelection();
+        }
         refreshCommandPreview();
     });
 
@@ -1698,6 +1932,145 @@ void MainWindow::refreshCommandPreview() {
     if (dryRunToggle_->isChecked()) args << "--dry-run";
 
     commandPreviewEdit_->setText(args.join(' '));
+}
+
+void MainWindow::updateFilterPresetDescription() {
+    if (!filterPresetDescriptionLabel_ || !filterPresetCombo_) {
+        return;
+    }
+
+    const QString presetId = filterPresetCombo_->currentData().toString();
+    const FilterPresetDefinition* preset = findFilterPresetDefinition(presetId);
+    if (preset == nullptr) {
+        filterPresetDescriptionLabel_->setText(
+            QStringLiteral("Choose a preset to swap in a tested live-action filter stack. Applying one replaces the enabled catalog filters, switches to the matching backend, and adds any missing stage types it needs."));
+        return;
+    }
+
+    filterPresetDescriptionLabel_->setText(
+        QStringLiteral("%1 Backend: %2. Seeds stages: %3.")
+            .arg(QString::fromUtf8(preset->description),
+                 backendDisplayName(preset->backend),
+                 describePresetStages(preset->requiredStages)));
+}
+
+void MainWindow::alignManualFilterSelection() {
+    if (!filterBrowser_ || !backendCombo_) {
+        return;
+    }
+
+    const auto filters = filterBrowser_->activeFilters();
+    if (filters.empty()) {
+        return;
+    }
+
+    bool addedStage = false;
+    std::unordered_set<ave::StageKind> existingStages;
+    for (const auto& stage : stages_) {
+        existingStages.insert(stage.kind);
+    }
+
+    std::optional<ave::FilterRuntime> selectedRuntime;
+    bool mixedRuntime = false;
+    for (const auto& filter : filters) {
+        const ave::EmbeddedFilter* entry = ave::findFilter(filter.id);
+        if (entry == nullptr) {
+            continue;
+        }
+
+        if (existingStages.find(entry->stageKind) == existingStages.end()) {
+            stages_.push_back(makePresetStage(entry->stageKind));
+            existingStages.insert(entry->stageKind);
+            addedStage = true;
+        }
+
+        if (!selectedRuntime.has_value()) {
+            selectedRuntime = entry->runtime;
+        } else if (*selectedRuntime != entry->runtime) {
+            mixedRuntime = true;
+        }
+    }
+
+    bool backendChanged = false;
+    if (!mixedRuntime && selectedRuntime.has_value()) {
+        const auto currentBackend =
+            static_cast<ave::BackendType>(backendCombo_->currentData().toInt());
+        if (!backendCanApplyCatalogRuntime(currentBackend, *selectedRuntime)) {
+            const auto desiredBackend = *selectedRuntime == ave::FilterRuntime::Glsl
+                ? ave::BackendType::GlslShader
+                : ave::BackendType::VapourSynth;
+            const int backendIndex = backendCombo_->findData(static_cast<int>(desiredBackend));
+            if (backendIndex >= 0) {
+                backendCombo_->setCurrentIndex(backendIndex);
+                backendChanged = true;
+            }
+        }
+    }
+
+    if (addedStage || backendChanged) {
+        refreshRequestedStages();
+        refreshPlannedStages();
+    }
+}
+
+void MainWindow::applySelectedFilterPreset() {
+    if (!filterPresetCombo_ || !filterBrowser_ || !backendCombo_) {
+        return;
+    }
+
+    const QString presetId = filterPresetCombo_->currentData().toString();
+    const FilterPresetDefinition* preset = findFilterPresetDefinition(presetId);
+    if (preset == nullptr) {
+        QMessageBox::information(this,
+                                 tr("No Filter Preset Selected"),
+                                 tr("Choose a preset from the Quick Preset menu first."));
+        return;
+    }
+
+    updatingFilterPresetUi_ = true;
+    filterBrowser_->setActiveFilters(preset->filters);
+
+    const int backendIndex = backendCombo_->findData(static_cast<int>(preset->backend));
+    if (backendIndex >= 0) {
+        backendCombo_->setCurrentIndex(backendIndex);
+    }
+
+    std::unordered_set<ave::StageKind> existingStages;
+    for (const auto& stage : stages_) {
+        existingStages.insert(stage.kind);
+    }
+    for (const auto kind : preset->requiredStages) {
+        if (existingStages.find(kind) == existingStages.end()) {
+            stages_.push_back(makePresetStage(kind));
+            existingStages.insert(kind);
+        }
+    }
+    updatingFilterPresetUi_ = false;
+
+    refreshRequestedStages();
+    refreshPlannedStages();
+    refreshCommandPreview();
+    updateFilterPresetDescription();
+    appendLog(QStringLiteral("Applied filter preset: %1")
+                  .arg(QString::fromUtf8(preset->name)));
+}
+
+void MainWindow::clearCatalogFilters() {
+    if (!filterBrowser_) {
+        return;
+    }
+
+    updatingFilterPresetUi_ = true;
+    filterBrowser_->clearAllFilters();
+    if (filterPresetCombo_ != nullptr) {
+        const QSignalBlocker blocker(filterPresetCombo_);
+        filterPresetCombo_->setCurrentIndex(0);
+    }
+    updatingFilterPresetUi_ = false;
+
+    updateFilterPresetDescription();
+    refreshCommandPreview();
+    appendLog(QStringLiteral("Cleared enabled catalog filters."));
 }
 
 void MainWindow::onPipelineSelectionChanged() {
@@ -2631,7 +3004,14 @@ void MainWindow::loadProfile() {
             loadedFilters.push_back(*filter);
         }
     }
+    updatingFilterPresetUi_ = true;
     filterBrowser_->setActiveFilters(loadedFilters);
+    updatingFilterPresetUi_ = false;
+    if (filterPresetCombo_ != nullptr) {
+        const QSignalBlocker blocker(filterPresetCombo_);
+        filterPresetCombo_->setCurrentIndex(0);
+    }
+    updateFilterPresetDescription();
 
     refreshRequestedStages();
     refreshPlannedStages();

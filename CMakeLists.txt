@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(amd_video_enhancer_cpp LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -19,6 +21,33 @@ option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # ROCTx: zero-overhead stage markers for rocprof --roctx-trace integration.
 # Requires roctracer-dev package: sudo apt install roctracer-dev
 option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
+option(AVE_INSTALL_BUNDLED_MIGRAPHX
+       "Install a bundled patched MiGraphX runtime with the app"     ON)
+option(AVE_INSTALL_BUNDLED_MODELS
+       "Install the full model catalog with the app"                 ON)
+
+set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "")
+if(EXISTS "$ENV{HOME}/.local/opt/migraphx-codex/bin/migraphx-driver")
+    set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{HOME}/.local/opt/migraphx-codex")
+endif()
+set(AVE_BUNDLED_MIGRAPHX_PREFIX "${_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX}" CACHE PATH
+    "Patched MiGraphX install prefix to bundle with the app")
+
+if(AVE_INSTALL_BUNDLED_MIGRAPHX)
+    if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "" OR
+       NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver")
+        message(WARNING
+            "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but AVE_BUNDLED_MIGRAPHX_PREFIX does not contain "
+            "bin/migraphx-driver; disabling bundled MiGraphX install.")
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
+    else()
+        message(STATUS "Bundling patched MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
+    endif()
+endif()
+
+if(AVE_INSTALL_BUNDLED_MODELS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
 
 # ─────────────────────────────────────────────────────────────────
 # FFmpeg (Required for Vulkan hardware frame extraction)
@@ -163,6 +192,7 @@ add_library(ave_core
     src/model_manager.cpp
     src/observability.cpp
     src/planner.cpp
+    src/runtime_paths.cpp
     src/scene_detector.cpp
     src/stage.cpp
     src/tensor_contract.cpp
@@ -254,6 +284,7 @@ enable_testing()
 
 add_executable(planner_tests
     tests/planner_tests.cpp
+    src/model_catalog.cpp
     src/planner.cpp
     src/stage.cpp
     src/types.cpp
@@ -262,3 +293,87 @@ target_include_directories(planner_tests PRIVATE include)
 target_compile_definitions(planner_tests PRIVATE ${AVE_COMPILE_DEFS})
 ave_add_warnings(planner_tests)
 add_test(NAME planner_tests COMMAND planner_tests)
+
+add_executable(tensor_contract_tests
+    tests/tensor_contract_tests.cpp
+    src/tensor_contract.cpp
+)
+target_include_directories(tensor_contract_tests PRIVATE include)
+target_compile_definitions(tensor_contract_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(tensor_contract_tests)
+add_test(NAME tensor_contract_tests COMMAND tensor_contract_tests)
+
+install(TARGETS ave
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave
+)
+
+if(TARGET ave_gui)
+    install(TARGETS ave_gui
+        RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave
+    )
+endif()
+
+if(NOT IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}")
+    string(REPLACE "/" ";" _ave_bindir_parts "${CMAKE_INSTALL_BINDIR}")
+    set(AVE_PREFIX_REL_FROM_BINDIR ".")
+    foreach(_part IN LISTS _ave_bindir_parts)
+        if(_part STREQUAL "" OR _part STREQUAL ".")
+            continue()
+        endif()
+        if(AVE_PREFIX_REL_FROM_BINDIR STREQUAL ".")
+            set(AVE_PREFIX_REL_FROM_BINDIR "..")
+        else()
+            string(APPEND AVE_PREFIX_REL_FROM_BINDIR "/..")
+        endif()
+    endforeach()
+else()
+    set(AVE_PREFIX_REL_FROM_BINDIR ".")
+endif()
+
+set(AVE_INSTALL_APP_BINARY_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/ave")
+set(AVE_INSTALL_MIGRAPHX_PATH "${CMAKE_INSTALL_LIBDIR}/ave/migraphx")
+set(AVE_INSTALL_MODELS_PATH "${CMAKE_INSTALL_DATADIR}/ave/models")
+configure_file(cmake/ave-launch.sh.in
+               ${CMAKE_CURRENT_BINARY_DIR}/ave-launch-wrapper.sh
+               @ONLY)
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ave-launch-wrapper.sh
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        RENAME ave)
+
+if(TARGET ave_gui)
+    set(AVE_INSTALL_APP_BINARY_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/ave_gui")
+    configure_file(cmake/ave-launch.sh.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/ave-gui-launch-wrapper.sh
+                   @ONLY)
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ave-gui-launch-wrapper.sh
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+            RENAME ave_gui)
+endif()
+
+if(AVE_INSTALL_BUNDLED_MIGRAPHX)
+    install(PROGRAMS
+        "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin
+    )
+    install(DIRECTORY
+        "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib/migraphx
+        USE_SOURCE_PERMISSIONS
+    )
+    install(DIRECTORY
+        "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib
+        USE_SOURCE_PERMISSIONS
+        FILES_MATCHING
+        PATTERN "cmake" EXCLUDE
+        PATTERN "migraphx" EXCLUDE
+        PATTERN "libmigraphx*.so*"
+    )
+endif()
+
+if(AVE_INSTALL_BUNDLED_MODELS)
+    configure_file(cmake/install_model_bundle.cmake.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/install_model_bundle.cmake
+                   @ONLY)
+    install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/install_model_bundle.cmake)
+endif()

@@ -31,6 +31,8 @@
 #endif
 
 #include "ave/frame_io.hpp"
+#include "ave/runtime_paths.hpp"
+#include "ave/tensor_contract.hpp"
 
 #ifdef AVE_HAVE_MIGRAPHX
 #  include <migraphx/migraphx.hpp>
@@ -64,12 +66,75 @@ struct MiGraphXDriverEnv {
     MiGraphXCompileProfile profile = MiGraphXCompileProfile::Fast;
 };
 
-std::string defaultModelsDir() {
-    const char* home = std::getenv("HOME");
-    if (home != nullptr) {
-        return std::string(home) + "/.local/share/ave/models";
+std::mutex& processEnvMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool setProcessEnv(const std::string& name, const std::string& value) {
+#if defined(_WIN32)
+    return _putenv_s(name.c_str(), value.c_str()) == 0;
+#else
+    return ::setenv(name.c_str(), value.c_str(), 1) == 0;
+#endif
+}
+
+bool unsetProcessEnv(const std::string& name) {
+#if defined(_WIN32)
+    return _putenv_s(name.c_str(), "") == 0;
+#else
+    return ::unsetenv(name.c_str()) == 0;
+#endif
+}
+
+class ScopedEnvOverrides {
+  public:
+    explicit ScopedEnvOverrides(const std::vector<std::pair<std::string, std::string>>& overrides)
+        : lock_(processEnvMutex()) {
+        previous_.reserve(overrides.size());
+        for (const auto& [name, value] : overrides) {
+            const char* current = std::getenv(name.c_str());
+            previous_.emplace_back(name,
+                                   current == nullptr
+                                       ? std::optional<std::string>{}
+                                       : std::make_optional(std::string(current)));
+            if (!setProcessEnv(name, value)) {
+                error_ = "Failed to set environment override " + name + "=" + value;
+                restore();
+                break;
+            }
+        }
     }
-    return "/tmp/ave_models";
+
+    ScopedEnvOverrides(const ScopedEnvOverrides&) = delete;
+    ScopedEnvOverrides& operator=(const ScopedEnvOverrides&) = delete;
+
+    ~ScopedEnvOverrides() { restore(); }
+
+    bool ok() const { return error_.empty(); }
+
+    const std::string& error() const { return error_; }
+
+  private:
+    void restore() {
+        while (!previous_.empty()) {
+            const auto previous = previous_.back();
+            previous_.pop_back();
+            if (previous.second.has_value()) {
+                setProcessEnv(previous.first, *previous.second);
+            } else {
+                unsetProcessEnv(previous.first);
+            }
+        }
+    }
+
+    std::unique_lock<std::mutex> lock_;
+    std::vector<std::pair<std::string, std::optional<std::string>>> previous_;
+    std::string error_;
+};
+
+std::string defaultModelsDir() {
+    return defaultWritableModelsDir().string();
 }
 
 bool ensureDir(const std::filesystem::path& p) {
@@ -99,6 +164,39 @@ bool commandInPath(const std::string& cmd) {
         start = end + 1;
     }
     return false;
+}
+
+std::optional<std::filesystem::path> resolveMiGraphXDriver() {
+    if (const auto bundled = bundledMiGraphXDriverPath(); bundled.has_value()) {
+        return bundled;
+    }
+
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv == nullptr) {
+        return std::nullopt;
+    }
+
+    std::string path(pathEnv);
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        std::size_t end = path.find(':', start);
+        if (end == std::string::npos) {
+            end = path.size();
+        }
+        const std::string dir = path.substr(start, end - start);
+        if (!dir.empty()) {
+            const std::filesystem::path candidate = std::filesystem::path(dir) / "migraphx-driver";
+            if (fileExists(candidate)) {
+                return candidate;
+            }
+        }
+        if (end == path.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    return std::nullopt;
 }
 
 bool hasMxrExtension(const std::string& path) {
@@ -167,11 +265,15 @@ std::string compilePrecisionTag(ModelPrecision precision) {
 std::string compiledArtifactStem(const std::string& modelId,
                                  ModelPrecision precision,
                                  std::optional<int> width = std::nullopt,
-                                 std::optional<int> height = std::nullopt) {
+                                 std::optional<int> height = std::nullopt,
+                                 int batch = 1) {
     std::ostringstream stem;
     stem << modelId;
     if (width.has_value() && height.has_value()) {
         stem << "_" << *width << "x" << *height;
+    }
+    if (batch > 1) {
+        stem << "_b" << batch;
     }
     if (precision != ModelPrecision::Fp32) {
         stem << "_" << compilePrecisionTag(precision);
@@ -183,8 +285,13 @@ std::filesystem::path compiledArtifactPath(const std::filesystem::path& dir,
                                            const std::string& modelId,
                                            ModelPrecision precision,
                                            std::optional<int> width = std::nullopt,
-                                           std::optional<int> height = std::nullopt) {
-    return dir / (compiledArtifactStem(modelId, precision, width, height) + ".mxr");
+                                           std::optional<int> height = std::nullopt,
+                                           int batch = 1) {
+    return dir / (compiledArtifactStem(modelId, precision, width, height, batch) + ".mxr");
+}
+
+int normaliseCompileBatch(int batch) {
+    return std::clamp(batch, 1, 64);
 }
 
 int readPositiveIntEnv(const char* name, int defaultValue, int minimumValue, int maximumValue) {
@@ -445,64 +552,109 @@ bool extractCalibrationFramesRgb24(const std::string& videoPath,
 
 bool shapeLooksLikeImageTensor(const migraphx::shape& shape, int width, int height) {
     const auto dims = shape.lengths();
-    if (dims.size() == 4u) {
-        if (dims[0] != 1u) {
-            return false;
-        }
-        if (dims[1] <= 4u) {
-            return (dims[1] == 3u || dims[1] == 1u) &&
+    std::vector<std::int64_t> signedDims;
+    signedDims.reserve(dims.size());
+    for (const auto dim : dims) {
+        signedDims.push_back(static_cast<std::int64_t>(dim));
+    }
+
+    const auto layout = inferTensorLayout(signedDims);
+    switch (layout) {
+        case TensorLayout::NCHW:
+            return dims.size() == 4u &&
+                   (dims[1] == 3u || dims[1] == 1u) &&
                    dims[2] == static_cast<std::size_t>(height) &&
                    dims[3] == static_cast<std::size_t>(width);
-        }
-        if (dims[3] <= 4u) {
-            return (dims[3] == 3u || dims[3] == 1u) &&
+        case TensorLayout::NHWC:
+            return dims.size() == 4u &&
+                   (dims[3] == 3u || dims[3] == 1u) &&
                    dims[1] == static_cast<std::size_t>(height) &&
                    dims[2] == static_cast<std::size_t>(width);
-        }
-        return false;
-    }
-    if (dims.size() == 3u) {
-        if (dims[0] <= 4u) {
-            return (dims[0] == 3u || dims[0] == 1u) &&
+        case TensorLayout::CHW:
+            return dims.size() == 3u &&
+                   (dims[0] == 3u || dims[0] == 1u) &&
                    dims[1] == static_cast<std::size_t>(height) &&
                    dims[2] == static_cast<std::size_t>(width);
-        }
-        if (dims[2] <= 4u) {
-            return (dims[2] == 3u || dims[2] == 1u) &&
+        case TensorLayout::HWC:
+            return dims.size() == 3u &&
+                   (dims[2] == 3u || dims[2] == 1u) &&
                    dims[0] == static_cast<std::size_t>(height) &&
                    dims[1] == static_cast<std::size_t>(width);
-        }
+        case TensorLayout::Unknown:
+            return false;
     }
     return false;
 }
 
-bool fillCalibrationArgument(const std::vector<std::uint8_t>& rgbFrame,
+std::size_t imageTensorBatchSize(const migraphx::shape& shape) {
+    const auto dims = shape.lengths();
+    if (dims.size() == 4u) {
+        return dims.front();
+    }
+    return 1u;
+}
+
+bool fillCalibrationArgument(const std::vector<std::vector<std::uint8_t>>& rgbFrames,
+                             std::size_t frameBase,
                              int width,
                              int height,
                              const migraphx::shape& shape,
                              migraphx::argument& arg,
                              std::string& error) {
+    const auto dims = shape.lengths();
+    std::vector<std::int64_t> signedDims;
+    signedDims.reserve(dims.size());
+    for (const auto dim : dims) {
+        signedDims.push_back(static_cast<std::int64_t>(dim));
+    }
+
+    const auto layout = inferTensorLayout(signedDims);
+    if (layout != TensorLayout::NCHW && layout != TensorLayout::CHW) {
+        error = "MiGraphX int8 calibration currently supports NCHW/CHW image inputs only.";
+        return false;
+    }
+
+    const std::size_t batch = imageTensorBatchSize(shape);
+    if (batch == 0u || rgbFrames.empty()) {
+        error = "MiGraphX int8 calibration received an empty image batch.";
+        return false;
+    }
+
     if (shape.type() == migraphx_shape_float_type) {
         std::vector<float> tensor;
-        frame_io::rgb24ToNchwFp32(rgbFrame.data(), width, height, tensor);
-        const std::size_t bytes = tensor.size() * sizeof(float);
-        if (bytes != shape.bytes()) {
-            error = "Calibration tensor byte size mismatch for fp32 input.";
+        frame_io::rgb24ToNchwFp32(rgbFrames.front().data(), width, height, tensor);
+        const std::size_t bytesPerFrame = tensor.size() * sizeof(float);
+        if (bytesPerFrame * batch != shape.bytes()) {
+            error = "Calibration tensor byte size mismatch for fp32 input batch.";
             return false;
         }
-        std::memcpy(arg.data(), tensor.data(), bytes);
+
+        auto* dst = static_cast<char*>(arg.data());
+        for (std::size_t batchIndex = 0; batchIndex < batch; ++batchIndex) {
+            const std::size_t frameIndex =
+                std::min(frameBase + batchIndex, rgbFrames.size() - 1u);
+            frame_io::rgb24ToNchwFp32(rgbFrames[frameIndex].data(), width, height, tensor);
+            std::memcpy(dst + (batchIndex * bytesPerFrame), tensor.data(), bytesPerFrame);
+        }
         return true;
     }
 
     if (shape.type() == migraphx_shape_half_type) {
         std::vector<std::uint16_t> tensor;
-        frame_io::rgb24ToNchwFp16(rgbFrame.data(), width, height, tensor);
-        const std::size_t bytes = tensor.size() * sizeof(std::uint16_t);
-        if (bytes != shape.bytes()) {
-            error = "Calibration tensor byte size mismatch for fp16 input.";
+        frame_io::rgb24ToNchwFp16(rgbFrames.front().data(), width, height, tensor);
+        const std::size_t bytesPerFrame = tensor.size() * sizeof(std::uint16_t);
+        if (bytesPerFrame * batch != shape.bytes()) {
+            error = "Calibration tensor byte size mismatch for fp16 input batch.";
             return false;
         }
-        std::memcpy(arg.data(), tensor.data(), bytes);
+
+        auto* dst = static_cast<char*>(arg.data());
+        for (std::size_t batchIndex = 0; batchIndex < batch; ++batchIndex) {
+            const std::size_t frameIndex =
+                std::min(frameBase + batchIndex, rgbFrames.size() - 1u);
+            frame_io::rgb24ToNchwFp16(rgbFrames[frameIndex].data(), width, height, tensor);
+            std::memcpy(dst + (batchIndex * bytesPerFrame), tensor.data(), bytesPerFrame);
+        }
         return true;
     }
 
@@ -517,15 +669,6 @@ bool buildInt8CalibrationData(const migraphx::program& prog,
                               int height,
                               std::vector<CalibrationSample>& samples,
                               std::string& error) {
-    const int requestedFrames = readPositiveIntEnv(
-        "AVE_MIGRAPHX_INT8_CALIBRATION_FRAMES", kDefaultInt8CalibrationFrames, 1, 64);
-
-    std::vector<std::vector<std::uint8_t>> rgbFrames;
-    if (!extractCalibrationFramesRgb24(calibrationVideoPath, width, height, requestedFrames,
-                                       rgbFrames, error)) {
-        return false;
-    }
-
     const auto paramShapes = prog.get_parameter_shapes();
     std::string primaryInputName;
     for (const char* rawName : paramShapes.names()) {
@@ -560,9 +703,24 @@ bool buildInt8CalibrationData(const migraphx::program& prog,
         return false;
     }
 
+    const std::size_t calibrationBatch = imageTensorBatchSize(paramShapes[primaryInputName.c_str()]);
+    const int requestedFrames = readPositiveIntEnv(
+        "AVE_MIGRAPHX_INT8_CALIBRATION_FRAMES",
+        std::max<int>(kDefaultInt8CalibrationFrames, static_cast<int>(calibrationBatch)),
+        1,
+        64);
+
+    std::vector<std::vector<std::uint8_t>> rgbFrames;
+    if (!extractCalibrationFramesRgb24(calibrationVideoPath, width, height, requestedFrames,
+                                       rgbFrames, error)) {
+        return false;
+    }
+
+    const std::size_t sampleCount =
+        (rgbFrames.size() + calibrationBatch - 1u) / calibrationBatch;
     samples.clear();
-    samples.reserve(rgbFrames.size());
-    for (const auto& frame : rgbFrames) {
+    samples.reserve(sampleCount);
+    for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
         CalibrationSample sample;
         sample.args.reserve(paramShapes.size());
 
@@ -580,7 +738,13 @@ bool buildInt8CalibrationData(const migraphx::program& prog,
             auto& arg = sample.args.back();
 
             if (name == primaryInputName) {
-                if (!fillCalibrationArgument(frame, width, height, shape, arg, error)) {
+                if (!fillCalibrationArgument(rgbFrames,
+                                             sampleIndex * calibrationBatch,
+                                             width,
+                                             height,
+                                             shape,
+                                             arg,
+                                             error)) {
                     return false;
                 }
             } else {
@@ -820,11 +984,12 @@ std::vector<std::string> scanOnnxQuantizedOps(
 
 void appendDriverDimParamFallback(std::ostringstream& cmd,
                                   int compileWidth,
-                                  int compileHeight) {
-    cmd << " --batch 1"
-        << " --dim-param @batch_size 1"
-        << " --dim-param @b 1"
-        << " --dim-param @n 1"
+                                  int compileHeight,
+                                  int compileBatch) {
+    cmd << " --batch " << compileBatch
+        << " --dim-param @batch_size " << compileBatch
+        << " --dim-param @b " << compileBatch
+        << " --dim-param @n " << compileBatch
         << " --dim-param @width " << compileWidth
         << " --dim-param @w " << compileWidth
         << " --dim-param @x " << compileWidth
@@ -848,6 +1013,7 @@ bool appendDriverInputDims(std::ostringstream& cmd,
                            const std::filesystem::path& onnxPath,
                            int compileWidth,
                            int compileHeight,
+                           int compileBatch,
                            std::string& error) {
     migraphx::onnx_options probeOpts;
     probeOpts.set_default_dim_value(1);
@@ -875,7 +1041,7 @@ bool appendDriverInputDims(std::ostringstream& cmd,
         if (dims.empty()) { continue; }
 
         if (dims.size() == 4) {
-            dims[0] = 1;
+            dims[0] = static_cast<std::size_t>(compileBatch);
             if (dims[1] <= 4) {
                 dims[2] = h;
                 dims[3] = w;
@@ -920,6 +1086,7 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
                                 const std::filesystem::path& mxrPath,
                                 int compileWidth,
                                 int compileHeight,
+                                int compileBatch,
                                 ModelPrecision compilePrecision,
                                 std::optional<std::string> calibrationVideoPath,
                                 const ModelProgressCb& progressCb,
@@ -951,6 +1118,7 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
 
         const std::string onnxStr = onnxPath.string();
         const std::string mxrStr = mxrPath.string();
+        const MiGraphXDriverEnv driverEnv = buildMiGraphXDriverEnv();
 
         if (progressCb) { progressCb(modelId, 0.02f, "Reading ONNX model…"); }
         migraphx::onnx_options firstOpts;
@@ -961,7 +1129,8 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
             progressCb(modelId, 0.05f,
                 "Setting input dimensions ("
                 + std::to_string(compileWidth) + "x"
-                + std::to_string(compileHeight) + ")…");
+                + std::to_string(compileHeight) + ", batch "
+                + std::to_string(compileBatch) + ")…");
         }
 
         migraphx::onnx_options finalOpts;
@@ -978,7 +1147,7 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
             if (dims.empty()) { continue; }
 
             if (dims.size() == 4) {
-                dims[0] = 1;
+                dims[0] = static_cast<std::size_t>(compileBatch);
                 if (dims[1] <= 4) {
                     dims[2] = h;
                     dims[3] = w;
@@ -1037,10 +1206,22 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
         }
 
         if (progressCb) {
-            progressCb(modelId, -1.0f, "Compiling with MiGraphX C++ runtime…");
+            progressCb(modelId, -1.0f,
+                "Compiling with MiGraphX C++ runtime ("
+                + miGraphXCompileProfileLabel(driverEnv.profile) + " profile)…");
         }
+        ScopedEnvOverrides scopedEnv(driverEnv.overrides);
+        if (!scopedEnv.ok()) {
+            error = scopedEnv.error();
+            if (progressCb) { progressCb(modelId, 0.0f, "Compilation failed"); }
+            return false;
+        }
+
         migraphx::compile_options copts;
         copts.set_offload_copy(true);
+        if (driverEnv.profile == MiGraphXCompileProfile::Exhaustive) {
+            copts.set_exhaustive_tune_flag(true);
+        }
         prog.compile(migraphx::target("gpu"), copts);
 
         if (progressCb) { progressCb(modelId, 0.95f, "Saving compiled model…"); }
@@ -1068,12 +1249,14 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
                                const std::filesystem::path& mxrPath,
                                int compileWidth,
                                int compileHeight,
+                               int compileBatch,
                                ModelPrecision compilePrecision,
                                const ModelProgressCb& progressCb,
                                const std::string& modelId,
                                std::string& error) {
-    if (!commandInPath("migraphx-driver")) {
-        error = "migraphx-driver not found in PATH. ROCm must be installed.";
+    const auto driverPath = resolveMiGraphXDriver();
+    if (!driverPath.has_value()) {
+        error = "migraphx-driver not found in PATH or bundled install. ROCm must be installed.";
         return false;
     }
 
@@ -1094,7 +1277,7 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
     if (progressCb) { progressCb(modelId, 0.02f, "Inspecting ONNX input tensors…"); }
 
     std::ostringstream cmd;
-    cmd << "migraphx-driver compile"
+    cmd << shellQuote(driverPath->string()) << " compile"
         << " --onnx " << shellQuote(onnxPath.string())
         << " --gpu"
         << " --enable-offload-copy"
@@ -1106,12 +1289,13 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
     std::string inputProbeError;
     bool usedDimParamFallback = false;
 #ifdef AVE_HAVE_MIGRAPHX
-    if (!appendDriverInputDims(cmd, onnxPath, compileWidth, compileHeight, inputProbeError)) {
-        appendDriverDimParamFallback(cmd, compileWidth, compileHeight);
+    if (!appendDriverInputDims(cmd, onnxPath, compileWidth, compileHeight,
+                               compileBatch, inputProbeError)) {
+        appendDriverDimParamFallback(cmd, compileWidth, compileHeight, compileBatch);
         usedDimParamFallback = true;
     }
 #else
-    appendDriverDimParamFallback(cmd, compileWidth, compileHeight);
+    appendDriverDimParamFallback(cmd, compileWidth, compileHeight, compileBatch);
     usedDimParamFallback = true;
 #endif
 
@@ -1273,6 +1457,7 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
                      const std::filesystem::path& mxrPath,
                      int compileWidth,
                      int compileHeight,
+                     int compileBatch,
                      ModelPrecision compilePrecision,
                      std::optional<std::string> calibrationVideoPath,
                      const ModelProgressCb& progressCb,
@@ -1301,6 +1486,7 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
     }
 
     if (compileWithMigraphxDriver(onnxPath, mxrPath, compileWidth, compileHeight,
+                                  compileBatch,
                                   compilePrecision,
                                   progressCb, modelId, error)) {
         return true;
@@ -1309,7 +1495,7 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
 #ifdef AVE_HAVE_MIGRAPHX
     const bool needsLibraryCompile =
         compilePrecision == ModelPrecision::Int8 ||
-        error.find("migraphx-driver not found in PATH") != std::string::npos;
+        error.find("migraphx-driver not found in PATH or bundled install") != std::string::npos;
     if (!needsLibraryCompile) {
         return false;
     }
@@ -1319,7 +1505,7 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
             "migraphx-driver not found; falling back to MiGraphX C++ runtime…");
     }
     return compileWithMigraphxLibrary(
-        onnxPath, mxrPath, compileWidth, compileHeight, compilePrecision,
+        onnxPath, mxrPath, compileWidth, compileHeight, compileBatch, compilePrecision,
         calibrationVideoPath,
         progressCb, modelId, error);
 #else
@@ -1417,6 +1603,7 @@ std::string toString(ModelState state) {
 struct ModelManager::Impl {
     mutable std::mutex                             mtx;
     std::string                                    modelsDir;
+    std::optional<std::filesystem::path>           bundledModelsDir = bundledModelsDirectory();
     std::unordered_map<std::string, ManagedModel>  records;   // keyed by modelId
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelFlags;
 
@@ -1435,19 +1622,43 @@ struct ModelManager::Impl {
     std::filesystem::path downloadedDir()  const { return std::filesystem::path(modelsDir) / "downloaded"; }
     std::filesystem::path convertedDir()   const { return std::filesystem::path(modelsDir) / "migraphx"; }
 
+    std::filesystem::path bundledDownloadedDir() const {
+        if (!bundledModelsDir.has_value()) {
+            return {};
+        }
+        return *bundledModelsDir / "downloaded";
+    }
+
+    std::string resolveDownloadedPath(const std::string& filename) const {
+        if (filename.empty()) {
+            return {};
+        }
+
+        const auto localPath = downloadedDir() / filename;
+        if (fileExists(localPath)) {
+            return localPath.string();
+        }
+
+        const auto bundledDir = bundledDownloadedDir();
+        const auto bundledPath = bundledDir / filename;
+        if (!bundledDir.empty() && fileExists(bundledPath)) {
+            return bundledPath.string();
+        }
+
+        return {};
+    }
+
     void scanAndUpdate(ManagedModel& m) {
         const std::string& id = m.entry.id;
 
         // Primary downloaded file
         if (!m.entry.filename.empty()) {
-            const auto p = downloadedDir() / m.entry.filename;
-            m.downloadedPath = fileExists(p) ? p.string() : "";
+            m.downloadedPath = resolveDownloadedPath(m.entry.filename);
         }
 
         // Auxiliary file (NCNN .bin)
         if (!m.entry.filenameAux.empty()) {
-            const auto p = downloadedDir() / m.entry.filenameAux;
-            m.downloadedPathAux = fileExists(p) ? p.string() : "";
+            m.downloadedPathAux = resolveDownloadedPath(m.entry.filenameAux);
         }
 
         // Compiled .mxr (regular)
@@ -1512,6 +1723,7 @@ ModelManager::~ModelManager() = default;
 void ModelManager::setModelsDirectory(const std::string& dir) {
     std::lock_guard<std::mutex> lock(impl_->mtx);
     impl_->modelsDir = dir;
+    impl_->bundledModelsDir = bundledModelsDirectory();
     ensureDir(impl_->downloadedDir());
     ensureDir(impl_->convertedDir());
 }
@@ -1762,6 +1974,7 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
         baselineWidth, baselineHeight);
     bool ok = migraphxCompile(onnxPath, mxrPath,
                               baselineWidth, baselineHeight,
+                              1,
                               compilePrecision,
                               std::nullopt,
                               progressCb, modelId, error);
@@ -1778,6 +1991,7 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
             std::string fp32Error;
             ok = migraphxCompile(onnxPath, fp32Path,
                                  baselineWidth, baselineHeight,
+                                 1,
                                  ModelPrecision::Fp32,
                                  std::nullopt,
                                  progressCb, modelId, fp32Error);
@@ -1801,6 +2015,7 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
             std::string fallbackError;
             ok = migraphxCompile(onnxPath, mxrPath,
                                  fallbackExtent, fallbackExtent,
+                                 1,
                                  ModelPrecision::Fp32,
                                  std::nullopt,
                                  progressCb, modelId, fallbackError);
@@ -1845,6 +2060,7 @@ std::optional<std::string> ModelManager::autoCompileForInference(
     std::optional<std::int64_t> inputWidth,
     std::optional<std::int64_t> inputHeight,
     ModelPrecision compilePrecision,
+    int compileBatch,
     std::optional<std::string> calibrationVideoPath) {
 
     if (!isSupportedMiGraphXCompilePrecision(compilePrecision)) {
@@ -1858,6 +2074,11 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         error = "autoCompileForInference requires both inputWidth and inputHeight when either is provided.";
         return std::nullopt;
     }
+    if (compileBatch <= 0) {
+        error = "MiGraphX auto-compile requires a positive compile batch.";
+        return std::nullopt;
+    }
+    const int requestedCompileBatch = normaliseCompileBatch(compileBatch);
 
     int compileWidth = baselineCompileWidth();
     int compileHeight = baselineCompileHeight();
@@ -1876,28 +2097,29 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         compileWidth, compileHeight);
     auto artifactPathFor = [&](ModelPrecision precision,
                                int width,
-                               int height) -> std::filesystem::path {
-        return compiledArtifactPath(impl_->convertedDir(), modelId, precision, width, height);
+                               int height,
+                               int batch) -> std::filesystem::path {
+        return compiledArtifactPath(impl_->convertedDir(), modelId, precision, width, height, batch);
     };
-    auto customMxrPath = [&]() -> std::filesystem::path {
-        return artifactPathFor(compilePrecision, compileWidth, compileHeight);
-    };
-    auto customMxrPathForPrecision = [&](ModelPrecision precision) -> std::filesystem::path {
-        return artifactPathFor(precision, compileWidth, compileHeight);
+    auto customMxrPath = [&](ModelPrecision precision, int batch) -> std::filesystem::path {
+        return artifactPathFor(precision, compileWidth, compileHeight, batch);
     };
 
     if (useCustomDims) {
-        const auto mxrPath = customMxrPath();
+        const auto mxrPath = customMxrPath(compilePrecision, requestedCompileBatch);
         if (fileExists(mxrPath)) {
             std::cout << "[auto-compile] Model '" << modelId << "' already compiled for "
-                      << compileWidth << "x" << compileHeight << ": " << mxrPath << std::endl;
+                      << compileWidth << "x" << compileHeight
+                      << " batch " << requestedCompileBatch << ": "
+                      << mxrPath << std::endl;
             return mxrPath.string();
         }
         if (compilePrecision == ModelPrecision::Fp16) {
-            const auto fp32Path = customMxrPathForPrecision(ModelPrecision::Fp32);
+            const auto fp32Path = customMxrPath(ModelPrecision::Fp32, requestedCompileBatch);
             if (fileExists(fp32Path)) {
                 std::cout << "[auto-compile] Reusing fp32 artifact for '" << modelId
                           << "' at " << compileWidth << "x" << compileHeight
+                          << " batch " << requestedCompileBatch
                           << ": " << fp32Path << std::endl;
                 return fp32Path.string();
             }
@@ -1907,11 +2129,13 @@ std::optional<std::string> ModelManager::autoCompileForInference(
             for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
                 const int fallbackExtent = fallbackExtents[i];
                 const auto fallbackFp32Path =
-                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent);
+                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent,
+                                    requestedCompileBatch);
                 if (fileExists(fallbackFp32Path)) {
                     std::cout << "[auto-compile] Reusing smaller fp32 tile artifact for '"
                               << modelId << "' at "
                               << formatCompileDimensions(fallbackExtent, fallbackExtent)
+                              << " batch " << requestedCompileBatch
                               << ": " << fallbackFp32Path << std::endl;
                     return fallbackFp32Path.string();
                 }
@@ -1996,78 +2220,149 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         std::cout << msg << std::endl;
     };
 
-    std::cout << "[auto-compile] Compiling '" << modelId
-              << "' at " << compileWidth << "x" << compileHeight << "..." << std::endl;
-
     if (useCustomDims) {
-        const auto mxrPath = customMxrPath();
-        if (migraphxCompile(onnxPath, mxrPath, compileWidth, compileHeight,
-                            compilePrecision,
-                            calibrationVideoPath,
-                            progressCb, modelId, error)) {
-            std::cout << "[auto-compile] Successfully compiled to: " << mxrPath << std::endl;
-            return mxrPath.string();
-        }
-        bool exactFp32Attempted = false;
-        if (shouldRetryFp32AfterTimeout(compilePrecision, error)) {
-            const auto fp32Path = customMxrPathForPrecision(ModelPrecision::Fp32);
-            std::cout << "[auto-compile] fp16 compilation timed out; retrying fp32 at "
-                      << compileWidth << "x" << compileHeight << "..." << std::endl;
-            exactFp32Attempted = true;
-            if (fileExists(fp32Path)) {
-                std::cout << "[auto-compile] Reusing fp32 artifact: " << fp32Path << std::endl;
-                error.clear();
-                return fp32Path.string();
+        auto compileForBatch = [&](int batch,
+                                   std::string& batchError) -> std::optional<std::string> {
+            const auto mxrPath = customMxrPath(compilePrecision, batch);
+            if (fileExists(mxrPath)) {
+                std::cout << "[auto-compile] Reusing exact artifact for '" << modelId
+                          << "' at " << compileWidth << "x" << compileHeight
+                          << " batch " << batch << ": " << mxrPath << std::endl;
+                batchError.clear();
+                return mxrPath.string();
             }
-            std::string fp32Error;
-            if (migraphxCompile(onnxPath, fp32Path, compileWidth, compileHeight,
-                                ModelPrecision::Fp32,
+            if (compilePrecision == ModelPrecision::Fp16) {
+                const auto fp32Path = customMxrPath(ModelPrecision::Fp32, batch);
+                if (fileExists(fp32Path)) {
+                    std::cout << "[auto-compile] Reusing fp32 artifact for '" << modelId
+                              << "' at " << compileWidth << "x" << compileHeight
+                              << " batch " << batch << ": " << fp32Path << std::endl;
+                    batchError.clear();
+                    return fp32Path.string();
+                }
+            }
+            if (allowTileFallback) {
+                const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
+                for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
+                    const int fallbackExtent = fallbackExtents[i];
+                    const auto fallbackFp32Path =
+                        artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent, batch);
+                    if (fileExists(fallbackFp32Path)) {
+                        std::cout << "[auto-compile] Reusing smaller fp32 tile artifact for '"
+                                  << modelId << "' at "
+                                  << formatCompileDimensions(fallbackExtent, fallbackExtent)
+                                  << " batch " << batch
+                                  << ": " << fallbackFp32Path << std::endl;
+                        batchError.clear();
+                        return fallbackFp32Path.string();
+                    }
+                }
+            }
+            std::cout << "[auto-compile] Compiling '" << modelId
+                      << "' at " << compileWidth << "x" << compileHeight
+                      << " batch " << batch << "..." << std::endl;
+            if (migraphxCompile(onnxPath, mxrPath, compileWidth, compileHeight,
+                                batch, compilePrecision,
                                 calibrationVideoPath,
-                                progressCb, modelId, fp32Error)) {
-                std::cout << "[auto-compile] Successfully compiled to: " << fp32Path << std::endl;
-                error.clear();
-                return fp32Path.string();
+                                progressCb, modelId, batchError)) {
+                std::cout << "[auto-compile] Successfully compiled to: " << mxrPath << std::endl;
+                return mxrPath.string();
             }
-            error += "\n\nfp32 fallback also failed:\n" + fp32Error;
-        }
-        const bool shouldTrySmallerTiles =
-            allowTileFallback &&
-            ((compilePrecision == ModelPrecision::Fp32 && isMiGraphXCompileTimeout(error)) ||
-             (exactFp32Attempted && isMiGraphXCompileTimeout(error)));
-        if (shouldTrySmallerTiles) {
+
+            bool exactFp32Attempted = false;
+            if (shouldRetryFp32AfterTimeout(compilePrecision, batchError)) {
+                const auto fp32Path = customMxrPath(ModelPrecision::Fp32, batch);
+                std::cout << "[auto-compile] fp16 compilation timed out; retrying fp32 at "
+                          << compileWidth << "x" << compileHeight
+                          << " batch " << batch << "..." << std::endl;
+                exactFp32Attempted = true;
+                if (fileExists(fp32Path)) {
+                    std::cout << "[auto-compile] Reusing fp32 artifact: " << fp32Path << std::endl;
+                    batchError.clear();
+                    return fp32Path.string();
+                }
+                std::string fp32Error;
+                if (migraphxCompile(onnxPath, fp32Path, compileWidth, compileHeight,
+                                    batch, ModelPrecision::Fp32,
+                                    calibrationVideoPath,
+                                    progressCb, modelId, fp32Error)) {
+                    std::cout << "[auto-compile] Successfully compiled to: "
+                              << fp32Path << std::endl;
+                    batchError.clear();
+                    return fp32Path.string();
+                }
+                batchError += "\n\nfp32 fallback also failed:\n" + fp32Error;
+            }
+
+            const bool shouldTrySmallerTiles =
+                allowTileFallback &&
+                ((compilePrecision == ModelPrecision::Fp32 && isMiGraphXCompileTimeout(batchError)) ||
+                 (exactFp32Attempted && isMiGraphXCompileTimeout(batchError)));
+            if (!shouldTrySmallerTiles) {
+                return std::nullopt;
+            }
+
             const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
             for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
                 const int fallbackExtent = fallbackExtents[i];
                 const auto fallbackFp32Path =
-                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent);
+                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent, batch);
                 std::cout << "[auto-compile] compile timed out; retrying smaller fp32 tile at "
                           << formatCompileDimensions(fallbackExtent, fallbackExtent)
-                          << "..." << std::endl;
+                          << " batch " << batch << "..." << std::endl;
                 if (fileExists(fallbackFp32Path)) {
                     std::cout << "[auto-compile] Reusing smaller fp32 artifact: "
                               << fallbackFp32Path << std::endl;
-                    error.clear();
+                    batchError.clear();
                     return fallbackFp32Path.string();
                 }
                 std::string fallbackError;
                 if (migraphxCompile(onnxPath, fallbackFp32Path,
                                     fallbackExtent, fallbackExtent,
-                                    ModelPrecision::Fp32,
+                                    batch, ModelPrecision::Fp32,
                                     calibrationVideoPath,
                                     progressCb, modelId, fallbackError)) {
                     std::cout << "[auto-compile] Successfully compiled to: "
                               << fallbackFp32Path << std::endl;
-                    error.clear();
+                    batchError.clear();
                     return fallbackFp32Path.string();
                 }
-                error += "\n\n"
-                      + formatCompileDimensions(fallbackExtent, fallbackExtent)
-                      + " fp32 fallback also failed:\n" + fallbackError;
+                batchError += "\n\n"
+                           + formatCompileDimensions(fallbackExtent, fallbackExtent)
+                           + " fp32 fallback also failed:\n" + fallbackError;
                 if (!isMiGraphXCompileTimeout(fallbackError)) {
                     break;
                 }
             }
+            return std::nullopt;
+        };
+
+        std::string primaryError;
+        if (const auto primaryPath = compileForBatch(requestedCompileBatch, primaryError);
+            primaryPath.has_value()) {
+            error.clear();
+            return primaryPath;
         }
+
+        if (requestedCompileBatch > 1) {
+            std::cout << "[auto-compile] Batch " << requestedCompileBatch
+                      << " artifact failed; retrying batch 1 for compatibility."
+                      << std::endl;
+            std::string batch1Error;
+            if (const auto batch1Path = compileForBatch(1, batch1Error);
+                batch1Path.has_value()) {
+                error.clear();
+                return batch1Path;
+            }
+            error = primaryError;
+            if (!error.empty()) {
+                error += "\n\n";
+            }
+            error += "Batch-1 fallback also failed:\n" + batch1Error;
+            return std::nullopt;
+        }
+
+        error = primaryError;
         return std::nullopt;
     }
 

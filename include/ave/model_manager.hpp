@@ -61,7 +61,8 @@ class ModelManager {
 
     // ── Directory configuration ──────────────────────────────────
 
-    // Default: ~/.local/share/ave/models  (created on first call)
+    // Default writable cache: AVE_MODELS_DIR, then XDG/HOME fallback.
+    // Bundled read-only install assets are discovered separately.
     void setModelsDirectory(const std::string& dir);
     std::string modelsDirectory() const;
 
@@ -121,13 +122,16 @@ class ModelManager {
     // artifact matches the real video frame size. Without dimensions this
     // only returns an already-compiled .mxr. Int8 compilation additionally
     // requires a calibration video path so representative frames can be
-    // sampled during quantization.
+    // sampled during quantization. compileBatch lets runtime callers request
+    // a batched artifact for tiled inference without changing the batch-1
+    // default used elsewhere.
     std::optional<std::string> autoCompileForInference(
         const std::string& modelId,
         std::string& error,
         std::optional<std::int64_t> inputWidth = std::nullopt,
         std::optional<std::int64_t> inputHeight = std::nullopt,
         ModelPrecision compilePrecision = ModelPrecision::Fp16,
+        int compileBatch = 1,
         std::optional<std::string> calibrationVideoPath = std::nullopt);
 
     // ── UI helpers ───────────────────────────────────────────────

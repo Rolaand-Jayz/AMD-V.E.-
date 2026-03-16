@@ -1,0 +1,19 @@
+if(IS_ABSOLUTE "@CMAKE_INSTALL_DATADIR@")
+    set(_ave_models_out "$ENV{DESTDIR}@CMAKE_INSTALL_DATADIR@/ave/models")
+else()
+    set(_ave_models_out "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_DATADIR@/ave/models")
+endif()
+set(_ave_models_cache "@CMAKE_CURRENT_BINARY_DIR@/bundle-model-cache")
+
+execute_process(
+    COMMAND "@Python3_EXECUTABLE@" "@CMAKE_CURRENT_SOURCE_DIR@/tools/bundle_models.py"
+            --catalog "@CMAKE_CURRENT_SOURCE_DIR@/src/model_catalog.cpp"
+            --output-dir "${_ave_models_out}"
+            --cache-dir "${_ave_models_cache}"
+    RESULT_VARIABLE _ave_bundle_result
+    COMMAND_ECHO STDOUT
+)
+
+if(NOT _ave_bundle_result EQUAL 0)
+    message(FATAL_ERROR "Failed to bundle application models (exit ${_ave_bundle_result}).")
+endif()

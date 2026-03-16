@@ -37,10 +37,11 @@ class GlslShaderBackend final : public IAcceleratorBackend {
     std::string name()  const override;
     bool isAvailable(std::string& reason) const override;
     bool initialize(std::string& error)   override;
+    bool supportsDirectOutputEncode() const override;
     StageResult runStage(const EnhancementStage& stage, std::string& error) override;
 
-    // Process a directory of PNG frames through GLSL shaders
-    // for the given enhancement stage.
+    // Process a video file through GLSL shaders for the given
+    // enhancement stage.
     StageResult processVideoFile(
         const EnhancementStage& stage,
         const std::string& inputVideo,

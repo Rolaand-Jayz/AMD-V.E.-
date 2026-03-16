@@ -82,6 +82,10 @@ class MainWindow final : public QMainWindow {
     void refreshActiveFilters();
     void refreshFilterExecutionSummary();
     void refreshCommandPreview();
+    void updateFilterPresetDescription();
+    void alignManualFilterSelection();
+    void applySelectedFilterPreset();
+    void clearCatalogFilters();
 
     // ── Stage operations ─────────────────────────────────────────
     void addStage();
@@ -186,6 +190,8 @@ class MainWindow final : public QMainWindow {
     QListWidget* requestedStagesView_ = nullptr;   // user-order, drag-reorder
     QListWidget* plannedStagesView_   = nullptr;   // planner order
     QListWidget* activeFiltersView_   = nullptr;   // enabled catalog filters
+    QComboBox*   filterPresetCombo_   = nullptr;
+    QLabel*      filterPresetDescriptionLabel_ = nullptr;
     QLabel*      filterExecutionSummaryLabel_ = nullptr;
     QLabel*      commandFilterNoteLabel_ = nullptr;
 
@@ -224,6 +230,7 @@ class MainWindow final : public QMainWindow {
     std::vector<ave::ManagedModel> currentFamilyModels_;
     std::map<ave::StageKind, ave::EnhancementStage> familyDraftStages_;
     std::optional<ave::StageKind> activeFamilyCapability_;
+    bool updatingFilterPresetUi_ = false;
     ave::PipelinePlanner planner_;
     std::atomic<bool> isRunning_{false};
     std::atomic<bool> cancelFlag_{false};

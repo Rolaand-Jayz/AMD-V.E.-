@@ -23,6 +23,8 @@
 #include <cassert>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -48,6 +50,7 @@
 #include "ave/model_catalog.hpp"
 #include "ave/model_manager.hpp"
 #include "ave/observability.hpp"
+#include "ave/runtime_paths.hpp"
 #include "ave/stage.hpp"
 #include "ave/tensor_contract.hpp"
 #include "ave/types.hpp"
@@ -143,6 +146,18 @@ bool commandInPath(const std::string& command) {
 }
 
 bool hasAnyMiGraphXArtifact() {
+    if (const auto bundledPrefix = bundledMiGraphXPrefix(); bundledPrefix.has_value()) {
+        if (fileExists(((*bundledPrefix) / "bin" / "migraphx-driver").string())) {
+            return true;
+        }
+        if (fileExists(((*bundledPrefix) / "lib" / "libmigraphx_c.so").string())) {
+            return true;
+        }
+        if (fileExists(((*bundledPrefix) / "lib" / "migraphx" / "lib" / "libmigraphx.so").string())) {
+            return true;
+        }
+    }
+
     for (const auto& c : {"/opt/rocm/lib/libmigraphx.so",
                            "/opt/rocm/lib64/libmigraphx.so",
                            "/usr/lib/libmigraphx.so",
@@ -158,7 +173,7 @@ bool hasAnyMiGraphXArtifact() {
             if (fname.rfind("libmigraphx", 0) == 0) { return true; }
         }
     }
-    return commandInPath("migraphx-driver");
+    return commandInPath("migraphx-driver") || bundledMiGraphXDriverPath().has_value();
 }
 
 bool hasAmdSignal() {
@@ -277,6 +292,28 @@ bool extractSpatialDims(const TensorContract& contract,
        << " for contract '" << contract.name << "' (" << contract.shape.format() << ")";
     error = os.str();
     return false;
+}
+
+int extractBatchSize(const TensorContract& contract) {
+    const auto& dims = contract.shape.dims;
+    if (dims.size() == 4 && dims[0] > 0 &&
+        dims[0] <= static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        return static_cast<int>(dims[0]);
+    }
+    return 1;
+}
+
+std::size_t elementsPerBatch(const TensorContract& contract, int batchSize) {
+    const std::int64_t totalElements = contract.shape.elements();
+    if (totalElements <= 0 || batchSize <= 0) {
+        return 0;
+    }
+    const std::int64_t batchElements =
+        totalElements / static_cast<std::int64_t>(batchSize);
+    if (batchElements <= 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>(batchElements);
 }
 
 std::string loadFailureKey(const std::string& modelId,
@@ -617,6 +654,7 @@ std::string formatProcessExit(int rawStatus) {
 
 constexpr int kDefaultTileExtent = 192;
 constexpr int kDefaultTileOverlap = 16;
+constexpr int kDefaultTileBatch = 4;
 
 int readTileEnvValue(const char* name, int defaultValue) {
     if (const char* raw = std::getenv(name); raw != nullptr) {
@@ -629,10 +667,17 @@ int readTileEnvValue(const char* name, int defaultValue) {
     return defaultValue;
 }
 
+bool hasNonEmptyEnv(const char* name) {
+    const char* raw = std::getenv(name);
+    return raw != nullptr && *raw != '\0';
+}
+
 struct TileConfig {
     int width = kDefaultTileExtent;
     int height = kDefaultTileExtent;
     int overlap = kDefaultTileOverlap;
+    int batch = kDefaultTileBatch;
+    bool batchExplicit = false;
 };
 
 struct TileWindow {
@@ -641,6 +686,51 @@ struct TileWindow {
     int offset = 0;
 };
 
+struct TileDispatch {
+    int tileX = 0;
+    int tileY = 0;
+    TileWindow srcXWindow;
+    TileWindow srcYWindow;
+};
+
+std::vector<int> buildTileStarts(int fullExtent, int tileExtent, int overlap);
+
+int chooseAdaptiveTileBatch(int frameWidth,
+                            int frameHeight,
+                            int tileWidth,
+                            int tileHeight,
+                            int tileOverlap) {
+    const auto tileXs = buildTileStarts(frameWidth, tileWidth, tileOverlap);
+    const auto tileYs = buildTileStarts(frameHeight, tileHeight, tileOverlap);
+    const std::size_t estimatedTiles = tileXs.size() * tileYs.size();
+    if (estimatedTiles <= 1u) {
+        return 1;
+    }
+
+    const std::size_t tileArea =
+        static_cast<std::size_t>(tileWidth) * static_cast<std::size_t>(tileHeight);
+    int batch = 4;
+    if (tileArea <= 96u * 96u) {
+        batch = 16;
+    } else if (tileArea <= 128u * 128u) {
+        batch = 12;
+    } else if (tileArea <= 192u * 192u) {
+        batch = 8;
+    } else if (tileArea <= 256u * 256u) {
+        batch = 4;
+    } else {
+        batch = 2;
+    }
+
+    if (frameWidth * frameHeight <= 1280 * 720 && tileArea <= 192u * 192u) {
+        batch = std::max(batch, 8);
+    }
+
+    batch = std::min(batch, 16);
+    batch = std::min(batch, static_cast<int>(estimatedTiles));
+    return std::max(batch, 1);
+}
+
 bool resolveTileConfig(const EnhancementStage& stage,
                        TileConfig& tileConfig,
                        std::string& error) {
@@ -648,6 +738,8 @@ bool resolveTileConfig(const EnhancementStage& stage,
     tileConfig.width = readTileEnvValue("AVE_MIGRAPHX_TILE_WIDTH", envTileSize);
     tileConfig.height = readTileEnvValue("AVE_MIGRAPHX_TILE_HEIGHT", envTileSize);
     tileConfig.overlap = readTileEnvValue("AVE_MIGRAPHX_TILE_OVERLAP", kDefaultTileOverlap);
+    tileConfig.batch = readTileEnvValue("AVE_MIGRAPHX_TILE_BATCH", kDefaultTileBatch);
+    tileConfig.batchExplicit = hasNonEmptyEnv("AVE_MIGRAPHX_TILE_BATCH");
 
     std::int64_t parsed = 0;
     if (tryGetInt(stage.params, "tile_size", parsed)) {
@@ -663,6 +755,10 @@ bool resolveTileConfig(const EnhancementStage& stage,
     if (tryGetInt(stage.params, "tile_overlap", parsed)) {
         tileConfig.overlap = static_cast<int>(parsed);
     }
+    if (tryGetInt(stage.params, "tile_batch", parsed)) {
+        tileConfig.batch = static_cast<int>(parsed);
+        tileConfig.batchExplicit = true;
+    }
 
     if (tileConfig.width <= 0 || tileConfig.height <= 0) {
         error = "Tile dimensions must be positive.";
@@ -674,6 +770,14 @@ bool resolveTileConfig(const EnhancementStage& stage,
     }
     if (tileConfig.overlap < 0) {
         error = "Tile overlap cannot be negative.";
+        return false;
+    }
+    if (tileConfig.batch <= 0) {
+        error = "Tile batch must be positive.";
+        return false;
+    }
+    if (tileConfig.batch > 64) {
+        error = "Tile batch is unreasonably large; keep it at or below 64.";
         return false;
     }
     if (tileConfig.overlap * 2 >= tileConfig.width ||
@@ -729,56 +833,200 @@ TileWindow computeTileWindow(const std::vector<int>& starts,
     return window;
 }
 
-void extractRgbTileClamp(const std::uint8_t* source,
-                         int sourceWidth,
-                         int sourceHeight,
-                         int tileX,
-                         int tileY,
-                         int tileWidth,
-                         int tileHeight,
-                         std::vector<std::uint8_t>& tile) {
-    const std::size_t tileBytes = static_cast<std::size_t>(tileWidth) *
-                                  static_cast<std::size_t>(tileHeight) * 3u;
-    tile.resize(tileBytes);
+inline std::uint8_t floatToRgbByteLocal(float value) {
+    value = std::clamp(value * 255.0f, 0.0f, 255.0f);
+    return static_cast<std::uint8_t>(value + 0.5f);
+}
+
+inline std::uint16_t floatToHalfBitsLocal(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    const std::uint32_t sign = (bits >> 16u) & 0x8000u;
+    std::uint32_t mantissa = bits & 0x007fffffu;
+    int exponent = static_cast<int>((bits >> 23u) & 0xffu) - 127 + 15;
+
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return static_cast<std::uint16_t>(sign);
+        }
+        mantissa = (mantissa | 0x00800000u) >> static_cast<unsigned>(1 - exponent);
+        return static_cast<std::uint16_t>(sign | ((mantissa + 0x00001000u) >> 13u));
+    }
+
+    if (exponent >= 31) {
+        if (((bits >> 23u) & 0xffu) == 0xffu && mantissa != 0u) {
+            return static_cast<std::uint16_t>(sign | 0x7c00u | (mantissa >> 13u) | 1u);
+        }
+        return static_cast<std::uint16_t>(sign | 0x7c00u);
+    }
+
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exponent) << 10u)
+             | ((mantissa + 0x00001000u) >> 13u));
+}
+
+inline float halfBitsToFloatLocal(std::uint16_t bits) {
+    const std::uint32_t sign = (static_cast<std::uint32_t>(bits & 0x8000u)) << 16u;
+    std::uint32_t exponent = (static_cast<std::uint32_t>(bits) >> 10u) & 0x1fu;
+    std::uint32_t mantissa = static_cast<std::uint32_t>(bits & 0x03ffu);
+    std::uint32_t outBits = 0;
+
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            outBits = sign;
+        } else {
+            exponent = 127u - 15u + 1u;
+            while ((mantissa & 0x0400u) == 0u) {
+                mantissa <<= 1u;
+                --exponent;
+            }
+            mantissa &= 0x03ffu;
+            outBits = sign | (exponent << 23u) | (mantissa << 13u);
+        }
+    } else if (exponent == 0x1fu) {
+        outBits = sign | 0x7f800000u | (mantissa << 13u);
+    } else {
+        exponent = exponent + (127u - 15u);
+        outBits = sign | (exponent << 23u) | (mantissa << 13u);
+    }
+
+    float out = 0.0f;
+    std::memcpy(&out, &outBits, sizeof(out));
+    return out;
+}
+
+void packRgbTileClampToNchwFp32(const std::uint8_t* source,
+                                int sourceWidth,
+                                int sourceHeight,
+                                int tileX,
+                                int tileY,
+                                int tileWidth,
+                                int tileHeight,
+                                float* tensor) {
+    const std::size_t hw = static_cast<std::size_t>(tileWidth) *
+                           static_cast<std::size_t>(tileHeight);
+    float* const rPlane = tensor;
+    float* const gPlane = tensor + hw;
+    float* const bPlane = tensor + hw * 2u;
+    constexpr float kInv255 = 1.0f / 255.0f;
 
     for (int y = 0; y < tileHeight; ++y) {
         const int srcY = std::clamp(tileY + y, 0, sourceHeight - 1);
+        const std::size_t dstRow = static_cast<std::size_t>(y) *
+                                   static_cast<std::size_t>(tileWidth);
         for (int x = 0; x < tileWidth; ++x) {
             const int srcX = std::clamp(tileX + x, 0, sourceWidth - 1);
             const std::size_t srcOffset =
                 (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth)
                  + static_cast<std::size_t>(srcX)) * 3u;
-            const std::size_t dstOffset =
-                (static_cast<std::size_t>(y) * static_cast<std::size_t>(tileWidth)
-                 + static_cast<std::size_t>(x)) * 3u;
-            std::memcpy(tile.data() + dstOffset, source + srcOffset, 3u);
+            const std::size_t dstOffset = dstRow + static_cast<std::size_t>(x);
+            rPlane[dstOffset] = static_cast<float>(source[srcOffset + 0u]) * kInv255;
+            gPlane[dstOffset] = static_cast<float>(source[srcOffset + 1u]) * kInv255;
+            bPlane[dstOffset] = static_cast<float>(source[srcOffset + 2u]) * kInv255;
         }
     }
 }
 
-void blitRgbTileRegion(const std::vector<std::uint8_t>& tile,
-                       int tileWidth,
-                       int srcX,
-                       int srcY,
-                       int copyWidth,
-                       int copyHeight,
-                       std::vector<std::uint8_t>& dest,
-                       int destWidth,
-                       int destX,
-                       int destY) {
-    if (copyWidth <= 0 || copyHeight <= 0) {
-        return;
-    }
+void packRgbTileClampToNchwFp16(const std::uint8_t* source,
+                                int sourceWidth,
+                                int sourceHeight,
+                                int tileX,
+                                int tileY,
+                                int tileWidth,
+                                int tileHeight,
+                                std::uint16_t* tensor) {
+    const std::size_t hw = static_cast<std::size_t>(tileWidth) *
+                           static_cast<std::size_t>(tileHeight);
+    std::uint16_t* const rPlane = tensor;
+    std::uint16_t* const gPlane = tensor + hw;
+    std::uint16_t* const bPlane = tensor + hw * 2u;
+    constexpr float kInv255 = 1.0f / 255.0f;
 
-    for (int row = 0; row < copyHeight; ++row) {
-        const std::size_t srcOffset =
-            (static_cast<std::size_t>(srcY + row) * static_cast<std::size_t>(tileWidth)
-             + static_cast<std::size_t>(srcX)) * 3u;
-        const std::size_t dstOffset =
-            (static_cast<std::size_t>(destY + row) * static_cast<std::size_t>(destWidth)
-             + static_cast<std::size_t>(destX)) * 3u;
-        const std::size_t bytes = static_cast<std::size_t>(copyWidth) * 3u;
-        std::memcpy(dest.data() + dstOffset, tile.data() + srcOffset, bytes);
+    for (int y = 0; y < tileHeight; ++y) {
+        const int srcY = std::clamp(tileY + y, 0, sourceHeight - 1);
+        const std::size_t dstRow = static_cast<std::size_t>(y) *
+                                   static_cast<std::size_t>(tileWidth);
+        for (int x = 0; x < tileWidth; ++x) {
+            const int srcX = std::clamp(tileX + x, 0, sourceWidth - 1);
+            const std::size_t srcOffset =
+                (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth)
+                 + static_cast<std::size_t>(srcX)) * 3u;
+            const std::size_t dstOffset = dstRow + static_cast<std::size_t>(x);
+            rPlane[dstOffset] = floatToHalfBitsLocal(static_cast<float>(source[srcOffset + 0u]) * kInv255);
+            gPlane[dstOffset] = floatToHalfBitsLocal(static_cast<float>(source[srcOffset + 1u]) * kInv255);
+            bPlane[dstOffset] = floatToHalfBitsLocal(static_cast<float>(source[srcOffset + 2u]) * kInv255);
+        }
+    }
+}
+
+void blitNchwFp32TileRegionToRgb24(const float* tensor,
+                                   int tileChannels,
+                                   int tileWidth,
+                                   int tileHeight,
+                                   int srcX,
+                                   int srcY,
+                                   int copyWidth,
+                                   int copyHeight,
+                                   std::vector<std::uint8_t>& dst,
+                                   int dstWidth,
+                                   int dstX,
+                                   int dstY) {
+    const std::size_t hw = static_cast<std::size_t>(tileWidth) *
+                           static_cast<std::size_t>(tileHeight);
+    const float* const rPlane = tileChannels > 0 ? tensor : nullptr;
+    const float* const gPlane = tileChannels > 1 ? tensor + hw : nullptr;
+    const float* const bPlane = tileChannels > 2 ? tensor + (2u * hw) : nullptr;
+
+    for (int y = 0; y < copyHeight; ++y) {
+        const std::size_t srcRow =
+            static_cast<std::size_t>(srcY + y) * static_cast<std::size_t>(tileWidth)
+            + static_cast<std::size_t>(srcX);
+        const std::size_t dstRow =
+            (static_cast<std::size_t>(dstY + y) * static_cast<std::size_t>(dstWidth)
+             + static_cast<std::size_t>(dstX)) * 3u;
+        for (int x = 0; x < copyWidth; ++x) {
+            const std::size_t srcIdx = srcRow + static_cast<std::size_t>(x);
+            const std::size_t dstIdx = dstRow + static_cast<std::size_t>(x) * 3u;
+            dst[dstIdx + 0u] = floatToRgbByteLocal(rPlane[srcIdx]);
+            dst[dstIdx + 1u] = floatToRgbByteLocal(gPlane[srcIdx]);
+            dst[dstIdx + 2u] = floatToRgbByteLocal(bPlane[srcIdx]);
+        }
+    }
+}
+
+void blitNchwFp16TileRegionToRgb24(const std::uint16_t* tensor,
+                                   int tileChannels,
+                                   int tileWidth,
+                                   int tileHeight,
+                                   int srcX,
+                                   int srcY,
+                                   int copyWidth,
+                                   int copyHeight,
+                                   std::vector<std::uint8_t>& dst,
+                                   int dstWidth,
+                                   int dstX,
+                                   int dstY) {
+    const std::size_t hw = static_cast<std::size_t>(tileWidth) *
+                           static_cast<std::size_t>(tileHeight);
+    const std::uint16_t* const rPlane = tileChannels > 0 ? tensor : nullptr;
+    const std::uint16_t* const gPlane = tileChannels > 1 ? tensor + hw : nullptr;
+    const std::uint16_t* const bPlane = tileChannels > 2 ? tensor + (2u * hw) : nullptr;
+
+    for (int y = 0; y < copyHeight; ++y) {
+        const std::size_t srcRow =
+            static_cast<std::size_t>(srcY + y) * static_cast<std::size_t>(tileWidth)
+            + static_cast<std::size_t>(srcX);
+        const std::size_t dstRow =
+            (static_cast<std::size_t>(dstY + y) * static_cast<std::size_t>(dstWidth)
+             + static_cast<std::size_t>(dstX)) * 3u;
+        for (int x = 0; x < copyWidth; ++x) {
+            const std::size_t srcIdx = srcRow + static_cast<std::size_t>(x);
+            const std::size_t dstIdx = dstRow + static_cast<std::size_t>(x) * 3u;
+            dst[dstIdx + 0u] = floatToRgbByteLocal(halfBitsToFloatLocal(rPlane[srcIdx]));
+            dst[dstIdx + 1u] = floatToRgbByteLocal(halfBitsToFloatLocal(gPlane[srcIdx]));
+            dst[dstIdx + 2u] = floatToRgbByteLocal(halfBitsToFloatLocal(bPlane[srcIdx]));
+        }
     }
 }
 
@@ -922,9 +1170,10 @@ struct MiGraphXBackend::Impl {
             for (const auto len : shape.lengths()) {
                 c.shape.dims.push_back(static_cast<std::int64_t>(len));
             }
-            // MiGraphX default layout is NCHW; honour NHWC env var
-            const bool nhwcEnv = std::getenv("MIGRAPHX_ENABLE_NHWC") != nullptr;
-            c.layout = nhwcEnv ? TensorLayout::NHWC : TensorLayout::NCHW;
+            c.layout = inferTensorLayout(c.shape.dims);
+            if (c.layout == TensorLayout::Unknown) {
+                c.layout = TensorLayout::NCHW;
+            }
             result.push_back(std::move(c));
         }
         return result;
@@ -938,7 +1187,8 @@ struct MiGraphXBackend::Impl {
                      std::optional<int> inputHeight = std::nullopt,
                      std::optional<std::string> preferredPath = std::nullopt,
                      bool preferredPathExplicit = false,
-                     std::optional<std::string> calibrationVideoPath = std::nullopt) {
+                     std::optional<std::string> calibrationVideoPath = std::nullopt,
+                     int compileBatch = 1) {
         ModelManager mgr;
 
         std::string sourcePath;
@@ -967,7 +1217,7 @@ struct MiGraphXBackend::Impl {
             std::string compileError;
             const auto compiled = mgr.autoCompileForInference(
                 modelId, compileError, iw, ih, modelCompilePrecision(opts.precision),
-                calibrationVideoPath);
+                compileBatch, calibrationVideoPath);
             if (compiled.has_value() && normalizeExtLower(*compiled) == ".mxr") {
                 sourcePath = *compiled;
                 if (iw.has_value() && ih.has_value()) {
@@ -1085,8 +1335,10 @@ struct MiGraphXBackend::Impl {
                 for (const auto len : outShapes[i].lengths()) {
                     oc.shape.dims.push_back(static_cast<std::int64_t>(len));
                 }
-                const bool nhwcEnv = std::getenv("MIGRAPHX_ENABLE_NHWC") != nullptr;
-                oc.layout = nhwcEnv ? TensorLayout::NHWC : TensorLayout::NCHW;
+                oc.layout = inferTensorLayout(oc.shape.dims);
+                if (oc.layout == TensorLayout::Unknown) {
+                    oc.layout = TensorLayout::NCHW;
+                }
                 mp.outputContracts.push_back(std::move(oc));
             }
 
@@ -1264,13 +1516,15 @@ struct MiGraphXBackend::Impl {
                      std::optional<int> inputHeight = std::nullopt,
                      std::optional<std::string> preferredPath = std::nullopt,
                      bool preferredPathExplicit = false,
-                     std::optional<std::string> calibrationVideoPath = std::nullopt) {
+                     std::optional<std::string> calibrationVideoPath = std::nullopt,
+                     int compileBatch = 1) {
         (void)modelId;
         (void)inputWidth;
         (void)inputHeight;
         (void)preferredPath;
         (void)preferredPathExplicit;
         (void)calibrationVideoPath;
+        (void)compileBatch;
         error = "MiGraphX hardware support was not compiled into this build (-DAVE_HAVE_MIGRAPHX=OFF).";
         return false;
     }
@@ -1289,6 +1543,7 @@ MiGraphXBackend::~MiGraphXBackend() = default;
 
 BackendType MiGraphXBackend::type()  const { return BackendType::MiGraphX; }
 std::string MiGraphXBackend::name()  const { return "MiGraphX (ROCm)"; }
+bool MiGraphXBackend::supportsDirectOutputEncode() const { return true; }
 
 bool MiGraphXBackend::isAvailable(std::string& reason) const {
 #ifdef AVE_HAVE_MIGRAPHX
@@ -1297,7 +1552,7 @@ bool MiGraphXBackend::isAvailable(std::string& reason) const {
         return false;
     }
     if (!hasAnyMiGraphXArtifact()) {
-        reason = "MiGraphX runtime not found (libmigraphx.so or migraphx-driver).";
+        reason = "MiGraphX runtime not found (system or bundled libmigraphx / migraphx-driver).";
         return false;
     }
     reason = "MiGraphX runtime detected.";
@@ -1584,12 +1839,19 @@ StageResult MiGraphXBackend::processVideoFile(
     if (!resolveTileConfig(stage, tileConfig, error)) {
         return deferToFfmpeg("Invalid tile configuration: " + error);
     }
+    if (!tileConfig.batchExplicit) {
+        tileConfig.batch = chooseAdaptiveTileBatch(
+            inW, inH, tileConfig.width, tileConfig.height, tileConfig.overlap);
+        std::cout << "[migraphx] adaptive tile batch selected: "
+                  << tileConfig.batch << std::endl;
+    }
 
     // Ensure a model program is ready for the requested tile size.
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         if (!impl_->loadProgram(modelId, error, tileConfig.width, tileConfig.height,
-                                selectedPath, selectedPathExplicit, inputVideo)) {
+                                selectedPath, selectedPathExplicit, inputVideo,
+                                tileConfig.batch)) {
             std::cerr << "[migraphx] processVideoFile: model load failed: "
                       << error << "\n  → Deferring to FFmpeg." << std::endl;
             error.clear();
@@ -1655,6 +1917,20 @@ StageResult MiGraphXBackend::processVideoFile(
         return deferToFfmpeg("Model output dimensions are not integer multiples of the tile input size.");
     }
 
+    const int compiledBatch = extractBatchSize(inputContract);
+    const int outputBatch = extractBatchSize(outputContract);
+    if (compiledBatch <= 0) {
+        return deferToFfmpeg("Model reported a non-positive batch dimension.");
+    }
+    if (outputBatch != compiledBatch) {
+        return deferToFfmpeg("Model input/output batch dimensions do not match.");
+    }
+    if (compiledBatch != tileConfig.batch) {
+        std::cout << "[migraphx] requested tile batch " << tileConfig.batch
+                  << ", loaded artifact batch " << compiledBatch
+                  << "; using the loaded artifact." << std::endl;
+    }
+
     const int scaleX = modelOutW / modelInW;
     const int scaleY = modelOutH / modelInH;
     if (scaleX <= 0 || scaleY <= 0) {
@@ -1683,6 +1959,18 @@ StageResult MiGraphXBackend::processVideoFile(
     }
     for (std::size_t i = 0; i < tileYs.size(); ++i) {
         tileYWindows.push_back(computeTileWindow(tileYs, i, modelInH, inH));
+    }
+    std::vector<TileDispatch> tileDispatches;
+    tileDispatches.reserve(tileXs.size() * tileYs.size());
+    for (std::size_t tileRow = 0; tileRow < tileYs.size(); ++tileRow) {
+        for (std::size_t tileCol = 0; tileCol < tileXs.size(); ++tileCol) {
+            tileDispatches.push_back(TileDispatch{
+                tileXs[tileCol],
+                tileYs[tileRow],
+                tileXWindows[tileCol],
+                tileYWindows[tileRow],
+            });
+        }
     }
     const std::size_t tilesPerFrame = tileXs.size() * tileYs.size();
 
@@ -1761,28 +2049,20 @@ StageResult MiGraphXBackend::processVideoFile(
         }
         return os.str();
     };
-    auto abortProcessing = [&](const std::string& detail,
-                               bool includeEncodeFailure = false) -> StageResult {
-        pclose(decodePipe);
-        const int encodeStatus = pclose(encodePipe);
-        AVE_ROCTX_RANGE_END();
-        if (includeEncodeFailure) {
-            error = formatEncodeFailure(detail, encodeStatus);
-        } else {
-            error = detail;
-        }
-        cleanupEncodeLog();
-        return StageResult::Error;
-    };
 
     AVE_ROCTX_RANGE("migraphx:processVideoFile");
+    const std::size_t batchesPerFrame =
+        (tilesPerFrame + static_cast<std::size_t>(compiledBatch) - 1u)
+        / static_cast<std::size_t>(compiledBatch);
     std::cout << "[migraphx] processVideoFile: model='" << modelId
               << "' input=" << inW << "x" << inH
               << " output=" << outW << "x" << outH
               << " tile=" << modelInW << "x" << modelInH
               << " overlap=" << tileOverlap
+              << " batch=" << compiledBatch
               << " scale=" << scaleX << "x" << scaleY
               << " tiles/frame=" << tilesPerFrame
+              << " batches/frame=" << batchesPerFrame
               << " stage=" << toString(stage.kind)
               << " direct_final_encode=" << (directOutputEncode ? "on" : "off")
               << std::endl;
@@ -1791,20 +2071,39 @@ StageResult MiGraphXBackend::processVideoFile(
                                    static_cast<std::size_t>(inH) * 3u;
     const std::size_t outFrameBytes = static_cast<std::size_t>(outW) *
                                       static_cast<std::size_t>(outH) * 3u;
-    const std::size_t tileTensorElements = static_cast<std::size_t>(modelInW) *
-                                           static_cast<std::size_t>(modelInH) * 3u;
+    const std::int64_t totalInputElements = inputContract.shape.elements();
+    const std::int64_t totalOutputElements = outputContract.shape.elements();
+    if (totalInputElements <= 0 || totalOutputElements <= 0 ||
+        totalInputElements % compiledBatch != 0 ||
+        totalOutputElements % compiledBatch != 0) {
+        return deferToFfmpeg("Model batch tensor sizes are not divisible by the loaded batch.");
+    }
+    const std::size_t tileTensorElements =
+        elementsPerBatch(inputContract, compiledBatch);
+    const std::size_t batchedInputTensorElements =
+        tileTensorElements * static_cast<std::size_t>(compiledBatch);
     const std::size_t expectedTileOutputElements =
-        static_cast<std::size_t>(outputContract.shape.elements());
+        elementsPerBatch(outputContract, compiledBatch);
+    const std::size_t expectedBatchOutputElements =
+        expectedTileOutputElements * static_cast<std::size_t>(compiledBatch);
+    const std::size_t expectedHostTileInputElements =
+        static_cast<std::size_t>(modelInW) * static_cast<std::size_t>(modelInH)
+        * static_cast<std::size_t>(modelInC);
+    const std::size_t expectedHostTileOutputElements =
+        static_cast<std::size_t>(modelOutW) * static_cast<std::size_t>(modelOutH)
+        * static_cast<std::size_t>(modelOutC);
+    if (tileTensorElements != expectedHostTileInputElements ||
+        expectedTileOutputElements != expectedHostTileOutputElements) {
+        return deferToFfmpeg("Model tensor layout does not match the host NCHW staging path.");
+    }
     std::vector<std::uint8_t> rgbIn(frameBytes);
-    std::vector<std::uint8_t> rgbOut(outFrameBytes);
-    std::vector<std::uint8_t> tileRgbIn;
-    std::vector<std::uint8_t> tileRgbOut;
-    std::vector<float> inputTensorFp32;
-    std::vector<std::uint16_t> inputTensorFp16;
+    std::vector<std::uint8_t> rgbOut;
+    std::vector<float> batchedInputTensorFp32;
+    std::vector<std::uint16_t> batchedInputTensorFp16;
     if (inputContract.dtype == TensorDtype::Fp32) {
-        inputTensorFp32.reserve(tileTensorElements);
+        batchedInputTensorFp32.reserve(batchedInputTensorElements);
     } else {
-        inputTensorFp16.reserve(tileTensorElements);
+        batchedInputTensorFp16.reserve(batchedInputTensorElements);
     }
     using Clock = std::chrono::steady_clock;
     std::chrono::nanoseconds readTime{0};
@@ -1812,6 +2111,133 @@ StageResult MiGraphXBackend::processVideoFile(
     std::chrono::nanoseconds inferenceTime{0};
     std::chrono::nanoseconds postprocessTime{0};
     std::chrono::nanoseconds writeTime{0};
+    struct QueuedFrame {
+        int frameIdx = 0;
+        std::vector<std::uint8_t> pixels;
+    };
+    constexpr std::size_t kQueuedEncodeDepth = 2u;
+    std::mutex encodeQueueMtx;
+    std::condition_variable encodeQueueCv;
+    std::deque<QueuedFrame> encodeQueue;
+    std::deque<std::vector<std::uint8_t>> freeFrameBuffers;
+    freeFrameBuffers.emplace_back(outFrameBytes);
+    freeFrameBuffers.emplace_back(outFrameBytes);
+    freeFrameBuffers.emplace_back(outFrameBytes);
+    bool encodeInputClosed = false;
+    bool encodeWriterFailed = false;
+    std::string encodeWriterError;
+    std::thread encodeThread;
+    auto shutdownEncodeWriter = [&](bool discardPending) {
+        {
+            std::lock_guard<std::mutex> lk(encodeQueueMtx);
+            if (discardPending) {
+                encodeQueue.clear();
+            }
+            encodeInputClosed = true;
+        }
+        encodeQueueCv.notify_all();
+        if (encodeThread.joinable()) {
+            encodeThread.join();
+        }
+    };
+    auto acquireOutputBuffer = [&]() -> bool {
+        std::unique_lock<std::mutex> lk(encodeQueueMtx);
+        encodeQueueCv.wait(lk, [&]() {
+            return !freeFrameBuffers.empty() || encodeWriterFailed;
+        });
+        if (encodeWriterFailed) {
+            return false;
+        }
+        rgbOut = std::move(freeFrameBuffers.front());
+        freeFrameBuffers.pop_front();
+        lk.unlock();
+        if (rgbOut.size() != outFrameBytes) {
+            rgbOut.resize(outFrameBytes);
+        }
+        return true;
+    };
+    auto submitOutputBuffer = [&](int producedFrameIdx) -> bool {
+        std::unique_lock<std::mutex> lk(encodeQueueMtx);
+        encodeQueueCv.wait(lk, [&]() {
+            return encodeQueue.size() < kQueuedEncodeDepth || encodeWriterFailed;
+        });
+        if (encodeWriterFailed) {
+            return false;
+        }
+        encodeQueue.push_back(QueuedFrame{producedFrameIdx, std::move(rgbOut)});
+        lk.unlock();
+        encodeQueueCv.notify_all();
+        return true;
+    };
+    encodeThread = std::thread([&]() {
+        while (true) {
+            QueuedFrame frame;
+            {
+                std::unique_lock<std::mutex> lk(encodeQueueMtx);
+                encodeQueueCv.wait(lk, [&]() {
+                    return !encodeQueue.empty() || encodeInputClosed;
+                });
+                if (encodeQueue.empty()) {
+                    break;
+                }
+                frame = std::move(encodeQueue.front());
+                encodeQueue.pop_front();
+            }
+            encodeQueueCv.notify_all();
+
+            const auto writeStart = Clock::now();
+            const std::size_t written =
+                std::fwrite(frame.pixels.data(), 1, outFrameBytes, encodePipe);
+            writeTime += Clock::now() - writeStart;
+            if (written != outFrameBytes) {
+                std::lock_guard<std::mutex> lk(encodeQueueMtx);
+                encodeWriterFailed = true;
+                encodeWriterError =
+                    "Encode pipe write failed at frame " + std::to_string(frame.frameIdx)
+                    + "; the FFmpeg encoder exited early.";
+                encodeInputClosed = true;
+                encodeQueue.clear();
+                encodeQueueCv.notify_all();
+                break;
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(encodeQueueMtx);
+                freeFrameBuffers.push_back(std::move(frame.pixels));
+            }
+            encodeQueueCv.notify_all();
+        }
+    });
+    auto abortProcessing = [&](const std::string& detail,
+                               bool includeEncodeFailure = false) -> StageResult {
+        pclose(decodePipe);
+        shutdownEncodeWriter(true);
+        const int encodeStatus = pclose(encodePipe);
+        AVE_ROCTX_RANGE_END();
+
+        bool writerFailed = false;
+        std::string combinedDetail = detail;
+        {
+            std::lock_guard<std::mutex> lk(encodeQueueMtx);
+            writerFailed = encodeWriterFailed;
+            if (!encodeWriterError.empty() && encodeWriterError != detail) {
+                combinedDetail += "\n" + encodeWriterError;
+            }
+        }
+
+        if (includeEncodeFailure || writerFailed) {
+            error = formatEncodeFailure(combinedDetail, encodeStatus);
+        } else {
+            error = combinedDetail;
+        }
+        cleanupEncodeLog();
+        return StageResult::Error;
+    };
+    if (!acquireOutputBuffer()) {
+        return abortProcessing(
+            "Failed to acquire output frame buffer for MiGraphX encode.",
+            true);
+    }
     const auto loopStart = Clock::now();
     int frameIdx = 0;
     bool cancelled = false;
@@ -1851,89 +2277,113 @@ StageResult MiGraphXBackend::processVideoFile(
 
         std::fill(rgbOut.begin(), rgbOut.end(), 0u);
 
-        for (std::size_t tileRow = 0; tileRow < tileYs.size(); ++tileRow) {
-            const int tileY = tileYs[tileRow];
-            const TileWindow& srcYWindow = tileYWindows[tileRow];
+        for (std::size_t batchStart = 0; batchStart < tileDispatches.size();
+             batchStart += static_cast<std::size_t>(compiledBatch)) {
+            const std::size_t activeTiles = std::min(
+                static_cast<std::size_t>(compiledBatch),
+                tileDispatches.size() - batchStart);
 
-            for (std::size_t tileCol = 0; tileCol < tileXs.size(); ++tileCol) {
-                const int tileX = tileXs[tileCol];
-                const TileWindow& srcXWindow = tileXWindows[tileCol];
-
-                const auto preprocessStart = Clock::now();
-                extractRgbTileClamp(rgbIn.data(), inW, inH, tileX, tileY,
-                                    modelInW, modelInH, tileRgbIn);
-
-                const void* inputTensorData = nullptr;
-                std::size_t inputTensorElements = tileTensorElements;
-                if (inputContract.dtype == TensorDtype::Fp16) {
-                    frame_io::rgb24ToNchwFp16(tileRgbIn.data(), modelInW, modelInH, inputTensorFp16);
-                    inputTensorData = inputTensorFp16.data();
-                    inputTensorElements = inputTensorFp16.size();
-                } else {
-                    frame_io::rgb24ToNchwFp32(tileRgbIn.data(), modelInW, modelInH, inputTensorFp32);
-                    inputTensorData = inputTensorFp32.data();
-                    inputTensorElements = inputTensorFp32.size();
+            const auto preprocessStart = Clock::now();
+            const void* inputTensorData = nullptr;
+            std::size_t inputTensorElements = batchedInputTensorElements;
+            if (inputContract.dtype == TensorDtype::Fp16) {
+                batchedInputTensorFp16.resize(batchedInputTensorElements);
+                for (std::size_t slot = 0; slot < static_cast<std::size_t>(compiledBatch); ++slot) {
+                    const std::size_t dispatchIndex =
+                        batchStart + std::min(slot, activeTiles - 1u);
+                    const TileDispatch& dispatch = tileDispatches[dispatchIndex];
+                    packRgbTileClampToNchwFp16(
+                        rgbIn.data(), inW, inH,
+                        dispatch.tileX, dispatch.tileY,
+                        modelInW, modelInH,
+                        batchedInputTensorFp16.data() + slot * tileTensorElements);
                 }
-                preprocessTime += Clock::now() - preprocessStart;
-
-                const auto inferenceStart = Clock::now();
-                const void* outputTensorData = nullptr;
-                std::size_t outputTensorElements = 0;
-                TensorDtype outputTensorDtype = TensorDtype::Unknown;
-                {
-                    std::lock_guard<std::mutex> lk(impl_->mtx);
-                    if (!impl_->runInference(modelId, inputTensorData, inputTensorElements,
-                                             inputContract.dtype, outputTensorData,
-                                             outputTensorElements, outputTensorDtype, error)) {
-                        std::cerr << "[migraphx] Frame " << frameIdx
-                                  << " tile (" << tileCol << "," << tileRow
-                                  << ") inference FAILED: " << error << std::endl;
-                        return abortProcessing(error);
-                    }
+                inputTensorData = batchedInputTensorFp16.data();
+                inputTensorElements = batchedInputTensorFp16.size();
+            } else {
+                batchedInputTensorFp32.resize(batchedInputTensorElements);
+                for (std::size_t slot = 0; slot < static_cast<std::size_t>(compiledBatch); ++slot) {
+                    const std::size_t dispatchIndex =
+                        batchStart + std::min(slot, activeTiles - 1u);
+                    const TileDispatch& dispatch = tileDispatches[dispatchIndex];
+                    packRgbTileClampToNchwFp32(
+                        rgbIn.data(), inW, inH,
+                        dispatch.tileX, dispatch.tileY,
+                        modelInW, modelInH,
+                        batchedInputTensorFp32.data() + slot * tileTensorElements);
                 }
-                inferenceTime += Clock::now() - inferenceStart;
+                inputTensorData = batchedInputTensorFp32.data();
+                inputTensorElements = batchedInputTensorFp32.size();
+            }
+            preprocessTime += Clock::now() - preprocessStart;
 
-                const auto postprocessStart = Clock::now();
-                if (outputTensorData == nullptr || outputTensorElements != expectedTileOutputElements) {
-                    std::ostringstream os;
-                    os << "Output tensor pointer/size mismatch at frame " << frameIdx
-                       << " tile (" << tileCol << "," << tileRow << ")"
-                       << ": ptr=" << outputTensorData
-                       << " elems=" << outputTensorElements
-                       << " expected=" << expectedTileOutputElements;
-                    return abortProcessing(os.str());
+            const auto inferenceStart = Clock::now();
+            const void* outputTensorData = nullptr;
+            std::size_t outputTensorElements = 0;
+            TensorDtype outputTensorDtype = TensorDtype::Unknown;
+            {
+                std::lock_guard<std::mutex> lk(impl_->mtx);
+                if (!impl_->runInference(modelId, inputTensorData, inputTensorElements,
+                                         inputContract.dtype, outputTensorData,
+                                         outputTensorElements, outputTensorDtype, error)) {
+                    std::cerr << "[migraphx] Frame " << frameIdx
+                              << " tile batch starting at " << batchStart
+                              << " inference FAILED: " << error << std::endl;
+                    return abortProcessing(error);
                 }
+            }
+            inferenceTime += Clock::now() - inferenceStart;
 
+            const auto postprocessStart = Clock::now();
+            if (outputTensorData == nullptr || outputTensorElements != expectedBatchOutputElements) {
+                std::ostringstream os;
+                os << "Output tensor pointer/size mismatch at frame " << frameIdx
+                   << " batch starting at tile " << batchStart
+                   << ": ptr=" << outputTensorData
+                   << " elems=" << outputTensorElements
+                   << " expected=" << expectedBatchOutputElements;
+                return abortProcessing(os.str());
+            }
+
+            for (std::size_t slot = 0; slot < activeTiles; ++slot) {
+                const TileDispatch& dispatch = tileDispatches[batchStart + slot];
                 if (outputTensorDtype == TensorDtype::Fp16) {
-                    frame_io::nchwFp16ToRgb24(
-                        static_cast<const std::uint16_t*>(outputTensorData),
-                        modelOutC, modelOutW, modelOutH, tileRgbOut);
+                    const auto* tileOutput =
+                        static_cast<const std::uint16_t*>(outputTensorData)
+                        + slot * expectedTileOutputElements;
+                    blitNchwFp16TileRegionToRgb24(
+                        tileOutput, modelOutC, modelOutW, modelOutH,
+                        dispatch.srcXWindow.offset * scaleX,
+                        dispatch.srcYWindow.offset * scaleY,
+                        (dispatch.srcXWindow.end - dispatch.srcXWindow.begin) * scaleX,
+                        (dispatch.srcYWindow.end - dispatch.srcYWindow.begin) * scaleY,
+                        rgbOut, outW,
+                        dispatch.srcXWindow.begin * scaleX,
+                        dispatch.srcYWindow.begin * scaleY);
                 } else if (outputTensorDtype == TensorDtype::Fp32) {
-                    frame_io::nchwFp32ToRgb24(
-                        static_cast<const float*>(outputTensorData),
-                        modelOutC, modelOutW, modelOutH, tileRgbOut);
+                    const auto* tileOutput =
+                        static_cast<const float*>(outputTensorData)
+                        + slot * expectedTileOutputElements;
+                    blitNchwFp32TileRegionToRgb24(
+                        tileOutput, modelOutC, modelOutW, modelOutH,
+                        dispatch.srcXWindow.offset * scaleX,
+                        dispatch.srcYWindow.offset * scaleY,
+                        (dispatch.srcXWindow.end - dispatch.srcXWindow.begin) * scaleX,
+                        (dispatch.srcYWindow.end - dispatch.srcYWindow.begin) * scaleY,
+                        rgbOut, outW,
+                        dispatch.srcXWindow.begin * scaleX,
+                        dispatch.srcYWindow.begin * scaleY);
                 } else {
                     std::ostringstream os;
                     os << "Unsupported output tensor dtype at frame " << frameIdx
-                       << " tile (" << tileCol << "," << tileRow << "): "
+                       << " batch starting at tile " << batchStart << ": "
                        << toString(outputTensorDtype);
                     return abortProcessing(os.str());
                 }
-
-                const int dstX = srcXWindow.begin * scaleX;
-                const int dstY = srcYWindow.begin * scaleY;
-                const int srcOutX = srcXWindow.offset * scaleX;
-                const int srcOutY = srcYWindow.offset * scaleY;
-                const int copyOutW = (srcXWindow.end - srcXWindow.begin) * scaleX;
-                const int copyOutH = (srcYWindow.end - srcYWindow.begin) * scaleY;
-                blitRgbTileRegion(tileRgbOut, modelOutW,
-                                  srcOutX, srcOutY, copyOutW, copyOutH,
-                                  rgbOut, outW, dstX, dstY);
-                postprocessTime += Clock::now() - postprocessStart;
             }
+            postprocessTime += Clock::now() - postprocessStart;
         }
 
-        // Write processed frame to encode pipe
         if (rgbOut.size() != outFrameBytes) {
             std::cerr << "[migraphx] Frame " << frameIdx
                       << " output size mismatch: " << rgbOut.size()
@@ -1943,24 +2393,27 @@ StageResult MiGraphXBackend::processVideoFile(
             return abortProcessing(os.str());
         }
 
-        const auto writeStart = Clock::now();
-        const std::size_t written = std::fwrite(rgbOut.data(), 1, outFrameBytes, encodePipe);
-        writeTime += Clock::now() - writeStart;
-        if (written != outFrameBytes) {
-            std::cerr << "[migraphx] Frame " << frameIdx << " — encode pipe write failed."
-                      << std::endl;
+        // Emit live frame preview
+        const int completedFrameIdx = frameIdx;
+        const int nextFrameIdx = frameIdx + 1;
+        const int pvInterval = opts.previewFrameInterval > 0 ? opts.previewFrameInterval : 15;
+        if (opts.framePreviewCb && (nextFrameIdx % pvInterval == 1 || pvInterval == 1)) {
+            opts.framePreviewCb(rgbOut.data(), outW, outH);
+        }
+
+        if (!submitOutputBuffer(completedFrameIdx)) {
             return abortProcessing(
-                "Encode pipe write failed at frame " + std::to_string(frameIdx)
+                "Encode pipe write failed at frame " + std::to_string(completedFrameIdx)
                 + "; the intermediate FFmpeg encoder exited early.",
                 true);
         }
 
         ++frameIdx;
 
-        // Emit live frame preview
-        const int pvInterval = opts.previewFrameInterval > 0 ? opts.previewFrameInterval : 15;
-        if (opts.framePreviewCb && (frameIdx % pvInterval == 1 || pvInterval == 1)) {
-            opts.framePreviewCb(rgbOut.data(), outW, outH);
+        if (!acquireOutputBuffer()) {
+            return abortProcessing(
+                "Encode pipe write failed while waiting for a free output buffer.",
+                true);
         }
 
         // Report real progress based on actual frame count
@@ -1985,6 +2438,11 @@ StageResult MiGraphXBackend::processVideoFile(
     }
 
     pclose(decodePipe);
+    if (cancelled) {
+        shutdownEncodeWriter(true);
+    } else {
+        shutdownEncodeWriter(false);
+    }
     const int encodeRet = pclose(encodePipe);
 
     AVE_ROCTX_RANGE_END();
@@ -1997,6 +2455,16 @@ StageResult MiGraphXBackend::processVideoFile(
     if (frameIdx == 0) {
         cleanupEncodeLog();
         error = "No frames were decoded from " + inputVideo;
+        return StageResult::Error;
+    }
+
+    if (encodeWriterFailed) {
+        error = formatEncodeFailure(
+            encodeWriterError.empty()
+                ? "FFmpeg encode pipe exited after MiGraphX processing."
+                : encodeWriterError,
+            encodeRet);
+        cleanupEncodeLog();
         return StageResult::Error;
     }
 

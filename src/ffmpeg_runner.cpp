@@ -629,16 +629,21 @@ bool encodeWithAiProcessing(const VideoJob& job,
     auto makeTempVideo = [&]() -> std::string {
         return (tempGuard.path / ("temp_" + std::to_string(fileIndex++) + ".mkv")).string();
     };
+    auto makePreviewVideo = [&]() -> std::string {
+        return (tempGuard.path / ("preview_" + std::to_string(fileIndex++) + ".mp4")).string();
+    };
 
     // ── Preview: create a duration-limited clip if preview mode ──
     const bool isPreview = job.previewMode && job.previewDurationSec > 0.0;
     if (isPreview) {
-        std::string previewClip = makeTempVideo();
+        std::string previewClip = makePreviewVideo();
         std::ostringstream pvCmd;
         pvCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
               << "-i " << quoteArg(currentVideoPath) << ' '
               << "-t " << job.previewDurationSec << ' '
-              << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
+              << "-map 0:v:0 -map 0:a? "
+              << "-c:v libx264 -crf 0 -preset ultrafast "
+              << "-c:a aac -b:a 160k "
               << quoteArg(previewClip);
         if (!runFfmpegWithProgress(pvCmd.str(), "create-preview-clip",
                                    totalInputFrames, nullptr, error))
@@ -669,7 +674,7 @@ bool encodeWithAiProcessing(const VideoJob& job,
     bool finalOutputReady = false;
 
     auto canDirectEncodeFinalFromBackend = [&](std::size_t aiIdx) {
-        if (!backend || backend->type() != BackendType::MiGraphX) {
+        if (!backend || !backend->supportsDirectOutputEncode()) {
             return false;
         }
         if (aiIdx != lastAiIdx) {
@@ -733,9 +738,10 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
             // Build process options for preview support
             ProcessVideoOptions pvOpts;
-            if (isPreview) {
-                pvOpts.previewDurationSec = job.previewDurationSec;
-            }
+            // The pipeline already materialises a duration-limited preview clip
+            // before invoking backend processing, so backends should process
+            // that clip as-is instead of trimming it a second time.
+            pvOpts.previewDurationSec = 0.0;
             pvOpts.framePreviewCb     = job.framePreviewCb;
             pvOpts.previewFrameInterval = job.previewFrameInterval;
             pvOpts.cancelFlag         = job.cancelFlag;

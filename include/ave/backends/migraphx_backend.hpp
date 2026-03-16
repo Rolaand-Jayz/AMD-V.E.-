@@ -82,6 +82,7 @@ class MiGraphXBackend final : public IAcceleratorBackend {
     // Probes ROCm/MiGraphX availability on the system.
     // Safe to call before initialize().
     bool isAvailable(std::string& reason) const override;
+    bool supportsDirectOutputEncode() const override;
 
     // Initialises the HIP device, logs the version tuple
     // (ROCm/MiGraphX/Vulkan/FFmpeg/GPU/kernel) and all MIGRAPHX_*

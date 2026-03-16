@@ -14,10 +14,9 @@
 //    strides, color pipeline) and assert it at every boundary."
 //
 // NCHW vs NHWC note:
-//   MiGraphX has MIGRAPHX_ENABLE_NHWC env var which can silently
-//   change tensor interpretation.  Layout MUST be explicit in the
-//   contract and MUST be logged at compile time so layout-forcing env
-//   vars don't produce silent mismatches.
+//   Layout MUST be derived from the public tensor shape contract, not
+//   from MiGraphX tuning env vars. MiGraphX may optimize convolution
+//   internals without changing the public parameter/output layout.
 // ─────────────────────────────────────────────────────────────────
 
 #include <cstdint>
@@ -31,8 +30,7 @@ namespace ave {
 // ─────────────────────────────────────────────────────────────────
 
 // Tensor axis ordering.
-// MiGraphX defaults to NCHW; MIGRAPHX_ENABLE_NHWC triggers a layout
-// pass that may change this.  Always log which layout is active.
+// Always derive layout from the public tensor shape contract and log it.
 enum class TensorLayout {
     NCHW,     // Batch × Channels × Height × Width  (MiGraphX default)
     NHWC,     // Batch × Height × Width × Channels  (requires NHWC pass)
@@ -56,6 +54,11 @@ enum class TensorDtype {
 
 std::string toString(TensorLayout layout);
 std::string toString(TensorDtype  dtype);
+
+// Infer the most likely layout from public tensor dimensions.
+// For ambiguous 4D shapes, default to NCHW to preserve the existing
+// single-image inference contract used by the app.
+TensorLayout inferTensorLayout(const std::vector<std::int64_t>& dims);
 
 // ─────────────────────────────────────────────────────────────────
 // TensorShape

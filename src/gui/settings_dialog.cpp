@@ -25,6 +25,7 @@
 
 #include "ave/app_settings.hpp"
 #include "ave/backend_manager.hpp"
+#include "ave/runtime_paths.hpp"
 
 using namespace ave;
 
@@ -50,11 +51,7 @@ QString toolLine(const QString& name, const QString& path) {
 }
 
 QString modelsRootPath() {
-    const QString home = QDir::homePath();
-    if (home.isEmpty()) {
-        return "/tmp/ave_models";
-    }
-    return home + "/.local/share/ave/models";
+    return QString::fromStdString(defaultWritableModelsDir().string());
 }
 
 QWidget* wrapPageHeader(const QString& title,

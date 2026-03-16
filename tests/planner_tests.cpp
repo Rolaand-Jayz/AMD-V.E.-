@@ -3,6 +3,7 @@
 #include <iostream>
 #include <vector>
 
+#include "ave/model_catalog.hpp"
 #include "ave/planner.hpp"
 #include "ave/types.hpp"
 
@@ -75,11 +76,42 @@ void testStableWithinCategory() {
     check(ordered[2].kind == StageKind::Deblur, "deblur order changed");
 }
 
+void testCatalogIncludesRequestedUpscaleModels() {
+    bool sawOpenProteus = false;
+    bool sawNcnnGeneral = false;
+    int ncnnUpscalerCount = 0;
+
+    for (const auto& entry : ave::builtinModelCatalog()) {
+        if (entry.id == "openproteus-compact-x2" &&
+            entry.stage == StageKind::Upscale &&
+            entry.sourceFormat == ave::ModelFormat::Onnx) {
+            sawOpenProteus = true;
+        }
+        if (entry.id == "realesrgan-x4plus-ncnn" &&
+            entry.stage == StageKind::Upscale &&
+            entry.sourceFormat == ave::ModelFormat::NcnnBin) {
+            sawNcnnGeneral = true;
+        }
+        if (entry.stage == StageKind::Upscale &&
+            entry.sourceFormat == ave::ModelFormat::NcnnBin) {
+            ++ncnnUpscalerCount;
+            check(!entry.filenameAux.empty(), "NCNN catalog entries must define a .bin filename");
+            check(!entry.archiveSubPath.empty(), "NCNN catalog entries must define a zip archive param path");
+            check(!entry.archiveSubPathAux.empty(), "NCNN catalog entries must define a zip archive bin path");
+        }
+    }
+
+    check(sawOpenProteus, "OpenProteus upscale model missing from catalog");
+    check(sawNcnnGeneral, "Real-ESRGAN NCNN upscale model missing from catalog");
+    check(ncnnUpscalerCount >= 5, "expected multiple NCNN upscale models in catalog");
+}
+
 }  // namespace
 
 int main() {
     testInterpolationLast();
     testRestoreBeforeUpscaleAndSharpen();
     testStableWithinCategory();
+    testCatalogIncludesRequestedUpscaleModels();
     return 0;
 }

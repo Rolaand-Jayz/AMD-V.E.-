@@ -76,6 +76,7 @@ class IAcceleratorBackend {
     virtual std::string name() const = 0;
     virtual bool isAvailable(std::string& reason) const = 0;
     virtual bool initialize(std::string& error) = 0;
+    virtual bool supportsDirectOutputEncode() const { return false; }
 
     // Run a single enhancement stage.  Must return:
     //   Processed — frames were actually enhanced via AI inference.

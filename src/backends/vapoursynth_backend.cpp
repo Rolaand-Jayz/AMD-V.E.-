@@ -53,14 +53,42 @@ bool commandInPathVS(const std::string& cmd) {
     return false;
 }
 
-bool vapoursynthScriptPrereqsAvailable(std::string& reason) {
-    if (!commandInPathVS("vspipe")) {
-        reason = "vspipe not found in PATH. Install VapourSynth R55+.";
-        return false;
+std::string quoteArgVS(const std::string& value) {
+    std::string out = "\"";
+    for (const char ch : value) {
+        if (ch == '\\' || ch == '"') {
+            out.push_back('\\');
+        }
+        out.push_back(ch);
     }
+    out.push_back('"');
+    return out;
+}
 
+std::string quotePyString(const std::string& value) {
+    std::string out = "'";
+    for (const char ch : value) {
+        if (ch == '\\' || ch == '\'') {
+            out.push_back('\\');
+        }
+        out.push_back(ch);
+    }
+    out.push_back('\'');
+    return out;
+}
+
+struct VideoInfoVS {
+    int width = 0;
+    int height = 0;
+    double fps = 30.0;
+};
+
+bool runProbeScriptVS(const std::string& scriptName,
+                      const std::string& scriptBody,
+                      const std::string& successReason,
+                      std::string& reason) {
     const std::string probePath = "/tmp/ave_vs_probe_" +
-        std::to_string(static_cast<unsigned long long>(std::hash<std::string>{}("vspipe-imwri-probe"))) +
+        std::to_string(static_cast<unsigned long long>(std::hash<std::string>{}(scriptName))) +
         ".vpy";
     {
         std::ofstream probe(probePath);
@@ -68,26 +96,103 @@ bool vapoursynthScriptPrereqsAvailable(std::string& reason) {
             reason = "Failed to write temporary VapourSynth probe script.";
             return false;
         }
-        probe << "import vapoursynth as vs\n"
-              << "core = vs.core\n"
-              << "if not hasattr(core, 'imwri'):\n"
-              << "    raise RuntimeError('missing imwri plugin')\n"
-              << "clip = core.std.BlankClip(width=8, height=8, format=vs.RGB24, length=1)\n"
-              << "clip.set_output()\n";
+        probe << scriptBody;
     }
 
     const std::string probeCmd =
-        "vspipe --outputindex 0 \"" + probePath + "\" - > /dev/null 2>&1";
+        "vspipe --outputindex 0 " + quoteArgVS(probePath) + " - > /dev/null 2>&1";
     const int rc = std::system(probeCmd.c_str());
     std::error_code ec;
     std::filesystem::remove(probePath, ec);
     if (rc != 0) {
-        reason = "vspipe is present but required script plugins are missing "
-                 "(need VapourSynth std + imwri support).";
         return false;
     }
 
-    reason = "VapourSynth available via vspipe with generated-script support.";
+    reason = successReason;
+    return true;
+}
+
+bool vapoursynthDirectSourceAvailable(std::string& reason) {
+    const std::string script =
+        "import vapoursynth as vs\n"
+        "core = vs.core\n"
+        "if not (hasattr(core, 'ffms2') or hasattr(core, 'lsmas') or hasattr(core, 'bs')):\n"
+        "    raise RuntimeError('missing direct video source plugin')\n"
+        "clip = core.std.BlankClip(width=8, height=8, format=vs.YUV420P8, length=1)\n"
+        "clip.set_output()\n";
+    return runProbeScriptVS(
+        "vspipe-direct-source-probe",
+        script,
+        "VapourSynth available via vspipe with direct video source plugins.",
+        reason);
+}
+
+bool vapoursynthImageSequenceAvailable(std::string& reason) {
+    const std::string script =
+        "import vapoursynth as vs\n"
+        "core = vs.core\n"
+        "if not hasattr(core, 'imwri'):\n"
+        "    raise RuntimeError('missing imwri plugin')\n"
+        "clip = core.std.BlankClip(width=8, height=8, format=vs.RGB24, length=1)\n"
+        "clip.set_output()\n";
+    return runProbeScriptVS(
+        "vspipe-imwri-probe",
+        script,
+        "VapourSynth available via vspipe with image-sequence fallback support.",
+        reason);
+}
+
+bool vapoursynthScriptPrereqsAvailable(std::string& reason) {
+    if (!commandInPathVS("vspipe")) {
+        reason = "vspipe not found in PATH. Install VapourSynth R55+.";
+        return false;
+    }
+
+    std::string directReason;
+    if (vapoursynthDirectSourceAvailable(directReason)) {
+        reason = directReason;
+        return true;
+    }
+
+    std::string imageReason;
+    if (vapoursynthImageSequenceAvailable(imageReason)) {
+        reason = imageReason;
+        return true;
+    }
+
+    reason = "vspipe is present but required script plugins are missing "
+             "(need ffms2/lsmas/bestsource for direct video input or imwri for fallback).";
+    return false;
+}
+
+bool probeInputVideo(const std::string& inputVideo,
+                     VideoInfoVS& info,
+                     std::string& error) {
+    const std::string probeCmd =
+        "ffprobe -v error -select_streams v:0 "
+        "-show_entries stream=width,height,r_frame_rate "
+        "-of csv=p=0 " + quoteArgVS(inputVideo) + " 2>/dev/null";
+    FILE* pipe = popen(probeCmd.c_str(), "r");
+    if (pipe == nullptr) {
+        error = "Failed to launch ffprobe for " + inputVideo;
+        return false;
+    }
+
+    std::array<char, 256> buf{};
+    if (std::fgets(buf.data(), static_cast<int>(buf.size()), pipe) != nullptr) {
+        int fpsNum = 0;
+        int fpsDen = 1;
+        std::sscanf(buf.data(), "%d,%d,%d/%d", &info.width, &info.height, &fpsNum, &fpsDen);
+        if (fpsDen > 0) {
+            info.fps = static_cast<double>(fpsNum) / static_cast<double>(fpsDen);
+        }
+    }
+    pclose(pipe);
+
+    if (info.width <= 0 || info.height <= 0) {
+        error = "Failed to probe input video dimensions: " + inputVideo;
+        return false;
+    }
     return true;
 }
 
@@ -134,24 +239,10 @@ void appendCatalogVsFilters(std::ostringstream& script,
     }
 }
 
-// Generate a VapourSynth script for a given stage.
-std::string generateVpyScript(const EnhancementStage& stage,
-                               const std::string& inputDir,
-                               const std::string& outputDir,
-                               int width,
-                               int height,
-                               const std::vector<ActiveFilter>& catalogFilters) {
-    std::ostringstream script;
-    script << "import vapoursynth as vs\n"
-           << "from vapoursynth import core\n"
-           << "import os\n"
-           << "import glob\n\n";
-
-    // Load frames from the input directory as image sequence
-    script << "# Load input frames from directory\n"
-           << "clip = core.imwri.Read('"
-           << inputDir << "/*.png')\n\n";
-
+void appendStageScript(std::ostringstream& script,
+                       const EnhancementStage& stage,
+                       int width,
+                       int height) {
     switch (stage.kind) {
         case StageKind::Denoise:
             script << "# Denoise stage\n"
@@ -260,21 +351,109 @@ std::string generateVpyScript(const EnhancementStage& stage,
                    << "[1, 1, 1, 1, 1, 1, 1, 1, 1])\n";
             break;
     }
+}
+
+void appendEncodeArgs(std::ostringstream& cmd,
+                      const std::string& outputVideo,
+                      const std::string& audioInputVideo,
+                      const ProcessVideoOptions& opts) {
+    cmd << "-i " << quoteArgVS(audioInputVideo) << ' '
+        << "-map 0:v:0 -map 1:a? ";
+    if (opts.directOutputEncode) {
+        cmd << "-c:v " << opts.outputCodec << ' '
+            << "-crf " << opts.outputCrf << ' '
+            << "-preset " << opts.outputPreset << ' ';
+        if (!opts.outputProfile.empty()) {
+            cmd << "-profile:v " << opts.outputProfile << ' ';
+        }
+        if (opts.outputThreads > 0) {
+            cmd << "-threads " << opts.outputThreads << ' ';
+        }
+    } else {
+        cmd << "-c:v libx264 -crf 0 -preset ultrafast ";
+    }
+    cmd << "-c:a copy -shortest " << quoteArgVS(outputVideo);
+}
+
+// Generate a VapourSynth script for a given stage.
+std::string generateFrameSequenceVpyScript(const EnhancementStage& stage,
+                                           const std::string& inputDir,
+                                           const std::string& outputDir,
+                                           int width,
+                                           int height,
+                                           const std::vector<ActiveFilter>& catalogFilters) {
+    std::ostringstream script;
+    script << "import vapoursynth as vs\n"
+           << "from vapoursynth import core\n"
+           << "import os\n"
+           << "import glob\n\n";
+
+    script << "# Load input frames from directory\n"
+           << "clip = core.imwri.Read("
+           << quotePyString(inputDir + "/*.png") << ")\n\n";
+
+    appendStageScript(script, stage, width, height);
 
     appendCatalogVsFilters(script, stage.kind, catalogFilters);
 
-    // Write output frames
     script << "\n# Write output frames\n"
-           << "clip = core.imwri.Write(clip, 'PNG', '"
-           << outputDir << "/%08d.png')\n"
+           << "clip = core.imwri.Write(clip, 'PNG', "
+           << quotePyString(outputDir + "/%08d.png") << ")\n"
            << "clip.set_output()\n";
 
     return script.str();
 }
 
-// Shared implementation: processVideoFile using frame-directory intermediary.
-// Extracts frames from input video, processes via VPY script, re-encodes to output.
-StageResult processVideoFileImpl(
+std::string generateDirectVideoVpyScript(const EnhancementStage& stage,
+                                         const std::string& inputVideo,
+                                         int width,
+                                         int height,
+                                         int previewFrames,
+                                         const std::vector<ActiveFilter>& catalogFilters) {
+    std::ostringstream script;
+    script << "import vapoursynth as vs\n"
+           << "from vapoursynth import core\n\n"
+           << "def load_source(path):\n"
+           << "    if hasattr(core, 'ffms2'):\n"
+           << "        try:\n"
+           << "            return core.ffms2.Source(source=path)\n"
+           << "        except Exception:\n"
+           << "            pass\n"
+           << "    if hasattr(core, 'lsmas'):\n"
+           << "        try:\n"
+           << "            return core.lsmas.LWLibavSource(source=path)\n"
+           << "        except Exception:\n"
+           << "            pass\n"
+           << "    if hasattr(core, 'bs'):\n"
+           << "        try:\n"
+           << "            return core.bs.VideoSource(source=path)\n"
+           << "        except Exception:\n"
+           << "            pass\n"
+           << "    raise RuntimeError('No direct video source plugin available')\n\n"
+           << "clip = load_source(" << quotePyString(inputVideo) << ")\n"
+           << "try:\n"
+           << "    clip = core.resize.Bicubic(clip, format=vs.RGB24, matrix_in_s='709')\n"
+           << "except Exception:\n"
+           << "    clip = core.resize.Bicubic(clip, format=vs.RGB24)\n";
+
+    if (previewFrames > 0) {
+        script << "clip = core.std.Trim(clip, first=0, last=" << (previewFrames - 1) << ")\n";
+    }
+
+    script << '\n';
+    appendStageScript(script, stage, width, height);
+    appendCatalogVsFilters(script, stage.kind, catalogFilters);
+
+    script << "\n# Convert to a y4m-safe delivery format for the ffmpeg pipe\n"
+           << "try:\n"
+           << "    clip = core.resize.Bicubic(clip, format=vs.YUV420P8, matrix_s='709')\n"
+           << "except Exception:\n"
+           << "    clip = core.resize.Bicubic(clip, format=vs.YUV420P8)\n"
+           << "clip.set_output()\n";
+    return script.str();
+}
+
+StageResult processVideoFileViaFrameSequence(
         const EnhancementStage& stage,
         const std::string& inputVideo,
         const std::string& outputVideo,
@@ -282,36 +461,14 @@ StageResult processVideoFileImpl(
         const FrameProgressCb& progressCb,
         std::string& error,
         const ProcessVideoOptions& opts) {
-
-    // Probe input video for dimensions and frame rate.
-    int width = 0;
-    int height = 0;
-    double fps = 30.0;
-    {
-        const std::string probeCmd =
-            "ffprobe -v error -select_streams v:0 "
-            "-show_entries stream=width,height,r_frame_rate "
-            "-of csv=p=0 \"" + inputVideo + "\" 2>/dev/null";
-        FILE* pipe = popen(probeCmd.c_str(), "r");
-        if (pipe) {
-            std::array<char, 256> buf{};
-            if (std::fgets(buf.data(), static_cast<int>(buf.size()), pipe)) {
-                int fpsNum = 0;
-                int fpsDen = 1;
-                std::sscanf(buf.data(), "%d,%d,%d/%d", &width, &height, &fpsNum, &fpsDen);
-                if (fpsDen > 0) { fps = static_cast<double>(fpsNum) / static_cast<double>(fpsDen); }
-            }
-            pclose(pipe);
-        }
-        if (width <= 0 || height <= 0) {
-            error = "Failed to probe input video dimensions: " + inputVideo;
-            return StageResult::Error;
-        }
+    VideoInfoVS info;
+    if (!probeInputVideo(inputVideo, info, error)) {
+        return StageResult::Error;
     }
 
     // Create temp directories for frame I/O.
     const std::string tmpBase = "/tmp/ave_vs_" +
-        std::to_string(std::hash<std::string>{}(inputVideo + toString(stage.kind)));
+        std::to_string(std::hash<std::string>{}(inputVideo + toString(stage.kind) + outputVideo));
     const std::string tmpIn  = tmpBase + "_in";
     const std::string tmpOut = tmpBase + "_out";
     std::error_code ec;
@@ -339,8 +496,8 @@ StageResult processVideoFileImpl(
     if (progressCb) { progressCb(0.15F, "Running VapourSynth pipeline..."); }
 
     // Generate VPY script and write to temp file.
-    const std::string script = generateVpyScript(
-        stage, tmpIn, tmpOut, width, height, catalogFilters);
+    const std::string script = generateFrameSequenceVpyScript(
+        stage, tmpIn, tmpOut, info.width, info.height, catalogFilters);
     const std::string tmpScript = tmpBase + ".vpy";
     {
         std::ofstream ofs(tmpScript);
@@ -368,15 +525,12 @@ StageResult processVideoFileImpl(
 
     if (progressCb) { progressCb(0.8F, "Re-encoding output video..."); }
 
-    // Re-encode processed frames to output video, preserving audio.
     std::ostringstream encOss;
     encOss << "ffmpeg -hide_banner -loglevel error -y "
-           << "-framerate " << fps << " "
-           << "-i \"" << tmpOut << "/%08d.png\" "
-           << "-i \"" << inputVideo << "\" "
-           << "-map 0:v:0 -map 1:a? "
-           << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
-           << "\"" << outputVideo << "\" 2>&1";
+           << "-framerate " << info.fps << ' '
+           << "-i " << quoteArgVS(tmpOut + "/%08d.png") << ' ';
+    appendEncodeArgs(encOss, outputVideo, inputVideo, opts);
+    encOss << " 2>&1";
     rc = std::system(encOss.str().c_str());
 
     // Cleanup temp directories.
@@ -392,6 +546,92 @@ StageResult processVideoFileImpl(
     std::cout << "[vapoursynth] Done: " << toString(stage.kind)
               << " for " << inputVideo << std::endl;
     return StageResult::Processed;
+}
+
+StageResult processVideoFileViaStreaming(
+        const EnhancementStage& stage,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
+        const std::vector<ActiveFilter>& catalogFilters,
+        const FrameProgressCb& progressCb,
+        std::string& error,
+        const ProcessVideoOptions& opts) {
+    VideoInfoVS info;
+    if (!probeInputVideo(inputVideo, info, error)) {
+        return StageResult::Error;
+    }
+
+    int previewFrames = 0;
+    if (opts.previewDurationSec > 0.0) {
+        previewFrames = std::max(1, static_cast<int>(opts.previewDurationSec * info.fps + 0.5));
+    }
+
+    const std::string tmpBase = "/tmp/ave_vs_stream_" +
+        std::to_string(std::hash<std::string>{}(inputVideo + toString(stage.kind) + outputVideo));
+    const std::string tmpScript = tmpBase + ".vpy";
+    {
+        std::ofstream ofs(tmpScript);
+        if (!ofs.is_open()) {
+            error = "Failed to write temp VPY script: " + tmpScript;
+            return StageResult::Error;
+        }
+        ofs << generateDirectVideoVpyScript(
+            stage, inputVideo, info.width, info.height, previewFrames, catalogFilters);
+    }
+
+    if (progressCb) {
+        progressCb(0.05F, "Running VapourSynth streaming pipeline...");
+    }
+
+    std::ostringstream vspipeCmd;
+    vspipeCmd << "vspipe --outputindex 0 -c y4m " << quoteArgVS(tmpScript) << " -";
+
+    std::ostringstream ffmpegCmd;
+    ffmpegCmd << "ffmpeg -hide_banner -loglevel error -y "
+              << "-f yuv4mpegpipe -i pipe:0 ";
+    appendEncodeArgs(ffmpegCmd, outputVideo, inputVideo, opts);
+
+    const std::string pipeline = "set -o pipefail; " + vspipeCmd.str() + " | " + ffmpegCmd.str();
+    const std::string shellCmd = "bash -lc " + quoteArgVS(pipeline);
+    const int rc = std::system(shellCmd.c_str());
+
+    std::error_code ec;
+    std::filesystem::remove(tmpScript, ec);
+
+    if (rc != 0) {
+        error = "VapourSynth streaming pipeline failed (exit code " +
+                std::to_string(rc) + ") for " + toString(stage.kind);
+        return StageResult::Error;
+    }
+
+    if (progressCb) {
+        progressCb(1.0F, "VapourSynth processing complete.");
+    }
+    std::cout << "[vapoursynth] Done: " << toString(stage.kind)
+              << " for " << inputVideo << " via direct stream" << std::endl;
+    return StageResult::Processed;
+}
+
+// Shared implementation: prefer direct video streaming, fall back to
+// frame-directory processing only when source plugins are unavailable.
+StageResult processVideoFileImpl(
+        const EnhancementStage& stage,
+        const std::string& inputVideo,
+        const std::string& outputVideo,
+        const std::vector<ActiveFilter>& catalogFilters,
+        const FrameProgressCb& progressCb,
+        std::string& error,
+        const ProcessVideoOptions& opts) {
+    std::string directReason;
+    if (vapoursynthDirectSourceAvailable(directReason)) {
+        return processVideoFileViaStreaming(
+            stage, inputVideo, outputVideo, catalogFilters, progressCb, error, opts);
+    }
+
+    std::cout << "[vapoursynth] Direct source plugins unavailable; falling back to image sequence path."
+              << std::endl;
+    return processVideoFileViaFrameSequence(
+        stage, inputVideo, outputVideo, catalogFilters, progressCb, error, opts);
 }
 
 }  // namespace
@@ -418,6 +658,7 @@ VapourSynthBackend::~VapourSynthBackend() {
 
 BackendType VapourSynthBackend::type() const { return BackendType::VapourSynth; }
 std::string VapourSynthBackend::name() const { return "VapourSynth"; }
+bool VapourSynthBackend::supportsDirectOutputEncode() const { return true; }
 
 bool VapourSynthBackend::isAvailable(std::string& reason) const {
     return vapoursynthScriptPrereqsAvailable(reason);
@@ -472,6 +713,7 @@ VapourSynthBackend::~VapourSynthBackend() = default;
 
 BackendType VapourSynthBackend::type() const { return BackendType::VapourSynth; }
 std::string VapourSynthBackend::name() const { return "VapourSynth"; }
+bool VapourSynthBackend::supportsDirectOutputEncode() const { return true; }
 
 bool VapourSynthBackend::isAvailable(std::string& reason) const {
     return vapoursynthScriptPrereqsAvailable(reason);

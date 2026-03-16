@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+prefix="$(cd -- "${script_dir}/@AVE_PREFIX_REL_FROM_BINDIR@" && pwd)"
+
+resolve_path() {
+    local value="$1"
+    if [[ "${value}" = /* ]]; then
+        printf '%s\n' "${value}"
+    else
+        printf '%s\n' "${prefix}/${value}"
+    fi
+}
+
+app_bin="$(resolve_path "@AVE_INSTALL_APP_BINARY_PATH@")"
+bundled_migraphx="$(resolve_path "@AVE_INSTALL_MIGRAPHX_PATH@")"
+bundled_models="$(resolve_path "@AVE_INSTALL_MODELS_PATH@")"
+
+if [[ -d "${bundled_migraphx}" ]]; then
+    export AVE_BUNDLED_MIGRAPHX_PREFIX="${bundled_migraphx}"
+    export PATH="${bundled_migraphx}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${bundled_migraphx}/lib:${bundled_migraphx}/lib/migraphx/lib:/opt/rocm/lib:/opt/rocm/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+if [[ -d "${bundled_models}" ]]; then
+    export AVE_BUNDLED_MODELS_DIR="${bundled_models}"
+fi
+
+export AVE_APP_INSTALL_PREFIX="${prefix}"
+
+exec "${app_bin}" "$@"
