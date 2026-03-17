@@ -9,8 +9,10 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 extern "C" {
 #include <libswscale/swscale.h>
@@ -19,8 +21,86 @@ extern "C" {
 namespace ave {
 namespace frame_io {
 
-// ─── Helper: quote a shell argument ──────────────────────────────
+// ─── SwsContext cache to avoid per-frame allocation ───────────────────────
 namespace {
+
+struct SwsKey {
+    int srcW;
+    int srcH;
+    int srcFmt;
+    int dstW;
+    int dstH;
+    int dstFmt;
+
+    bool operator==(const SwsKey& other) const noexcept {
+        return srcW == other.srcW && srcH == other.srcH && srcFmt == other.srcFmt &&
+               dstW == other.dstW && dstH == other.dstH && dstFmt == other.dstFmt;
+    }
+};
+
+struct SwsKeyHash {
+    std::size_t operator()(const SwsKey& k) const noexcept {
+        std::size_t h = static_cast<std::size_t>(k.srcW);
+        h = h * 31 + static_cast<std::size_t>(k.srcH);
+        h = h * 31 + static_cast<std::size_t>(k.srcFmt);
+        h = h * 31 + static_cast<std::size_t>(k.dstW);
+        h = h * 31 + static_cast<std::size_t>(k.dstH);
+        h = h * 31 + static_cast<std::size_t>(k.dstFmt);
+        return h;
+    }
+};
+
+using SwsCache = std::unordered_map<SwsKey, SwsContext*, SwsKeyHash>;
+
+SwsCache& getSwsCache() {
+    static SwsCache cache;
+    return cache;
+}
+
+std::mutex& getSwsCacheMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+SwsContext* getOrCreateSwsContext(const SwsKey& key) {
+    std::lock_guard<std::mutex> lock(getSwsCacheMutex());
+    SwsCache& cache = getSwsCache();
+
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        return it->second;
+    }
+
+    SwsContext* sws = sws_getContext(
+        key.srcW, key.srcH, static_cast<AVPixelFormat>(key.srcFmt),
+        key.dstW, key.dstH, static_cast<AVPixelFormat>(key.dstFmt),
+        SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    if (sws) {
+        cache[key] = sws;
+    }
+    return sws;
+}
+
+void clearSwsCache() {
+    std::lock_guard<std::mutex> lock(getSwsCacheMutex());
+    SwsCache& cache = getSwsCache();
+    for (auto& pair : cache) {
+        sws_freeContext(pair.second);
+    }
+    cache.clear();
+}
+
+struct SwsCacheCleaner {
+    ~SwsCacheCleaner() { clearSwsCache(); }
+};
+
+SwsCacheCleaner& getSwsCacheCleaner() {
+    static SwsCacheCleaner cleaner;
+    return cleaner;
+}
+
+// ─── Helper: quote a shell argument ──────────────────────────────
 
 std::string quoteArg(const std::string& value) {
     std::string out = "\"";
@@ -413,10 +493,11 @@ bool avFrameToRgb24(const AVFrame* frame,
         srcFmt = AV_PIX_FMT_YUV420P;  // Vulkan frames are typically YUV420P
     }
 
-    SwsContext* sws = sws_getContext(
-        frame->width, frame->height, srcFmt,
-        width, height, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
+    (void)getSwsCacheCleaner();
+
+    SwsKey key{frame->width, frame->height, static_cast<int>(srcFmt),
+               width, height, static_cast<int>(AV_PIX_FMT_RGB24)};
+    SwsContext* sws = getOrCreateSwsContext(key);
 
     if (!sws) {
         error = "avFrameToRgb24: sws_getContext failed";
@@ -434,7 +515,6 @@ bool avFrameToRgb24(const AVFrame* frame,
     };
 
     sws_scale(sws, src, srcLinesize, 0, frame->height, dst, dstLinesize);
-    sws_freeContext(sws);
 
     return true;
 }
@@ -461,10 +541,11 @@ AVFrame* rgb24ToAvFrame(const std::uint8_t* rgb,
         return nullptr;
     }
 
-    SwsContext* sws = sws_getContext(
-        width, height, AV_PIX_FMT_RGB24,
-        width, height, AV_PIX_FMT_YUV420P,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
+    (void)getSwsCacheCleaner();
+
+    SwsKey key{width, height, static_cast<int>(AV_PIX_FMT_RGB24),
+               width, height, static_cast<int>(AV_PIX_FMT_YUV420P)};
+    SwsContext* sws = getOrCreateSwsContext(key);
 
     if (!sws) {
         error = "rgb24ToAvFrame: sws_getContext failed";
@@ -483,7 +564,6 @@ AVFrame* rgb24ToAvFrame(const std::uint8_t* rgb,
     };
 
     sws_scale(sws, src, srcLinesize, 0, height, dst, dstLinesize);
-    sws_freeContext(sws);
 
     frame->pts = 0;
     return frame;

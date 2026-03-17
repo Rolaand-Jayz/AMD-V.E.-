@@ -1,5 +1,8 @@
 /build/
 /build_test/
+/build-install-smoke/
+/build-main-merge/
+/build-migraphx-patched/
 /.cache/
 .DS_Store
 /audit_chart.md
