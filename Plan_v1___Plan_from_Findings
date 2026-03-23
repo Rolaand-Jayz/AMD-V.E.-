@@ -1,0 +1,91 @@
+I have created the following plan after thorough exploration and analysis of the codebase. Follow the below plan verbatim. Trust the files and references. Do not re-verify what's written in the plan. Explore only when absolutely necessary. First implement all the proposed file changes and then I'll review all the changes together at the end.
+
+**Observed**
+`VideoProcessor::process()` routes work into `FfmpegRunner::encodeWithAiProcessing()`, which currently prebuilds preview clips and materializes intermediate videos around AI stages in `file:src/ffmpeg_runner.cpp`. The GPU backends still rely on raw `ffmpeg` pipes despite existing Vulkan frame I/O helpers in `file:include/ave/frame_io.hpp` and `file:src/frame_io_vulkan.cpp`. `MiGraphXBackend` still stages host tensors and serializes evals in `file:src/backends/migraphx_backend.cpp`, while `ModelManager::autoCompileForInference()` in `file:src/model_manager.cpp` reuses `.mxr` artifacts largely by file presence, not by validated MiOpen/MiGraphX runtime identity.
+
+**Approach**
+You should treat this as one throughput-focused refactor with three ordered goals: first remove avoidable orchestration overhead, then make backend frame resources persistent, then harden MiGraphX artifact/runtime identity so cached performance artifacts remain valid. This keeps the change aligned with the findings, reduces redundant work before touching lower-level inference paths, and uses the codebase’s existing abstractions (`FfmpegRunner`, `frame_io`, `ModelManager`, `MiGraphXBackend`, `obs`) instead of introducing parallel execution paths.
+
+```mermaid
+sequenceDiagram
+    participant VP as VideoProcessor
+    participant BM as BackendManager
+    participant FR as FfmpegRunner
+    participant FIO as frame_io
+    participant BE as GPU Backend
+    participant MM as ModelManager/obs
+
+    VP->>BM: select requested/auto backend
+    VP->>FR: start ordered pipeline
+    FR->>FIO: open resident frame source/sink
+    FR->>BE: process contiguous AI work
+    BE->>MM: resolve validated artifact + runtime env
+    BE->>BE: warmup + persistent buffers
+    BE-->>FR: processed frames
+    FR-->>VP: single final delivery path
+```
+
+## Implementation instructions
+
+| Area | Primary files | What you should change |
+|---|---|---|
+| Pipeline orchestration | `file:src/ffmpeg_runner.cpp`, `file:src/video_processor.cpp`, `file:include/ave/backend.hpp` | Remove redundant transcodes and keep preview/AI processing in the main flow rather than materializing extra videos. |
+| Backend selection | `file:src/backend_manager.cpp`, `file:include/ave/backend_manager.hpp` | Stop probing unrelated backends for explicit requests. |
+| Vulkan/NCNN residency | `file:src/backends/vulkan_compute_backend.cpp`, `file:src/backends/ncnn_vulkan_backend.cpp`, `file:include/ave/frame_io.hpp`, `file:src/frame_io_vulkan.cpp` | Reuse persistent per-job resources and move off raw pipe-oriented hot paths where the codebase already has frame helpers. |
+| MiGraphX throughput | `file:include/ave/backends/migraphx_backend.hpp`, `file:src/backends/migraphx_backend.cpp`, `file:include/ave/interop_bridge.hpp` | Reduce host staging, shrink synchronization scope, and add warmup before first real frame. |
+| Artifact identity / observability | `file:include/ave/observability.hpp`, `file:src/observability.cpp`, `file:src/model_manager.cpp` | Make MiOpen/MiGraphX tuning state part of artifact reuse and log the effective runtime state. |
+
+### 1. Remove avoidable orchestration overhead first
+1. In `file:src/ffmpeg_runner.cpp`, rework `encodeWithAiProcessing()` so preview mode no longer creates a separate preview clip via the `create-preview-clip` command path; keep the duration limit in the active processing path instead of doing a full pre-transcode.
+2. Keep the existing ordered-stage behavior from `file:src/planner.cpp`, but change `encodeWithAiProcessing()` so consecutive AI-capable stages do not force a `libx264 -crf 0 -preset ultrafast` round-trip between each stage.
+3. Preserve `supportsDirectOutputEncode()` and the final direct-encode fast path, but make it the end of a resident processing flow rather than an optimization layered on top of multiple temp videos.
+4. In `file:src/video_processor.cpp`, keep `resolveModelPath()` and the stage planning flow intact, but make the encode handoff assume one continuous processing session for AI-capable work instead of repeated file materialization boundaries.
+5. Use the existing `ProcessVideoOptions` contract in `file:include/ave/backend.hpp` as the single place for preview duration and direct-output behavior; avoid duplicating preview trimming in both orchestrator and backend.
+
+### 2. Tighten backend selection so startup cost matches the request
+1. In `file:src/backend_manager.cpp`, change `BackendManager::createBackend()` so explicit requests only run availability checks for the requested backend.
+2. Keep the full probe order only for `BackendType::Auto`.
+3. Leave `probeBackends()` unchanged for UI/CLI listing, but separate it conceptually from the runtime selection path so job startup no longer pays for unrelated discovery.
+
+### 3. Move Vulkan and NCNN processing to persistent per-job resources
+1. In `file:src/backends/vulkan_compute_backend.cpp`, move the frame-loop hot path away from per-frame temporary tensor conversion and per-frame recreation of GPU-side state. Reuse backend-owned buffers, descriptor state, command submission state, and output buffers across the whole job.
+2. Replace the current raw RGB pipe decode/encode path in the Vulkan backend with the existing `frame_io::VulkanVideoReader` / `frame_io::VulkanVideoWriter` path from `file:include/ave/frame_io.hpp` and `file:src/frame_io_vulkan.cpp` wherever the backend can stay in the frame-based flow.
+3. In the same Vulkan backend, keep format conversion out of the innermost loop as much as possible; the immediate target is to stop allocating and converting fresh CPU float buffers every frame.
+4. In `file:src/backends/ncnn_vulkan_backend.cpp`, remove the dependence on `popen()`-driven rawvideo pipes for the main hot path and align it with the shared frame-based ingress/egress model.
+5. Still in NCNN, make per-job inference objects and temporary tensors reusable across frames instead of recreating them inside the loop. Keep only truly frame-varying state inside the per-frame section.
+6. Use `file:include/ave/frame_io.hpp` as the shared boundary for backend video ingress/egress so the pipeline does not drift into three different video transport strategies.
+
+### 4. Refactor MiGraphX runtime flow around persistent staging and smaller sync boundaries
+1. In `file:src/backends/migraphx_backend.cpp`, treat `MiGraphXBackend::Impl::loadProgram()` as load-only work. Remove the per-load `ModelManager` construction pattern and feed artifact resolution through a reused manager/runtime-owned path.
+2. Keep the existing tensor-contract enforcement, but move the repeated tile pack/blit allocation churn out of the innermost batch loop. The reusable staging buffers should live for the duration of the job and be sized from the compiled batch/tensor contract once.
+3. Rework the `runInference()` call path so the mutex in the frame loop protects only shared mutable backend state that truly requires serialization. Do not keep the current “lock entire eval path for every tile batch” behavior.
+4. Replace the unconditional per-batch `experimental_get_context().finish()` behavior with the narrowest synchronization point that still preserves correctness for output visibility. The goal is to allow overlap between staging, eval, and encode instead of forcing a full device flush for every batch.
+5. Keep the existing `packRgbTileClampToNchwFp32`, `packRgbTileClampToNchwFp16`, `blitNchwFp32TileRegionToRgb24`, and `blitNchwFp16TileRegionToRgb24` functions as the current semantic reference, but reorganize their use around persistent buffers and a future interop-ready path.
+6. Use the existing `InteropBridge` hook surface in `file:include/ave/interop_bridge.hpp` to shape the refactor so resident device buffers remain compatible with a later zero-copy bridge, rather than baking more host-only assumptions into the new flow.
+7. Add an explicit warmup step after successful program load and before the first user frame in `processVideoFile()`. The warmup must run under the same effective runtime environment and tensor contracts as the real inference path.
+8. Revisit `chooseAdaptiveTileBatch()` and the `autoCompileForInference()` fallback ladder together: the batch decision should prefer validated compiled-artifact availability and real tensor shapes over the current tile-area-only heuristic.
+
+### 5. Make artifact reuse depend on full MiGraphX/MiOpen identity
+1. Expand `obs::ArtifactManifestFields` in `file:include/ave/observability.hpp` and `file:src/observability.cpp` to include the MiOpen-affecting state already assembled in `buildMiGraphXDriverEnv()` inside `file:src/model_manager.cpp`.
+2. At minimum, include the resolved compile profile label, `MIOPEN_USER_DB_PATH`, `MIOPEN_CUSTOM_CACHE_DIR`, `MIOPEN_FIND_MODE`, `MIOPEN_COMPILE_PARALLEL_LEVEL`, and the effective visible-device binding alongside the existing MiGraphX fields.
+3. In `file:src/model_manager.cpp`, replace “file exists, so reuse it” behavior in `autoCompileForInference()` with manifest-backed validation before returning an existing `.mxr`.
+4. Apply the same manifest validation to fp16→fp32 fallback reuse and smaller-tile fallback reuse so every reused artifact is identity-checked, not just presence-checked.
+5. Make stale-manifest mismatch a recompile trigger, not a silent reuse path.
+6. Ensure the runtime load/eval path in `file:src/backends/migraphx_backend.cpp` reapplies the same effective environment family used at compile time, so lazy MiOpen initialization cannot happen under a different ambient configuration.
+
+### 6. Isolate cache locations by effective tuning context
+1. In `file:src/model_manager.cpp`, stop defaulting all users and GPUs into the same effective MiOpen cache/problem-cache locations when the runtime identity differs.
+2. Derive the actual cache subpaths from the same fingerprint you place into the artifact manifest so different ROCm versions, GPU targets, or tuning profiles do not contaminate each other’s cache state.
+3. Keep the existing environment override mechanism (`ScopedEnvOverrides`) as the control point, but make the derived paths deterministic from the effective compile/runtime profile.
+
+### 7. Improve observability so performance regressions are diagnosable
+1. Extend `obs::logMiGraphXEnvironment()` in `file:src/observability.cpp` so it logs MiOpen-related effective settings, not only `MIGRAPHX_*`.
+2. Log the selected compile profile, effective cache paths, visible-device selection, chosen artifact path, and whether warmup ran successfully.
+3. Emit the same effective env snapshot at runtime load/warmup as well as compile time so compile/run mismatches are visible in logs.
+4. Keep `obs::logVersionTuple()` and tensor-contract logging intact, but make the new artifact/runtime identity fields appear in the same startup trail for one-stop diagnosis.
+
+### 8. Preserve contract boundaries while you refactor
+1. Keep `PipelinePlanner` ordering unchanged in `file:src/planner.cpp`.
+2. Keep `IAcceleratorBackend::processVideoFile()` as the orchestration seam in `file:include/ave/backend.hpp`; route the refactor through existing backend contracts instead of inventing a parallel pipeline API.
+3. Keep `VideoProcessor::resolveModelPath()` semantics intact: MiGraphX still consumes compiled `.mxr`, while non-MiGraphX backends still receive source-model paths.
+4. Do not widen the scope beyond the throughput findings in `file:docs/AGENT_FINDINGS.md`; the work should stay focused on orchestration, persistent resources, artifact identity, and observability.

@@ -55,7 +55,7 @@ using FramePreviewCb = std::function<void(const std::uint8_t* rgb, int width, in
 
 // Options passed to processVideoFile for preview and control functionality.
 struct ProcessVideoOptions {
-    double previewDurationSec = 0.0;     ///< 0 = process entire video
+    double previewDurationSec = 0.0;     ///< Active preview trim budget for this processing session (0 = full video)
     FramePreviewCb framePreviewCb;       ///< Optional live frame preview callback
     int previewFrameInterval = 15;       ///< Emit preview every N frames (reduces overhead)
     std::atomic<bool>* cancelFlag = nullptr;  ///< Non-null → check each frame; true = stop

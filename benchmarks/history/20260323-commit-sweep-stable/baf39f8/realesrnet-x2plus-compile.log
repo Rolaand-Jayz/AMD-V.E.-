@@ -1,0 +1,41 @@
+[plan] Pipeline planned (1 stage): upscale
+[backend-manager] interop-bridge: GPU interop available
+[backend] Selected MiGraphX (ROCm).
+[version] rocm=7.2.0
+[version] migraphx=2.15.0
+[version] vulkan_info=	apiVersion         = 1.4.335
+[version] ffmpeg=ffmpeg version n8.1 Copyright (c) 2000-2026 the FFmpeg developers
+[version] gpu_gfx_target=gfx1100
+[version] kernel=6.19.9-1-cachyos
+[migraphx-env] (no MIGRAPHX_* env vars set – using defaults)
+[backend] MiGraphX initialised on device 0 — compile options: offload_copy=1 precision=fp16
+[backend] ready: MiGraphX (ROCm)
+[progress] Starting enhancement pipeline…
+[model] upscale — model 'realesrnet-x2plus' is available on disk but not yet compiled to .mxr; MiGraphX will resolve/compile the inference artifact.
+[progress] Backend pass 1/1: upscale via MiGraphX (ROCm)
+[pipeline] upscale → deferred to FFmpeg filter chain
+[progress] upscale — complete
+[pipeline] stage summary: 0 AI-processed, 1 deferred to FFmpeg filters
+[progress] Starting FFmpeg encode pipeline…
+[cmd] create-preview-clip: ffmpeg -y -hide_banner -loglevel error -progress - -i "/home/rolaandjayz/Desktop/C++ Video Enhancer/benchmarks/ave_benchmark_960x540_20s.mp4" -t 0.5 -c:v libx264 -crf 0 -preset ultrafast -c:a copy "/tmp/ave-history-bench-20260323-140842-stable/baf39f8/ave_ai_job_25735012969126/temp_0.mkv"
+[migraphx] Input: 960x540 fps=30 frames=15
+[auto-compile] Compiling 'realesrnet-x2plus' at 192x192...
+[auto-compile] 2%: Inspecting ONNX input tensors…
+[auto-compile] 5%: Launching migraphx-driver (fast compile profile)…
+[auto-compile] migraphx-driver compiling… 0m 2s elapsed — Quantizing to fp16 ... 
+[auto-compile] migraphx-driver compiling… 0m 4s elapsed — Compiling ... 
+[auto-compile] migraphx-driver compiling… 0m 6s elapsed — Compiling ... 
+[auto-compile] 100%: Compilation complete.
+[auto-compile] Successfully compiled to: "/home/rolaandjayz/.local/share/ave/models/migraphx/realesrnet-x2plus_192x192_fp16.mxr"
+[migraphx] using frame-size specific .mxr for 'realesrnet-x2plus': /home/rolaandjayz/.local/share/ave/models/migraphx/realesrnet-x2plus_192x192_fp16.mxr (192x192)
+[migraphx] loaded model='realesrnet-x2plus' source='/home/rolaandjayz/.local/share/ave/models/migraphx/realesrnet-x2plus_192x192_fp16.mxr' format=mxr
+  in:  input [1×3×192×192 NCHW fp32]
+  out: output_0 [1×3×384×384 NCHW fp32]
+  compile_opts: offload_copy=1 precision=fp16
+[migraphx] processVideoFile: model='realesrnet-x2plus' input=960x540 output=1920x1080 tile=192x192 overlap=16 scale=2x2 tiles/frame=24 stage=upscale direct_final_encode=on
+[migraphx] AI inference complete: 15 frames processed via MiGraphX for stage upscale
+[migraphx] timing: total=0.868441s fps=17.2723 avg_ms/frame read=3.66045 preprocess=1.83598 infer=32.2448 postprocess=9.40046 write=2.70269 direct_final_encode=on
+[ai-pipeline] upscale → AI complete via MiGraphX (ROCm) (direct final encode)
+[ai-pipeline] Final delivery encode completed inside MiGraphX (ROCm); skipping redundant FFmpeg re-encode.
+done.
+WALL 9.388

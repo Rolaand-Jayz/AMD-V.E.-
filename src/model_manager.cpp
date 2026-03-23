@@ -31,11 +31,16 @@
 #endif
 
 #include "ave/frame_io.hpp"
+#include "ave/observability.hpp"
 #include "ave/runtime_paths.hpp"
 #include "ave/tensor_contract.hpp"
 
 #ifdef AVE_HAVE_MIGRAPHX
 #  include <migraphx/migraphx.hpp>
+#endif
+
+#ifdef AVE_HAVE_HIP
+#  include <hip/hip_runtime.h>
 #endif
 
 namespace ave {
@@ -50,7 +55,9 @@ namespace {
 // waits for the actual input frame size before producing inference artifacts.
 constexpr int kDefaultBaselineCompileWidth = 192;
 constexpr int kDefaultBaselineCompileHeight = 192;
-constexpr int kDefaultMiopenCompileParallelCap = 8;
+// MiOpen kernel JIT is CPU-bound and dominates first-compile time.
+// Use up to 16 parallel threads instead of the old conservative cap of 8.
+constexpr int kDefaultMiopenCompileParallelCap = 16;
 constexpr int kMinimumMiGraphXTileFallbackExtent = 64;
 constexpr std::array<int, 4> kMiGraphXTileFallbackExtents = {192, 128, 96, 64};
 
@@ -64,6 +71,18 @@ struct MiGraphXDriverEnv {
     std::vector<std::pair<std::string, std::string>> effective;
     std::vector<std::pair<std::string, std::string>> overrides;
     MiGraphXCompileProfile profile = MiGraphXCompileProfile::Fast;
+    std::string profileLabel;
+    std::string problemCachePath;
+    std::string miopenUserDbPath;
+    std::string miopenCustomCacheDir;
+    std::string miopenFindMode;
+    std::string miopenCompileParallelLevel;
+    std::string visibleDevices;
+    std::string runtimeFingerprint;
+    // Cached system identity values — reused in buildArtifactManifestFields()
+    // to avoid redundant subprocess launches and file reads.
+    std::string rocmVersion;
+    std::string gfxTarget;
 };
 
 std::mutex& processEnvMutex() {
@@ -325,6 +344,107 @@ std::optional<std::string> readNonEmptyEnv(const char* name) {
     return std::nullopt;
 }
 
+std::string readFirstNonEmptyLine(const std::filesystem::path& path,
+                                 const std::string& fallback = "unknown") {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return fallback;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty()) {
+            return line;
+        }
+    }
+    return fallback;
+}
+
+// Cached once per process — GFX target never changes while the app is running.
+// Avoids spawning a rocminfo subprocess on every compilation/validation call.
+std::string detectGfxTargetForIdentity() {
+    static const std::string cached = []() -> std::string {
+#ifdef AVE_HAVE_HIP
+        int currentDevice = 0;
+        hipDeviceProp_t props{};
+        if (hipGetDevice(&currentDevice) == hipSuccess &&
+            hipGetDeviceProperties(&props, currentDevice) == hipSuccess &&
+            props.gcnArchName[0] != '\0') {
+            return std::string(props.gcnArchName);
+        }
+#endif
+        FILE* pipe = popen("rocminfo 2>/dev/null | grep -m1 'gfx[0-9]' | tr -s ' ' | cut -d' ' -f2", "r");
+        if (pipe == nullptr) {
+            return std::string("unknown");
+        }
+        std::array<char, 64> buffer{};
+        std::string result;
+        if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+            result = trimLine(buffer.data());
+        }
+        pclose(pipe);
+        return result.empty() ? std::string("unknown") : result;
+    }();
+    return cached;
+}
+
+// Cached once per process — ROCm version does not change at runtime.
+std::string detectRocmVersion() {
+    static const std::string cached = readFirstNonEmptyLine("/opt/rocm/.info/version");
+    return cached;
+}
+
+std::string effectiveVisibleDeviceBinding() {
+    if (const auto overrideDevices = readNonEmptyEnv("AVE_MIGRAPHX_VISIBLE_DEVICES");
+        overrideDevices.has_value()) {
+        return *overrideDevices;
+    }
+    if (const auto rocrVisible = readNonEmptyEnv("ROCR_VISIBLE_DEVICES"); rocrVisible.has_value()) {
+        return *rocrVisible;
+    }
+    if (const auto hipVisible = readNonEmptyEnv("HIP_VISIBLE_DEVICES"); hipVisible.has_value()) {
+        return *hipVisible;
+    }
+    return "all";
+}
+
+std::uint64_t fnv1a64(const std::string& input) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const char rawCh : input) {
+        const auto ch = static_cast<unsigned char>(rawCh);
+        hash ^= static_cast<std::uint64_t>(ch);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::string hexFingerprint(std::uint64_t value) {
+    std::ostringstream out;
+    out << std::hex << value;
+    return out.str();
+}
+
+std::string buildMiGraphXRuntimeFingerprint(const std::string& profileLabel,
+                                            const std::string& rocmVersion,
+                                            const std::string& gfxTarget,
+                                            const std::string& visibleDevices,
+                                            const std::string& disableMlir,
+                                            const std::string& enableNhwc,
+                                            const std::string& enableCk,
+                                            const std::string& miopenFindMode,
+                                            const std::string& miopenCompileParallelLevel) {
+    std::ostringstream seed;
+    seed << "profile=" << profileLabel
+         << "|rocm=" << rocmVersion
+         << "|gfx=" << gfxTarget
+         << "|visible=" << visibleDevices
+         << "|disable_mlir=" << disableMlir
+         << "|enable_nhwc=" << enableNhwc
+         << "|enable_ck=" << enableCk
+         << "|miopen_find_mode=" << miopenFindMode
+         << "|miopen_parallel=" << miopenCompileParallelLevel;
+    return hexFingerprint(fnv1a64(seed.str()));
+}
+
 std::string defaultAveCacheDir() {
     const char* home = std::getenv("HOME");
     if (home != nullptr) {
@@ -333,24 +453,16 @@ std::string defaultAveCacheDir() {
     return "/tmp/ave_cache";
 }
 
-std::filesystem::path defaultMiGraphXProblemCachePath() {
-    return std::filesystem::path(defaultAveCacheDir()) / "migraphx" / "problem_cache.json";
+std::filesystem::path defaultMiGraphXProblemCachePath(const std::string& fingerprint) {
+    return std::filesystem::path(defaultAveCacheDir()) / "migraphx" / "contexts" / fingerprint / "problem_cache.json";
 }
 
-std::filesystem::path defaultMiopenUserDbPath() {
-    const char* home = std::getenv("HOME");
-    if (home != nullptr) {
-        return std::filesystem::path(home) / ".config" / "miopen";
-    }
-    return std::filesystem::path("/tmp/miopen_user_db");
+std::filesystem::path defaultMiopenUserDbPath(const std::string& fingerprint) {
+    return std::filesystem::path(defaultAveCacheDir()) / "migraphx" / "contexts" / fingerprint / "miopen_user_db";
 }
 
-std::filesystem::path defaultMiopenCacheDir() {
-    const char* home = std::getenv("HOME");
-    if (home != nullptr) {
-        return std::filesystem::path(home) / ".cache" / "miopen";
-    }
-    return std::filesystem::path("/tmp/miopen_cache");
+std::filesystem::path defaultMiopenCacheDir(const std::string& fingerprint) {
+    return std::filesystem::path(defaultAveCacheDir()) / "migraphx" / "contexts" / fingerprint / "miopen_cache";
 }
 
 int defaultMiopenCompileParallelLevel() {
@@ -358,8 +470,9 @@ int defaultMiopenCompileParallelLevel() {
     if (hwThreads == 0u) {
         hwThreads = 4u;
     }
-    const unsigned int halfThreads = std::max(1u, hwThreads / 2u);
-    return static_cast<int>(std::min(halfThreads,
+    // Use full available thread count — MiOpen JIT compilation is CPU-bound and
+    // dominates the one-time compile phase; halving was unnecessarily conservative.
+    return static_cast<int>(std::min(hwThreads,
                                      static_cast<unsigned int>(kDefaultMiopenCompileParallelCap)));
 }
 
@@ -412,22 +525,50 @@ void appendEffectiveEnv(MiGraphXDriverEnv& env,
 MiGraphXDriverEnv buildMiGraphXDriverEnv() {
     MiGraphXDriverEnv env;
     env.profile = defaultMiGraphXCompileProfile();
+    env.profileLabel = miGraphXCompileProfileLabel(env.profile);
+
+    // Use process-wide cached values — avoids repeated file reads and
+    // rocminfo subprocess launches on every compile/validate call.
+    env.rocmVersion = detectRocmVersion();
+    env.gfxTarget = detectGfxTargetForIdentity();
+    const std::string rocmVersion = env.rocmVersion;
+    const std::string gfxTarget = env.gfxTarget;
+    const std::string disableMlir = readNonEmptyEnv("MIGRAPHX_DISABLE_MLIR").value_or("0");
+    const std::string enableNhwc = readNonEmptyEnv("MIGRAPHX_ENABLE_NHWC").value_or("0");
+    const std::string enableCk = readNonEmptyEnv("MIGRAPHX_ENABLE_CK").value_or("0");
+    env.visibleDevices = effectiveVisibleDeviceBinding();
+
+    const std::string defaultFindMode = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_FIND_MODE")
+        .value_or(readNonEmptyEnv("MIOPEN_FIND_MODE")
+                      .value_or(defaultMiopenFindMode(env.profile)));
+    const std::string defaultParallelLevel = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_COMPILE_PARALLEL_LEVEL")
+        .value_or(readNonEmptyEnv("MIOPEN_COMPILE_PARALLEL_LEVEL")
+                      .value_or(std::to_string(defaultMiopenCompileParallelLevel())));
+    env.runtimeFingerprint = buildMiGraphXRuntimeFingerprint(
+        env.profileLabel, rocmVersion, gfxTarget, env.visibleDevices,
+        disableMlir, enableNhwc, enableCk, defaultFindMode, defaultParallelLevel);
 
     const std::string problemCache = readNonEmptyEnv("AVE_MIGRAPHX_PROBLEM_CACHE")
         .value_or(readNonEmptyEnv("MIGRAPHX_PROBLEM_CACHE")
-                      .value_or(defaultMiGraphXProblemCachePath().string()));
+                      .value_or(defaultMiGraphXProblemCachePath(env.runtimeFingerprint).string()));
     const std::string miopenUserDb = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_USER_DB_PATH")
         .value_or(readNonEmptyEnv("MIOPEN_USER_DB_PATH")
-                      .value_or(defaultMiopenUserDbPath().string()));
+                      .value_or(defaultMiopenUserDbPath(env.runtimeFingerprint).string()));
     const std::string miopenCache = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_CACHE_DIR")
         .value_or(readNonEmptyEnv("MIOPEN_CUSTOM_CACHE_DIR")
-                      .value_or(defaultMiopenCacheDir().string()));
+                      .value_or(defaultMiopenCacheDir(env.runtimeFingerprint).string()));
     const std::string miopenFindMode = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_FIND_MODE")
         .value_or(readNonEmptyEnv("MIOPEN_FIND_MODE")
                       .value_or(defaultMiopenFindMode(env.profile)));
     const std::string miopenCompileParallel = readNonEmptyEnv("AVE_MIGRAPHX_MIOPEN_COMPILE_PARALLEL_LEVEL")
         .value_or(readNonEmptyEnv("MIOPEN_COMPILE_PARALLEL_LEVEL")
                       .value_or(std::to_string(defaultMiopenCompileParallelLevel())));
+
+    env.problemCachePath = problemCache;
+    env.miopenUserDbPath = miopenUserDb;
+    env.miopenCustomCacheDir = miopenCache;
+    env.miopenFindMode = miopenFindMode;
+    env.miopenCompileParallelLevel = miopenCompileParallel;
 
     ensureDir(std::filesystem::path(problemCache).parent_path());
     ensureDir(std::filesystem::path(miopenUserDb));
@@ -439,13 +580,50 @@ MiGraphXDriverEnv buildMiGraphXDriverEnv() {
     appendEffectiveEnv(env, "MIOPEN_FIND_MODE", miopenFindMode);
     appendEffectiveEnv(env, "MIOPEN_COMPILE_PARALLEL_LEVEL", miopenCompileParallel);
 
-    if (const auto visibleDevices = readNonEmptyEnv("AVE_MIGRAPHX_VISIBLE_DEVICES");
-        visibleDevices.has_value()) {
-        appendEffectiveEnv(env, "ROCR_VISIBLE_DEVICES", *visibleDevices);
-        appendEffectiveEnv(env, "HIP_VISIBLE_DEVICES", *visibleDevices);
+    if (env.visibleDevices != "all") {
+        appendEffectiveEnv(env, "ROCR_VISIBLE_DEVICES", env.visibleDevices);
+        appendEffectiveEnv(env, "HIP_VISIBLE_DEVICES", env.visibleDevices);
     }
 
     return env;
+}
+
+obs::ArtifactManifestFields buildArtifactManifestFields(const std::filesystem::path& sourcePath,
+                                                       ModelPrecision precision,
+                                                       const MiGraphXDriverEnv& env) {
+    obs::ArtifactManifestFields fields;
+    fields.migraphxVersion = readNonEmptyEnv("MIGRAPHX_VERSION").value_or("unknown");
+    // Reuse the system identity already captured in env — no redundant subprocess/file reads.
+    fields.rocmVersion = env.rocmVersion;
+    fields.gpuGfxTarget = env.gfxTarget;
+    std::error_code ec;
+    if (std::filesystem::exists(sourcePath, ec)) {
+        fields.onnxFileSizeStr = std::to_string(std::filesystem::file_size(sourcePath, ec));
+        const auto mtime = std::filesystem::last_write_time(sourcePath, ec);
+        const auto mtimeSec = std::chrono::duration_cast<std::chrono::seconds>(mtime.time_since_epoch()).count();
+        fields.onnxMtimeStr = std::to_string(mtimeSec);
+    } else {
+        fields.onnxFileSizeStr = "0";
+        fields.onnxMtimeStr = "0";
+    }
+    fields.offloadCopy = "1";
+    fields.precision = compilePrecisionTag(precision);
+    fields.compileProfile = env.profileLabel;
+    fields.disableMlir = readNonEmptyEnv("MIGRAPHX_DISABLE_MLIR").value_or("0");
+    fields.enableNhwc = readNonEmptyEnv("MIGRAPHX_ENABLE_NHWC").value_or("0");
+    fields.enableCk = readNonEmptyEnv("MIGRAPHX_ENABLE_CK").value_or("0");
+    fields.problemCachePath = env.problemCachePath;
+    fields.miopenUserDbPath = env.miopenUserDbPath;
+    fields.miopenCustomCacheDir = env.miopenCustomCacheDir;
+    fields.miopenFindMode = env.miopenFindMode;
+    fields.miopenCompileParallelLevel = env.miopenCompileParallelLevel;
+    fields.visibleDevices = env.visibleDevices;
+    fields.runtimeFingerprint = env.runtimeFingerprint;
+    return fields;
+}
+
+std::filesystem::path manifestPathForArtifact(const std::filesystem::path& artifactPath) {
+    return artifactPath.string() + ".manifest";
 }
 
 std::string formatMiGraphXDriverEnv(const MiGraphXDriverEnv& env) {
@@ -1084,6 +1262,7 @@ bool appendDriverInputDims(std::ostringstream& cmd,
 
 bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
                                 const std::filesystem::path& mxrPath,
+                                const std::filesystem::path& manifestSourcePath,
                                 int compileWidth,
                                 int compileHeight,
                                 int compileBatch,
@@ -1119,6 +1298,8 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
         const std::string onnxStr = onnxPath.string();
         const std::string mxrStr = mxrPath.string();
         const MiGraphXDriverEnv driverEnv = buildMiGraphXDriverEnv();
+        const auto manifestFields = buildArtifactManifestFields(manifestSourcePath, compilePrecision, driverEnv);
+        obs::logMiGraphXEnvironment(manifestFields, "compile", mxrStr, "not-run");
 
         if (progressCb) { progressCb(modelId, 0.02f, "Reading ONNX model…"); }
         migraphx::onnx_options firstOpts;
@@ -1232,6 +1413,16 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
             return false;
         }
 
+        std::string manifestError;
+        if (!obs::writeArtifactManifest(manifestPathForArtifact(mxrPath).string(),
+                                        manifestFields,
+                                        manifestError)) {
+            std::error_code removeEc;
+            std::filesystem::remove(mxrPath, removeEc);
+            error = "Compiled artifact could not be validated for reuse: " + manifestError;
+            return false;
+        }
+
         if (progressCb) { progressCb(modelId, 1.0f, "Compilation complete."); }
         return true;
     } catch (const std::exception& ex) {
@@ -1247,6 +1438,7 @@ bool compileWithMigraphxLibrary(const std::filesystem::path& onnxPath,
 
 bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
                                const std::filesystem::path& mxrPath,
+                               const std::filesystem::path& manifestSourcePath,
                                int compileWidth,
                                int compileHeight,
                                int compileBatch,
@@ -1273,6 +1465,8 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
 
     const MiGraphXDriverEnv driverEnv = buildMiGraphXDriverEnv();
     const std::string driverEnvSummary = formatMiGraphXDriverEnv(driverEnv);
+    const auto manifestFields = buildArtifactManifestFields(manifestSourcePath, compilePrecision, driverEnv);
+    obs::logMiGraphXEnvironment(manifestFields, "compile", mxrPath.string(), "not-run");
 
     if (progressCb) { progressCb(modelId, 0.02f, "Inspecting ONNX input tensors…"); }
 
@@ -1284,6 +1478,12 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
         << " --output " << shellQuote(mxrPath.string());
     if (compilePrecision == ModelPrecision::Fp16) {
         cmd << " --fp16";
+    }
+    // Pass --exhaustive-tune to the driver for Exhaustive profile.
+    // This was previously only applied in the C++ library fallback path,
+    // leaving the driver path without exhaustive MiOpen solver search.
+    if (driverEnv.profile == MiGraphXCompileProfile::Exhaustive) {
+        cmd << " --exhaustive-tune";
     }
 
     std::string inputProbeError;
@@ -1366,17 +1566,21 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
         compileDone.store(true);
     });
 
-    int elapsedSec = 0;
+    // Poll at 500 ms for fast completion detection; report progress every 2 s
+    // to avoid flooding the GUI with updates during a 10-45 minute compile.
+    int elapsedMs = 0;
     while (!compileDone.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (compileDone.load()) { break; }
-        elapsedSec += 2;
+        elapsedMs += 500;
+        if (elapsedMs % 2000 != 0) { continue; }
         if (progressCb) {
             std::string line;
             {
                 std::lock_guard<std::mutex> lk(outputMtx);
                 line = lastOutputLine;
             }
+            const int elapsedSec = elapsedMs / 1000;
             const int mins = elapsedSec / 60;
             const int secs = elapsedSec % 60;
             std::ostringstream status;
@@ -1445,6 +1649,17 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
         return false;
     }
 
+    std::string manifestError;
+    if (!obs::writeArtifactManifest(manifestPathForArtifact(mxrPath).string(),
+                                    manifestFields,
+                                    manifestError)) {
+        std::error_code removeEc;
+        std::filesystem::remove(mxrPath, removeEc);
+        error = "Compiled artifact could not be validated for reuse: " + manifestError;
+        if (progressCb) { progressCb(modelId, 0.0f, "Compilation failed: manifest write"); }
+        return false;
+    }
+
     if (progressCb) { progressCb(modelId, 1.0f, "Compilation complete."); }
     return true;
 }
@@ -1455,6 +1670,7 @@ bool compileWithMigraphxDriver(const std::filesystem::path& onnxPath,
 //   migraphx-driver compile --onnx <in.onnx> --output <out.mxr>
 bool migraphxCompile(const std::filesystem::path& onnxPath,
                      const std::filesystem::path& mxrPath,
+                     const std::filesystem::path& manifestSourcePath,
                      int compileWidth,
                      int compileHeight,
                      int compileBatch,
@@ -1485,7 +1701,8 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
         }
     }
 
-    if (compileWithMigraphxDriver(onnxPath, mxrPath, compileWidth, compileHeight,
+    if (compileWithMigraphxDriver(onnxPath, mxrPath, manifestSourcePath,
+                                  compileWidth, compileHeight,
                                   compileBatch,
                                   compilePrecision,
                                   progressCb, modelId, error)) {
@@ -1505,7 +1722,8 @@ bool migraphxCompile(const std::filesystem::path& onnxPath,
             "migraphx-driver not found; falling back to MiGraphX C++ runtime…");
     }
     return compileWithMigraphxLibrary(
-        onnxPath, mxrPath, compileWidth, compileHeight, compileBatch, compilePrecision,
+        onnxPath, mxrPath, manifestSourcePath,
+        compileWidth, compileHeight, compileBatch, compilePrecision,
         calibrationVideoPath,
         progressCb, modelId, error);
 #else
@@ -1786,6 +2004,75 @@ std::optional<std::string> ModelManager::bestPathForModel(const std::string& mod
     return std::nullopt;
 }
 
+std::optional<std::string> ModelManager::validatedCompiledArtifactPath(
+        const std::string& modelId,
+        ModelPrecision compilePrecision,
+        std::optional<std::int64_t> inputWidth,
+        std::optional<std::int64_t> inputHeight,
+        int compileBatch,
+        std::string* validationDetail) const {
+    if ((inputWidth.has_value() && !inputHeight.has_value()) ||
+        (!inputWidth.has_value() && inputHeight.has_value())) {
+        if (validationDetail != nullptr) {
+            *validationDetail = "Both inputWidth and inputHeight are required when validating a dimension-specific artifact.";
+        }
+        return std::nullopt;
+    }
+
+    const int batch = normaliseCompileBatch(compileBatch);
+    std::filesystem::path artifactPath;
+    std::filesystem::path sourcePath;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx);
+        auto it = impl_->records.find(modelId);
+        if (it == impl_->records.end()) {
+            if (validationDetail != nullptr) {
+                *validationDetail = "Unknown model id: " + modelId;
+            }
+            return std::nullopt;
+        }
+
+        const auto& model = it->second;
+        if (model.downloadedPath.empty() || model.downloadedPath == "(builtin)") {
+            if (validationDetail != nullptr) {
+                *validationDetail = "Model source is not available on disk for manifest validation.";
+            }
+            return std::nullopt;
+        }
+
+        sourcePath = model.downloadedPath;
+        artifactPath = compiledArtifactPath(
+            impl_->convertedDir(), modelId, compilePrecision,
+            inputWidth.has_value() ? std::optional<int>(static_cast<int>(*inputWidth)) : std::nullopt,
+            inputHeight.has_value() ? std::optional<int>(static_cast<int>(*inputHeight)) : std::nullopt,
+            batch);
+    }
+
+    if (!fileExists(artifactPath)) {
+        if (validationDetail != nullptr) {
+            *validationDetail = "Compiled artifact not found: " + artifactPath.string();
+        }
+        return std::nullopt;
+    }
+
+    const MiGraphXDriverEnv driverEnv = buildMiGraphXDriverEnv();
+    const auto expectedFields = buildArtifactManifestFields(sourcePath, compilePrecision, driverEnv);
+    std::string mismatchReason;
+    if (!obs::validateArtifactManifest(manifestPathForArtifact(artifactPath).string(),
+                                       expectedFields,
+                                       mismatchReason)) {
+        if (validationDetail != nullptr) {
+            *validationDetail = mismatchReason;
+        }
+        return std::nullopt;
+    }
+
+    if (validationDetail != nullptr) {
+        validationDetail->clear();
+    }
+    return artifactPath.string();
+}
+
 bool ModelManager::startDownload(const std::string& modelId,
                                   const ModelProgressCb& progressCb,
                                   const ModelStateCb&    stateCb,
@@ -1972,7 +2259,7 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
     const auto mxrPath = compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision);
     const bool allowTileFallback = canUseMiGraphXTileFallbackLadder(
         baselineWidth, baselineHeight);
-    bool ok = migraphxCompile(onnxPath, mxrPath,
+    bool ok = migraphxCompile(onnxPath, mxrPath, modelPath,
                               baselineWidth, baselineHeight,
                               1,
                               compilePrecision,
@@ -1985,11 +2272,18 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
             progressCb(modelId, 0.02f,
                 "fp16 compilation timed out; retrying with fp32 artifact…");
         }
-        if (fileExists(fp32Path)) {
+        std::string validationDetail;
+        if (validatedCompiledArtifactPath(modelId, ModelPrecision::Fp32,
+                                          std::nullopt, std::nullopt, 1,
+                                          &validationDetail).has_value()) {
             ok = true;
         } else {
+            if (fileExists(fp32Path) && !validationDetail.empty()) {
+                std::cout << "[auto-compile] Ignoring stale fp32 fallback artifact '"
+                          << fp32Path << "': " << validationDetail << std::endl;
+            }
             std::string fp32Error;
-            ok = migraphxCompile(onnxPath, fp32Path,
+            ok = migraphxCompile(onnxPath, fp32Path, modelPath,
                                  baselineWidth, baselineHeight,
                                  1,
                                  ModelPrecision::Fp32,
@@ -2013,12 +2307,28 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
                     + formatCompileDimensions(fallbackExtent, fallbackExtent) + "…");
             }
             std::string fallbackError;
-            ok = migraphxCompile(onnxPath, mxrPath,
-                                 fallbackExtent, fallbackExtent,
-                                 1,
-                                 ModelPrecision::Fp32,
-                                 std::nullopt,
-                                 progressCb, modelId, fallbackError);
+            std::string validationDetail;
+            if (validatedCompiledArtifactPath(modelId, ModelPrecision::Fp32,
+                                              fallbackExtent, fallbackExtent, 1,
+                                              &validationDetail).has_value()) {
+                ok = true;
+            } else {
+                if (fileExists(compiledArtifactPath(impl_->convertedDir(), modelId,
+                                                   ModelPrecision::Fp32,
+                                                   fallbackExtent, fallbackExtent, 1)) &&
+                    !validationDetail.empty()) {
+                    std::cout << "[auto-compile] Ignoring stale smaller-tile fallback artifact for '"
+                              << modelId << "' at "
+                              << formatCompileDimensions(fallbackExtent, fallbackExtent)
+                              << ": " << validationDetail << std::endl;
+                }
+                ok = migraphxCompile(onnxPath, mxrPath, modelPath,
+                                     fallbackExtent, fallbackExtent,
+                                     1,
+                                     ModelPrecision::Fp32,
+                                     std::nullopt,
+                                     progressCb, modelId, fallbackError);
+            }
             if (ok) {
                 error.clear();
                 break;
@@ -2104,45 +2414,69 @@ std::optional<std::string> ModelManager::autoCompileForInference(
     auto customMxrPath = [&](ModelPrecision precision, int batch) -> std::filesystem::path {
         return artifactPathFor(precision, compileWidth, compileHeight, batch);
     };
+    auto logRejectedArtifact = [&](const std::filesystem::path& artifactPath,
+                                   const std::string& detail) {
+        if (fileExists(artifactPath) && !detail.empty()) {
+            std::cout << "[auto-compile] Ignoring stale artifact '" << artifactPath
+                      << "': " << detail << std::endl;
+        }
+    };
+    auto reuseValidatedArtifact = [&](ModelPrecision precision,
+                                      int width,
+                                      int height,
+                                      int batch,
+                                      const std::string& prefix) -> std::optional<std::string> {
+        std::string detail;
+        const auto validated = validatedCompiledArtifactPath(
+            modelId, precision, width, height, batch, &detail);
+        if (validated.has_value()) {
+            std::cout << prefix << *validated << std::endl;
+            return validated;
+        }
+        logRejectedArtifact(artifactPathFor(precision, width, height, batch), detail);
+        return std::nullopt;
+    };
+    auto reuseValidatedArtifactNoDims = [&](ModelPrecision precision,
+                                            const std::string& prefix) -> std::optional<std::string> {
+        std::string detail;
+        const auto validated = validatedCompiledArtifactPath(
+            modelId, precision, std::nullopt, std::nullopt, 1, &detail);
+        if (validated.has_value()) {
+            std::cout << prefix << *validated << std::endl;
+            return validated;
+        }
+        logRejectedArtifact(compiledArtifactPath(impl_->convertedDir(), modelId, precision), detail);
+        return std::nullopt;
+    };
 
     if (useCustomDims) {
-        const auto mxrPath = customMxrPath(compilePrecision, requestedCompileBatch);
-        if (fileExists(mxrPath)) {
-            std::cout << "[auto-compile] Model '" << modelId << "' already compiled for "
-                      << compileWidth << "x" << compileHeight
-                      << " batch " << requestedCompileBatch << ": "
-                      << mxrPath << std::endl;
-            return mxrPath.string();
+        if (const auto exactPath = reuseValidatedArtifact(
+                compilePrecision, compileWidth, compileHeight, requestedCompileBatch,
+                "[auto-compile] Reusing exact artifact: "); exactPath.has_value()) {
+            return exactPath;
         }
         if (compilePrecision == ModelPrecision::Fp16) {
-            const auto fp32Path = customMxrPath(ModelPrecision::Fp32, requestedCompileBatch);
-            if (fileExists(fp32Path)) {
-                std::cout << "[auto-compile] Reusing fp32 artifact for '" << modelId
-                          << "' at " << compileWidth << "x" << compileHeight
-                          << " batch " << requestedCompileBatch
-                          << ": " << fp32Path << std::endl;
-                return fp32Path.string();
+            if (const auto fp32Path = reuseValidatedArtifact(
+                    ModelPrecision::Fp32, compileWidth, compileHeight, requestedCompileBatch,
+                    "[auto-compile] Reusing validated fp32 fallback artifact: ");
+                fp32Path.has_value()) {
+                return fp32Path;
             }
         }
         if (allowTileFallback) {
             const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
             for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
                 const int fallbackExtent = fallbackExtents[i];
-                const auto fallbackFp32Path =
-                    artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent,
-                                    requestedCompileBatch);
-                if (fileExists(fallbackFp32Path)) {
-                    std::cout << "[auto-compile] Reusing smaller fp32 tile artifact for '"
-                              << modelId << "' at "
-                              << formatCompileDimensions(fallbackExtent, fallbackExtent)
-                              << " batch " << requestedCompileBatch
-                              << ": " << fallbackFp32Path << std::endl;
-                    return fallbackFp32Path.string();
+                if (const auto fallbackFp32Path = reuseValidatedArtifact(
+                        ModelPrecision::Fp32, fallbackExtent, fallbackExtent,
+                        requestedCompileBatch,
+                        "[auto-compile] Reusing validated smaller fp32 tile artifact: ");
+                    fallbackFp32Path.has_value()) {
+                    return fallbackFp32Path;
                 }
             }
         }
     } else {
-        // First check if already compiled (default path selection).
         {
             std::lock_guard<std::mutex> lock(impl_->mtx);
             auto it = impl_->records.find(modelId);
@@ -2152,10 +2486,18 @@ std::optional<std::string> ModelManager::autoCompileForInference(
             }
             impl_->scanAndUpdate(it->second);
         }
-        auto bestPath = bestPathForModel(modelId);
-        if (bestPath && hasMxrExtension(*bestPath)) {
-            std::cout << "[auto-compile] Model '" << modelId << "' already compiled: " << *bestPath << std::endl;
-            return bestPath;
+        if (const auto exactPath = reuseValidatedArtifactNoDims(
+                compilePrecision, "[auto-compile] Reusing validated compiled artifact: ");
+            exactPath.has_value()) {
+            return exactPath;
+        }
+        if (compilePrecision == ModelPrecision::Fp16) {
+            if (const auto fp32Path = reuseValidatedArtifactNoDims(
+                    ModelPrecision::Fp32,
+                    "[auto-compile] Reusing validated default fp32 fallback artifact: ");
+                fp32Path.has_value()) {
+                return fp32Path;
+            }
         }
 
         error = "[NeedsFrameSize] MiGraphX auto-compile requires actual input dimensions for the first compile of model '"
@@ -2224,44 +2566,39 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         auto compileForBatch = [&](int batch,
                                    std::string& batchError) -> std::optional<std::string> {
             const auto mxrPath = customMxrPath(compilePrecision, batch);
-            if (fileExists(mxrPath)) {
-                std::cout << "[auto-compile] Reusing exact artifact for '" << modelId
-                          << "' at " << compileWidth << "x" << compileHeight
-                          << " batch " << batch << ": " << mxrPath << std::endl;
+            if (const auto exactPath = reuseValidatedArtifact(
+                    compilePrecision, compileWidth, compileHeight, batch,
+                    "[auto-compile] Reusing exact artifact: "); exactPath.has_value()) {
                 batchError.clear();
-                return mxrPath.string();
+                return exactPath;
             }
             if (compilePrecision == ModelPrecision::Fp16) {
-                const auto fp32Path = customMxrPath(ModelPrecision::Fp32, batch);
-                if (fileExists(fp32Path)) {
-                    std::cout << "[auto-compile] Reusing fp32 artifact for '" << modelId
-                              << "' at " << compileWidth << "x" << compileHeight
-                              << " batch " << batch << ": " << fp32Path << std::endl;
+                if (const auto fp32Path = reuseValidatedArtifact(
+                        ModelPrecision::Fp32, compileWidth, compileHeight, batch,
+                        "[auto-compile] Reusing validated fp32 fallback artifact: ");
+                    fp32Path.has_value()) {
                     batchError.clear();
-                    return fp32Path.string();
+                    return fp32Path;
                 }
             }
             if (allowTileFallback) {
                 const auto fallbackExtents = buildMiGraphXTileFallbackExtents(compileWidth);
                 for (std::size_t i = 1; i < fallbackExtents.size(); ++i) {
                     const int fallbackExtent = fallbackExtents[i];
-                    const auto fallbackFp32Path =
-                        artifactPathFor(ModelPrecision::Fp32, fallbackExtent, fallbackExtent, batch);
-                    if (fileExists(fallbackFp32Path)) {
-                        std::cout << "[auto-compile] Reusing smaller fp32 tile artifact for '"
-                                  << modelId << "' at "
-                                  << formatCompileDimensions(fallbackExtent, fallbackExtent)
-                                  << " batch " << batch
-                                  << ": " << fallbackFp32Path << std::endl;
+                    if (const auto fallbackFp32Path = reuseValidatedArtifact(
+                            ModelPrecision::Fp32, fallbackExtent, fallbackExtent, batch,
+                            "[auto-compile] Reusing validated smaller fp32 tile artifact: ");
+                        fallbackFp32Path.has_value()) {
                         batchError.clear();
-                        return fallbackFp32Path.string();
+                        return fallbackFp32Path;
                     }
                 }
             }
             std::cout << "[auto-compile] Compiling '" << modelId
                       << "' at " << compileWidth << "x" << compileHeight
                       << " batch " << batch << "..." << std::endl;
-            if (migraphxCompile(onnxPath, mxrPath, compileWidth, compileHeight,
+            if (migraphxCompile(onnxPath, mxrPath, modelPath,
+                                compileWidth, compileHeight,
                                 batch, compilePrecision,
                                 calibrationVideoPath,
                                 progressCb, modelId, batchError)) {
@@ -2276,13 +2613,16 @@ std::optional<std::string> ModelManager::autoCompileForInference(
                           << compileWidth << "x" << compileHeight
                           << " batch " << batch << "..." << std::endl;
                 exactFp32Attempted = true;
-                if (fileExists(fp32Path)) {
-                    std::cout << "[auto-compile] Reusing fp32 artifact: " << fp32Path << std::endl;
+                if (const auto validatedFp32 = reuseValidatedArtifact(
+                        ModelPrecision::Fp32, compileWidth, compileHeight, batch,
+                        "[auto-compile] Reusing validated fp32 fallback artifact: ");
+                    validatedFp32.has_value()) {
                     batchError.clear();
-                    return fp32Path.string();
+                    return validatedFp32;
                 }
                 std::string fp32Error;
-                if (migraphxCompile(onnxPath, fp32Path, compileWidth, compileHeight,
+                if (migraphxCompile(onnxPath, fp32Path, modelPath,
+                                    compileWidth, compileHeight,
                                     batch, ModelPrecision::Fp32,
                                     calibrationVideoPath,
                                     progressCb, modelId, fp32Error)) {
@@ -2310,14 +2650,15 @@ std::optional<std::string> ModelManager::autoCompileForInference(
                 std::cout << "[auto-compile] compile timed out; retrying smaller fp32 tile at "
                           << formatCompileDimensions(fallbackExtent, fallbackExtent)
                           << " batch " << batch << "..." << std::endl;
-                if (fileExists(fallbackFp32Path)) {
-                    std::cout << "[auto-compile] Reusing smaller fp32 artifact: "
-                              << fallbackFp32Path << std::endl;
+                if (const auto validatedFallback = reuseValidatedArtifact(
+                        ModelPrecision::Fp32, fallbackExtent, fallbackExtent, batch,
+                        "[auto-compile] Reusing validated smaller fp32 tile artifact: ");
+                    validatedFallback.has_value()) {
                     batchError.clear();
-                    return fallbackFp32Path.string();
+                    return validatedFallback;
                 }
                 std::string fallbackError;
-                if (migraphxCompile(onnxPath, fallbackFp32Path,
+                if (migraphxCompile(onnxPath, fallbackFp32Path, modelPath,
                                     fallbackExtent, fallbackExtent,
                                     batch, ModelPrecision::Fp32,
                                     calibrationVideoPath,
@@ -2368,10 +2709,18 @@ std::optional<std::string> ModelManager::autoCompileForInference(
 
     if (convertToMiGraphX(modelId, progressCb, ModelStateCb{}, error, compilePrecision)) {
         refresh();
-        auto bestPath = bestPathForModel(modelId);
-        if (bestPath && hasMxrExtension(*bestPath)) {
-            std::cout << "[auto-compile] Successfully compiled to: " << *bestPath << std::endl;
-            return bestPath;
+        if (const auto exactPath = reuseValidatedArtifactNoDims(
+                compilePrecision, "[auto-compile] Successfully compiled to: ");
+            exactPath.has_value()) {
+            return exactPath;
+        }
+        if (compilePrecision == ModelPrecision::Fp16) {
+            if (const auto fp32Path = reuseValidatedArtifactNoDims(
+                    ModelPrecision::Fp32,
+                    "[auto-compile] Successfully compiled to validated fp32 fallback: ");
+                fp32Path.has_value()) {
+                return fp32Path;
+            }
         }
     }
 

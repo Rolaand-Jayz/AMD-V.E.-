@@ -1,0 +1,15 @@
+label	sha	date	message	model	compile_wall	infer_wall	compile_total	infer_total
+7095234	709523495664b5bc625fc98df2a0fc4887274c51	2026-03-09 22:36:39 -0500	feat: expand backend pipeline and workflow	realesrnet-x2plus	9.440	27.959	0.879421	27.2569
+7095234	709523495664b5bc625fc98df2a0fc4887274c51	2026-03-09 22:36:39 -0500	feat: expand backend pipeline and workflow	clearreality-x4-fast	14.030	41.136	1.43918	40.4306
+b04bca1	b04bca1841a7afbd97a88eb07e7b6149a5960bbf	2026-03-09 23:01:39 -0500	feat: tune MiGraphX and MIOpen compile path	realesrnet-x2plus	9.399	28.083	0.874904	27.3786
+b04bca1	b04bca1841a7afbd97a88eb07e7b6149a5960bbf	2026-03-09 23:01:39 -0500	feat: tune MiGraphX and MIOpen compile path	clearreality-x4-fast	13.953	40.334	1.42662	39.6292
+baf39f8	baf39f8750a077e7dd4a8a21c4adf466dff9b951	2026-03-09 23:17:11 -0500	feat: add MiGraphX tile compile fallback ladder	realesrnet-x2plus	9.388	27.905	0.868441	27.2089
+baf39f8	baf39f8750a077e7dd4a8a21c4adf466dff9b951	2026-03-09 23:17:11 -0500	feat: add MiGraphX tile compile fallback ladder	clearreality-x4-fast	13.961	40.303	1.43555	39.6012
+34314df	34314df39333294b0c55672d61dffa5062b8b01c	2026-03-13 09:10:34 -0500	Add patched MiGraphX launcher and layout inference	realesrnet-x2plus	9.384	27.876	0.867333	27.1857
+34314df	34314df39333294b0c55672d61dffa5062b8b01c	2026-03-13 09:10:34 -0500	Add patched MiGraphX launcher and layout inference	clearreality-x4-fast	13.972	40.091	1.44244	39.3898
+eb8dad9	eb8dad94e7df47eaf08e6fa9b3975111c1da25a9	2026-03-16 00:24:22 -0500	feat: merge MiGraphX optimizations and bundle runtime assets	realesrnet-x2plus	27.060	17.168	0.574345	16.5043
+eb8dad9	eb8dad94e7df47eaf08e6fa9b3975111c1da25a9	2026-03-16 00:24:22 -0500	feat: merge MiGraphX optimizations and bundle runtime assets	clearreality-x4-fast	65.709	30.527	1.19931	29.8567
+50aa036	50aa036fec97ed87bd2cd62935974e64e6828519	2026-03-17 17:08:40 -0500	perf: cache swscale contexts and ignore generated builds	realesrnet-x2plus	27.061	17.132	0.574005	16.4686
+50aa036	50aa036fec97ed87bd2cd62935974e64e6828519	2026-03-17 17:08:40 -0500	perf: cache swscale contexts and ignore generated builds	clearreality-x4-fast	63.697	30.689	1.18553	30.0154
+worktree	c9475dffa73e4d825a9e07f3e503d56f19d41d05	2026-03-18 20:18:12 -0500	merge: absorb MiGraphX optimization branch into main	realesrnet-x2plus	26.988	16.857	0.560954	16.4226
+worktree	c9475dffa73e4d825a9e07f3e503d56f19d41d05	2026-03-18 20:18:12 -0500	merge: absorb MiGraphX optimization branch into main	clearreality-x4-fast	63.643	30.218	1.18013	29.7664

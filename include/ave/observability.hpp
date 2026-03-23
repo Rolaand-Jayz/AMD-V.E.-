@@ -90,6 +90,13 @@ void logVersionTuple();
 //   MIGRAPHX_ENABLE_CK        – enable composable-kernel path
 void logMiGraphXEnvironment();
 
+// Logs an explicit effective MiGraphX/MiOpen environment snapshot for the
+// supplied phase (for example compile-time, runtime-load, runtime-warmup).
+void logMiGraphXEnvironment(const struct ArtifactManifestFields& effective,
+                            const std::string& phase,
+                            const std::string& artifactPath = {},
+                            const std::string& warmupStatus = {});
+
 // ─────────────────────────────────────────────────────────────────
 // Tensor contract violation logging
 // ─────────────────────────────────────────────────────────────────
@@ -121,9 +128,17 @@ struct ArtifactManifestFields {
     std::string onnxMtimeStr;     // std::to_string(mtime as epoch seconds)
     std::string offloadCopy;      // "0" or "1"
     std::string precision;        // "fp32" or "fp16"
+    std::string compileProfile;   // compile/runtime tuning profile label
     std::string disableMlir;      // MIGRAPHX_DISABLE_MLIR env var value or "0"
     std::string enableNhwc;       // MIGRAPHX_ENABLE_NHWC env var value or "0"
     std::string enableCk;         // MIGRAPHX_ENABLE_CK env var value or "0"
+    std::string problemCachePath;         // MIGRAPHX_PROBLEM_CACHE
+    std::string miopenUserDbPath;         // MIOPEN_USER_DB_PATH
+    std::string miopenCustomCacheDir;     // MIOPEN_CUSTOM_CACHE_DIR
+    std::string miopenFindMode;           // MIOPEN_FIND_MODE
+    std::string miopenCompileParallelLevel; // MIOPEN_COMPILE_PARALLEL_LEVEL
+    std::string visibleDevices;           // effective HIP/ROCR visible device binding
+    std::string runtimeFingerprint;       // deterministic tuning-context fingerprint
 };
 
 // Write a manifest file.  Overwrites any existing manifest.

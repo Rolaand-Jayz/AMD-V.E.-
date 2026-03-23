@@ -9,7 +9,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <mutex>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -22,6 +21,7 @@ namespace ave {
 namespace frame_io {
 
 // ─── SwsContext cache to avoid per-frame allocation ───────────────────────
+// Thread-local cache for zero-contention performance
 namespace {
 
 struct SwsKey {
@@ -52,25 +52,42 @@ struct SwsKeyHash {
 
 using SwsCache = std::unordered_map<SwsKey, SwsContext*, SwsKeyHash>;
 
-SwsCache& getSwsCache() {
-    static SwsCache cache;
+// Thread-local cache: each thread has its own cache, eliminating all contention
+SwsCache& getThreadLocalSwsCache() {
+    thread_local SwsCache cache;
     return cache;
 }
 
-std::mutex& getSwsCacheMutex() {
-    static std::mutex mutex;
-    return mutex;
+// RAII cleaner for thread-local cache (cleanup when thread exits)
+struct ThreadLocalSwsCacheCleaner {
+    ~ThreadLocalSwsCacheCleaner() {
+        SwsCache& cache = getThreadLocalSwsCache();
+        for (auto& pair : cache) {
+            sws_freeContext(pair.second);
+        }
+        cache.clear();
+    }
+};
+
+// One cleaner per thread, automatically frees contexts when thread exits
+ThreadLocalSwsCacheCleaner& getThreadLocalCleaner() {
+    thread_local ThreadLocalSwsCacheCleaner cleaner;
+    return cleaner;
 }
 
 SwsContext* getOrCreateSwsContext(const SwsKey& key) {
-    std::lock_guard<std::mutex> lock(getSwsCacheMutex());
-    SwsCache& cache = getSwsCache();
-
+    // Initialize thread-local cleaner (ensures cleanup on thread exit)
+    (void)getThreadLocalCleaner();
+    
+    // Access thread-local cache (no synchronization needed)
+    SwsCache& cache = getThreadLocalSwsCache();
+    
     auto it = cache.find(key);
     if (it != cache.end()) {
-        return it->second;
+        return it->second;  // Cache hit - zero overhead
     }
 
+    // Cache miss - create new context
     SwsContext* sws = sws_getContext(
         key.srcW, key.srcH, static_cast<AVPixelFormat>(key.srcFmt),
         key.dstW, key.dstH, static_cast<AVPixelFormat>(key.dstFmt),
@@ -82,22 +99,13 @@ SwsContext* getOrCreateSwsContext(const SwsKey& key) {
     return sws;
 }
 
+// Global cleanup (for compatibility, now just clears thread-local cache)
 void clearSwsCache() {
-    std::lock_guard<std::mutex> lock(getSwsCacheMutex());
-    SwsCache& cache = getSwsCache();
+    SwsCache& cache = getThreadLocalSwsCache();
     for (auto& pair : cache) {
         sws_freeContext(pair.second);
     }
     cache.clear();
-}
-
-struct SwsCacheCleaner {
-    ~SwsCacheCleaner() { clearSwsCache(); }
-};
-
-SwsCacheCleaner& getSwsCacheCleaner() {
-    static SwsCacheCleaner cleaner;
-    return cleaner;
 }
 
 // ─── Helper: quote a shell argument ──────────────────────────────
@@ -493,8 +501,6 @@ bool avFrameToRgb24(const AVFrame* frame,
         srcFmt = AV_PIX_FMT_YUV420P;  // Vulkan frames are typically YUV420P
     }
 
-    (void)getSwsCacheCleaner();
-
     SwsKey key{frame->width, frame->height, static_cast<int>(srcFmt),
                width, height, static_cast<int>(AV_PIX_FMT_RGB24)};
     SwsContext* sws = getOrCreateSwsContext(key);
@@ -540,8 +546,6 @@ AVFrame* rgb24ToAvFrame(const std::uint8_t* rgb,
         av_frame_free(&frame);
         return nullptr;
     }
-
-    (void)getSwsCacheCleaner();
 
     SwsKey key{width, height, static_cast<int>(AV_PIX_FMT_RGB24),
                width, height, static_cast<int>(AV_PIX_FMT_YUV420P)};

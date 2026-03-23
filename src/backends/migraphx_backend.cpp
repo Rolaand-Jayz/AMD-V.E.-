@@ -30,6 +30,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -45,8 +46,16 @@
 #  include <unistd.h>
 #endif
 
+// F16C hardware intrinsics for fp16↔4 float conversion.
+// All AMD Ryzen CPUs and Intel x86-64 from Ivy Bridge onward support F16C.
+// -march=native (set in CMakeLists) exposes __F16C__ to the preprocessor.
+#if defined(__F16C__)
+#  include <immintrin.h>
+#endif
+
 #include "ave/error_taxonomy.hpp"
 #include "ave/frame_io.hpp"
+#include "ave/interop_bridge.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/model_manager.hpp"
 #include "ave/observability.hpp"
@@ -187,12 +196,16 @@ bool hasAmdSignal() {
 #ifdef AVE_HAVE_MIGRAPHX
 
 std::string getRocmVersion() {
-    std::ifstream f("/opt/rocm/.info/version");
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty()) { return line; }
-    }
-    return "unknown";
+    // Cached once per process — ROCm version does not change at runtime.
+    static const std::string cached = []() -> std::string {
+        std::ifstream f("/opt/rocm/.info/version");
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty()) { return line; }
+        }
+        return std::string("unknown");
+    }();
+    return cached;
 }
 
 std::string getMiGraphXVersion() {
@@ -204,35 +217,83 @@ std::string getMiGraphXVersion() {
 }
 
 std::string getGfxTarget() {
+    // Cached once per process — GFX target never changes while the app is running.
+    // Avoids spawning rocminfo on every call to this function.
+    static const std::string cached = []() -> std::string {
 #ifdef AVE_HAVE_HIP
-    int currentDevice = 0;
-    hipDeviceProp_t props{};
-    if (hipGetDevice(&currentDevice) == hipSuccess &&
-        hipGetDeviceProperties(&props, currentDevice) == hipSuccess &&
-        props.gcnArchName[0] != '\0') {
-        return std::string(props.gcnArchName);
-    }
-#endif
-    // Fallback: parse rocminfo output
-    FILE* p = popen("rocminfo 2>/dev/null | grep -m1 'gfx[0-9]' | tr -s ' ' | cut -d' ' -f2", "r");
-    if (p != nullptr) {
-        std::array<char, 64> buf{};
-        std::string result;
-        if (std::fgets(buf.data(), static_cast<int>(buf.size()), p) != nullptr) {
-            result = std::string(buf.data());
-            while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
-                result.pop_back();
-            }
+        int currentDevice = 0;
+        hipDeviceProp_t props{};
+        if (hipGetDevice(&currentDevice) == hipSuccess &&
+            hipGetDeviceProperties(&props, currentDevice) == hipSuccess &&
+            props.gcnArchName[0] != '\0') {
+            return std::string(props.gcnArchName);
         }
-        pclose(p);
-        if (!result.empty()) { return result; }
-    }
-    return "unknown";
+#endif
+        // Fallback: parse rocminfo output
+        FILE* p = popen("rocminfo 2>/dev/null | grep -m1 'gfx[0-9]' | tr -s ' ' | cut -d' ' -f2", "r");
+        if (p != nullptr) {
+            std::array<char, 64> buf{};
+            std::string result;
+            if (std::fgets(buf.data(), static_cast<int>(buf.size()), p) != nullptr) {
+                result = std::string(buf.data());
+                while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
+                    result.pop_back();
+                }
+            }
+            pclose(p);
+            if (!result.empty()) { return result; }
+        }
+        return std::string("unknown");
+    }();
+    return cached;
 }
 
 std::string envOrDef(const char* name, const char* def) {
     const char* v = std::getenv(name);
     return v != nullptr ? std::string(v) : std::string(def);
+}
+
+std::string currentCompileProfileLabel() {
+    std::string value = envOrDef("AVE_MIGRAPHX_COMPILE_PROFILE", "fast");
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "balanced" || value == "default" || value == "dynamic_hybrid") {
+        return "balanced";
+    }
+    if (value == "exhaustive" || value == "full" || value == "normal") {
+        return "exhaustive";
+    }
+    return "fast";
+}
+
+std::string currentVisibleDeviceBinding() {
+    const char* overrideVisible = std::getenv("AVE_MIGRAPHX_VISIBLE_DEVICES");
+    if (overrideVisible != nullptr && *overrideVisible != '\0') {
+        return overrideVisible;
+    }
+    const char* rocrVisible = std::getenv("ROCR_VISIBLE_DEVICES");
+    if (rocrVisible != nullptr && *rocrVisible != '\0') {
+        return rocrVisible;
+    }
+    const char* hipVisible = std::getenv("HIP_VISIBLE_DEVICES");
+    if (hipVisible != nullptr && *hipVisible != '\0') {
+        return hipVisible;
+    }
+    return "all";
+}
+
+std::string currentRuntimeFingerprint(const std::string& compileProfile,
+                                      const std::string& visibleDevices,
+                                      const std::string& problemCache,
+                                      const std::string& miopenUserDb,
+                                      const std::string& miopenCache,
+                                      const std::string& miopenFindMode,
+                                      const std::string& miopenParallel) {
+    const std::string seed = compileProfile + "|" + visibleDevices + "|"
+        + problemCache + "|" + miopenUserDb + "|" + miopenCache + "|"
+        + miopenFindMode + "|" + miopenParallel;
+    return std::to_string(std::hash<std::string>{}(seed));
 }
 
 #endif  // AVE_HAVE_MIGRAPHX
@@ -531,9 +592,20 @@ std::size_t skipField(const std::uint8_t* buf, std::size_t len, std::uint32_t wi
 
     f.offloadCopy    = opts.offloadCopy    ? "1" : "0";
     f.precision      = compilePrecisionTag(opts.precision);
+    f.compileProfile = currentCompileProfileLabel();
     f.disableMlir    = envOrDef("MIGRAPHX_DISABLE_MLIR", "0");
     f.enableNhwc     = envOrDef("MIGRAPHX_ENABLE_NHWC",  "0");
     f.enableCk       = envOrDef("MIGRAPHX_ENABLE_CK",    "0");
+    f.problemCachePath = envOrDef("MIGRAPHX_PROBLEM_CACHE", "");
+    f.miopenUserDbPath = envOrDef("MIOPEN_USER_DB_PATH", "");
+    f.miopenCustomCacheDir = envOrDef("MIOPEN_CUSTOM_CACHE_DIR", "");
+    f.miopenFindMode = envOrDef("MIOPEN_FIND_MODE", "FAST");
+    f.miopenCompileParallelLevel = envOrDef("MIOPEN_COMPILE_PARALLEL_LEVEL", "1");
+    f.visibleDevices = currentVisibleDeviceBinding();
+    f.runtimeFingerprint = currentRuntimeFingerprint(
+        f.compileProfile, f.visibleDevices, f.problemCachePath,
+        f.miopenUserDbPath, f.miopenCustomCacheDir,
+        f.miopenFindMode, f.miopenCompileParallelLevel);
     return f;
 }
 #endif  // AVE_HAVE_MIGRAPHX
@@ -838,6 +910,18 @@ inline std::uint8_t floatToRgbByteLocal(float value) {
     return static_cast<std::uint8_t>(value + 0.5f);
 }
 
+// fp16 ⇔ float conversion.
+// When -march=native enables F16C, delegate to single-cycle hardware
+// instructions (_cvtss_sh, _cvtsh_ss).  Fall back to IEEE-conformant
+// SW implementation otherwise (e.g. cross-compile, old CPUs).
+#if defined(__F16C__)
+inline std::uint16_t floatToHalfBitsLocal(float value) {
+    return static_cast<std::uint16_t>(_cvtss_sh(value, _MM_FROUND_TO_NEAREST_INT));
+}
+inline float halfBitsToFloatLocal(std::uint16_t bits) {
+    return _cvtsh_ss(bits);
+}
+#else
 inline std::uint16_t floatToHalfBitsLocal(float value) {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
@@ -895,6 +979,7 @@ inline float halfBitsToFloatLocal(std::uint16_t bits) {
     std::memcpy(&out, &outBits, sizeof(out));
     return out;
 }
+#endif  // __F16C__
 
 void packRgbTileClampToNchwFp32(const std::uint8_t* source,
                                 int sourceWidth,
@@ -911,6 +996,29 @@ void packRgbTileClampToNchwFp32(const std::uint8_t* source,
     float* const bPlane = tensor + hw * 2u;
     constexpr float kInv255 = 1.0f / 255.0f;
 
+    // Fast path: tile is fully within the source image — skip per-pixel clamping.
+    // This branch is taken for all interior tiles and enables auto-vectorization.
+    if (tileX >= 0 && tileY >= 0 &&
+        tileX + tileWidth  <= sourceWidth &&
+        tileY + tileHeight <= sourceHeight) {
+        for (int y = 0; y < tileHeight; ++y) {
+            const std::size_t srcRowBase =
+                (static_cast<std::size_t>(tileY + y) * static_cast<std::size_t>(sourceWidth)
+                 + static_cast<std::size_t>(tileX)) * 3u;
+            const std::size_t dstRow = static_cast<std::size_t>(y) *
+                                       static_cast<std::size_t>(tileWidth);
+            for (int x = 0; x < tileWidth; ++x) {
+                const std::size_t srcOff = srcRowBase + static_cast<std::size_t>(x) * 3u;
+                const std::size_t dstOff = dstRow + static_cast<std::size_t>(x);
+                rPlane[dstOff] = static_cast<float>(source[srcOff + 0u]) * kInv255;
+                gPlane[dstOff] = static_cast<float>(source[srcOff + 1u]) * kInv255;
+                bPlane[dstOff] = static_cast<float>(source[srcOff + 2u]) * kInv255;
+            }
+        }
+        return;
+    }
+
+    // Slow path: border tile, clamp coordinates to image edges.
     for (int y = 0; y < tileHeight; ++y) {
         const int srcY = std::clamp(tileY + y, 0, sourceHeight - 1);
         const std::size_t dstRow = static_cast<std::size_t>(y) *
@@ -943,6 +1051,28 @@ void packRgbTileClampToNchwFp16(const std::uint8_t* source,
     std::uint16_t* const bPlane = tensor + hw * 2u;
     constexpr float kInv255 = 1.0f / 255.0f;
 
+    // Fast path: tile is fully within the source image — skip per-pixel clamping.
+    if (tileX >= 0 && tileY >= 0 &&
+        tileX + tileWidth  <= sourceWidth &&
+        tileY + tileHeight <= sourceHeight) {
+        for (int y = 0; y < tileHeight; ++y) {
+            const std::size_t srcRowBase =
+                (static_cast<std::size_t>(tileY + y) * static_cast<std::size_t>(sourceWidth)
+                 + static_cast<std::size_t>(tileX)) * 3u;
+            const std::size_t dstRow = static_cast<std::size_t>(y) *
+                                       static_cast<std::size_t>(tileWidth);
+            for (int x = 0; x < tileWidth; ++x) {
+                const std::size_t srcOff = srcRowBase + static_cast<std::size_t>(x) * 3u;
+                const std::size_t dstOff = dstRow + static_cast<std::size_t>(x);
+                rPlane[dstOff] = floatToHalfBitsLocal(static_cast<float>(source[srcOff + 0u]) * kInv255);
+                gPlane[dstOff] = floatToHalfBitsLocal(static_cast<float>(source[srcOff + 1u]) * kInv255);
+                bPlane[dstOff] = floatToHalfBitsLocal(static_cast<float>(source[srcOff + 2u]) * kInv255);
+            }
+        }
+        return;
+    }
+
+    // Slow path: border tile.
     for (int y = 0; y < tileHeight; ++y) {
         const int srcY = std::clamp(tileY + y, 0, sourceHeight - 1);
         const std::size_t dstRow = static_cast<std::size_t>(y) *
@@ -1139,6 +1269,9 @@ struct ModelProgram {
     bool sourceIsMxr = false;
     int compiledInputWidth = 0;
     int compiledInputHeight = 0;
+    std::mutex evalMutex;
+    bool warmupComplete = false;
+    obs::ArtifactManifestFields runtimeFields;
 };
 
 struct MiGraphXBackend::Impl {
@@ -1146,8 +1279,10 @@ struct MiGraphXBackend::Impl {
     int            deviceIdx   = 0;
     CompileOptions opts;
     std::mutex     mtx;
-    std::unordered_map<std::string, ModelProgram> programs;
+    std::unordered_map<std::string, std::shared_ptr<ModelProgram>> programs;
     std::unordered_map<std::string, std::string> loadFailures;
+    ModelManager    modelManager;
+    InteropBridge   interopBridge;
 
     // ── buildContracts ──────────────────────────────────────────
     // Construct TensorContracts from MiGraphX parameter/output shapes.
@@ -1189,8 +1324,6 @@ struct MiGraphXBackend::Impl {
                      bool preferredPathExplicit = false,
                      std::optional<std::string> calibrationVideoPath = std::nullopt,
                      int compileBatch = 1) {
-        ModelManager mgr;
-
         std::string sourcePath;
         bool sourceIsMxr = true;
         const bool needFrameSpecificArtifact = inputWidth.has_value() && inputHeight.has_value();
@@ -1215,7 +1348,7 @@ struct MiGraphXBackend::Impl {
         auto tryResolveOrCompile = [&](std::optional<std::int64_t> iw,
                                        std::optional<std::int64_t> ih) -> bool {
             std::string compileError;
-            const auto compiled = mgr.autoCompileForInference(
+            const auto compiled = modelManager.autoCompileForInference(
                 modelId, compileError, iw, ih, modelCompilePrecision(opts.precision),
                 compileBatch, calibrationVideoPath);
             if (compiled.has_value() && normalizeExtLower(*compiled) == ".mxr") {
@@ -1251,7 +1384,7 @@ struct MiGraphXBackend::Impl {
         }
 
         if (sourcePath.empty() && !needFrameSpecificArtifact) {
-            const auto bestPath = mgr.bestPathForModel(modelId);
+            const auto bestPath = modelManager.bestPathForModel(modelId);
             if (bestPath.has_value() && normalizeExtLower(*bestPath) == ".mxr") {
                 sourcePath = *bestPath;
             }
@@ -1274,8 +1407,9 @@ struct MiGraphXBackend::Impl {
         const std::string key =
             loadFailureKey(modelId, inputWidth, inputHeight) + "|" + sourcePath;
         if (auto pit = programs.find(modelId); pit != programs.end()) {
-            if (pit->second.sourcePath == sourcePath &&
-                pit->second.sourceIsMxr == sourceIsMxr) {
+            if (pit->second != nullptr &&
+                pit->second->sourcePath == sourcePath &&
+                pit->second->sourceIsMxr == sourceIsMxr) {
                 return true;
             }
             programs.erase(pit);
@@ -1294,13 +1428,15 @@ struct MiGraphXBackend::Impl {
 
         AVE_ROCTX_RANGE("migraphx:load");
         try {
-            ModelProgram mp;
-            mp.sourcePath = sourcePath;
-            mp.sourceIsMxr = sourceIsMxr;
+            auto mp = std::make_shared<ModelProgram>();
+            mp->sourcePath = sourcePath;
+            mp->sourceIsMxr = sourceIsMxr;
+            mp->runtimeFields = buildManifestFields(sourcePath, opts);
+            obs::logMiGraphXEnvironment(mp->runtimeFields, "runtime-load", sourcePath, "pending");
 
-            mp.prog = migraphx::load(sourcePath.c_str());
+            mp->prog = migraphx::load(sourcePath.c_str());
 
-            const auto outShapes = mp.prog.get_output_shapes();
+            const auto outShapes = mp->prog.get_output_shapes();
             if (outShapes.empty()) {
                 const auto ie = InferenceError::runtimeFailure(
                     "program::get_output_shapes() returned empty for model '"
@@ -1311,9 +1447,9 @@ struct MiGraphXBackend::Impl {
                 return rememberFailure(ie.format());
             }
 
-            const auto parameterShapes = mp.prog.get_parameter_shapes();
-            mp.inputContracts  = buildContracts(parameterShapes, "input");
-            if (mp.inputContracts.empty()) {
+            const auto parameterShapes = mp->prog.get_parameter_shapes();
+            mp->inputContracts  = buildContracts(parameterShapes, "input");
+            if (mp->inputContracts.empty()) {
                 const auto ie = InferenceError::modelIncompatible(
                     "Model '" + modelId + "' has no usable input tensors.",
                     "Internal '#output' placeholders were filtered from program parameters.");
@@ -1321,12 +1457,12 @@ struct MiGraphXBackend::Impl {
                 AVE_ROCTX_RANGE_END();
                 return rememberFailure(ie.format());
             }
-            mp.inputShapes.reserve(mp.inputContracts.size());
-            for (const auto& contract : mp.inputContracts) {
-                mp.inputShapes.push_back(parameterShapes[contract.name.c_str()]);
+            mp->inputShapes.reserve(mp->inputContracts.size());
+            for (const auto& contract : mp->inputContracts) {
+                mp->inputShapes.push_back(parameterShapes[contract.name.c_str()]);
             }
 
-            mp.outputContracts.clear();
+            mp->outputContracts.clear();
             for (std::size_t i = 0; i < outShapes.size(); ++i) {
                 TensorContract oc;
                 oc.name        = "output_" + std::to_string(i);
@@ -1339,16 +1475,16 @@ struct MiGraphXBackend::Impl {
                 if (oc.layout == TensorLayout::Unknown) {
                     oc.layout = TensorLayout::NCHW;
                 }
-                mp.outputContracts.push_back(std::move(oc));
+                mp->outputContracts.push_back(std::move(oc));
             }
 
             std::cout << "[migraphx] loaded model='" << modelId
                       << "' source='" << sourcePath
                       << "' format=" << (sourceIsMxr ? "mxr" : "onnx") << "\n";
-            for (const auto& c : mp.inputContracts) {
+            for (const auto& c : mp->inputContracts) {
                 std::cout << "  in:  " << c.format() << '\n';
             }
-            for (const auto& c : mp.outputContracts) {
+            for (const auto& c : mp->outputContracts) {
                 std::cout << "  out: " << c.format() << '\n';
             }
             std::cout << "  compile_opts: " << opts.format() << '\n';
@@ -1379,16 +1515,23 @@ struct MiGraphXBackend::Impl {
                       const void*&       outputData,
                       std::size_t&       outputElements,
                       TensorDtype&       outputDtype,
-                      std::string&       error) {
-        auto it = programs.find(modelId);
-        if (it == programs.end()) {
-            error = InferenceError::runtimeFailure(
-                "Model not loaded: " + modelId).format();
-            return false;
+                      std::string&       error,
+                      bool               finishAfterEval = true) {
+        std::shared_ptr<ModelProgram> mp;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            const auto it = programs.find(modelId);
+            if (it == programs.end() || it->second == nullptr) {
+                error = InferenceError::runtimeFailure(
+                    "Model not loaded: " + modelId).format();
+                return false;
+            }
+            mp = it->second;
         }
-        auto& mp = it->second;
 
-        if (mp.inputContracts.empty()) {
+        std::lock_guard<std::mutex> evalLock(mp->evalMutex);
+
+        if (mp->inputContracts.empty()) {
             error = InferenceError::runtimeFailure(
                 "Model '" + modelId + "' has no input parameters.").format();
             return false;
@@ -1396,8 +1539,8 @@ struct MiGraphXBackend::Impl {
 
         std::size_t contractIdx = 0;
         bool matchedByElements = false;
-        for (std::size_t i = 0; i < mp.inputContracts.size(); ++i) {
-            const std::int64_t expected = mp.inputContracts[i].shape.elements();
+        for (std::size_t i = 0; i < mp->inputContracts.size(); ++i) {
+            const std::int64_t expected = mp->inputContracts[i].shape.elements();
             if (expected > 0 && static_cast<std::size_t>(expected) == inputElements) {
                 contractIdx = i;
                 matchedByElements = true;
@@ -1405,15 +1548,15 @@ struct MiGraphXBackend::Impl {
             }
         }
         if (!matchedByElements) {
-            for (std::size_t i = 0; i < mp.inputContracts.size(); ++i) {
-                if (mp.inputContracts[i].name == "input") {
+            for (std::size_t i = 0; i < mp->inputContracts.size(); ++i) {
+                if (mp->inputContracts[i].name == "input") {
                     contractIdx = i;
                     break;
                 }
             }
         }
 
-        const auto& contract = mp.inputContracts[contractIdx];
+        const auto& contract = mp->inputContracts[contractIdx];
         const auto& inName   = contract.name;
 
         if (contract.dtype != inputDtype) {
@@ -1441,7 +1584,7 @@ struct MiGraphXBackend::Impl {
         // nodes directly into the program.  eval() therefore expects raw
         // CPU RAM pointers — it handles the H2D/D2H transfers internally.
         try {
-            const auto& inShape = mp.inputShapes[contractIdx];
+            const auto& inShape = mp->inputShapes[contractIdx];
 
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
             migraphx::argument inArg(inShape, const_cast<void*>(
@@ -1452,9 +1595,11 @@ struct MiGraphXBackend::Impl {
 
             // ── Eval ─────────────────────────────────────────────
             AVE_ROCTX_RANGE("migraphx:eval");
-            const auto results = mp.prog.eval(pp);
+            const auto results = mp->prog.eval(pp);
             AVE_ROCTX_RANGE_END();
-            mp.prog.experimental_get_context().finish();
+            if (finishAfterEval) {
+                mp->prog.experimental_get_context().finish();
+            }
 
             // ── G4: Assert output shapes per frame ───────────────
             if (results.empty()) {
@@ -1463,13 +1608,13 @@ struct MiGraphXBackend::Impl {
                 return false;
             }
             const auto& outShape = results[0].get_shape();
-            if (!mp.outputContracts.empty()) {
+            if (!mp->outputContracts.empty()) {
                 const auto expectedElems = static_cast<std::size_t>(
-                    mp.outputContracts[0].shape.elements());
+                    mp->outputContracts[0].shape.elements());
                 if (outShape.elements() != expectedElems) {
                     obs::logTensorContractViolation(
                         "MiGraphXBackend::runInference (output gate)",
-                        mp.outputContracts[0].format(),
+                        mp->outputContracts[0].format(),
                         "actual elements=" + std::to_string(outShape.elements()));
                     error = InferenceError::runtimeFailure(
                         "Output shape mismatch for '" + modelId + "': expected "
@@ -1486,8 +1631,8 @@ struct MiGraphXBackend::Impl {
             // read the buffer directly without an extra host-side copy.
             outputElements = outShape.elements();
             outputDtype = mapMiGraphXType(outShape.type());
-            mp.lastResults = std::move(results);
-            outputData = (*mp.lastResults)[0].data();
+            mp->lastResults = std::move(results);
+            outputData = (*mp->lastResults)[0].data();
 
         } catch (const std::exception& ex) {
             error = InferenceError::runtimeFailure(
@@ -1593,6 +1738,7 @@ bool MiGraphXBackend::initialize(std::string& error) {
     // ── G6: Log version tuple and MIGRAPHX_* env vars ───────────
     obs::logVersionTuple();
     obs::logMiGraphXEnvironment();
+    impl_->interopBridge.logConfig();
 
     std::cout << "[backend] MiGraphX initialised on device " << impl_->deviceIdx
               << " — compile options: " << impl_->opts.format() << std::endl;
@@ -1650,7 +1796,7 @@ MiGraphXBackend::inputContracts(const std::string& modelId) const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
 #ifdef AVE_HAVE_MIGRAPHX
     const auto it = impl_->programs.find(modelId);
-    if (it != impl_->programs.end()) { return it->second.inputContracts; }
+    if (it != impl_->programs.end() && it->second != nullptr) { return it->second->inputContracts; }
 #else
     const auto it = impl_->inputContracts_.find(modelId);
     if (it != impl_->inputContracts_.end()) { return it->second; }
@@ -1663,7 +1809,7 @@ MiGraphXBackend::outputContracts(const std::string& modelId) const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
 #ifdef AVE_HAVE_MIGRAPHX
     const auto it = impl_->programs.find(modelId);
-    if (it != impl_->programs.end()) { return it->second.outputContracts; }
+    if (it != impl_->programs.end() && it->second != nullptr) { return it->second->outputContracts; }
 #else
     const auto it = impl_->outputContracts_.find(modelId);
     if (it != impl_->outputContracts_.end()) { return it->second; }
@@ -1840,8 +1986,42 @@ StageResult MiGraphXBackend::processVideoFile(
         return deferToFfmpeg("Invalid tile configuration: " + error);
     }
     if (!tileConfig.batchExplicit) {
-        tileConfig.batch = chooseAdaptiveTileBatch(
+        const int desiredBatch = chooseAdaptiveTileBatch(
             inW, inH, tileConfig.width, tileConfig.height, tileConfig.overlap);
+        tileConfig.batch = desiredBatch;
+        const auto compilePrecision = modelCompilePrecision(impl_->opts.precision);
+        std::vector<int> candidateBatches = {1, 2, 4, 8, 12, 16, desiredBatch};
+        std::sort(candidateBatches.begin(), candidateBatches.end());
+        candidateBatches.erase(
+            std::unique(candidateBatches.begin(), candidateBatches.end()),
+            candidateBatches.end());
+        std::stable_sort(candidateBatches.begin(), candidateBatches.end(),
+                         [desiredBatch](int lhs, int rhs) {
+                             const int lhsDelta = std::abs(lhs - desiredBatch);
+                             const int rhsDelta = std::abs(rhs - desiredBatch);
+                             if (lhsDelta != rhsDelta) {
+                                 return lhsDelta < rhsDelta;
+                             }
+                             return lhs > rhs;
+                         });
+        for (const int candidateBatch : candidateBatches) {
+            std::string validationDetail;
+            const auto validatedArtifact = impl_->modelManager.validatedCompiledArtifactPath(
+                modelId, compilePrecision,
+                static_cast<std::int64_t>(inW),
+                static_cast<std::int64_t>(inH),
+                candidateBatch,
+                &validationDetail);
+            if (validatedArtifact.has_value()) {
+                tileConfig.batch = candidateBatch;
+                if (candidateBatch != desiredBatch) {
+                    std::cout << "[migraphx] reusing validated tile batch "
+                              << candidateBatch << " instead of heuristic batch "
+                              << desiredBatch << " for '" << modelId << "'." << std::endl;
+                }
+                break;
+            }
+        }
         std::cout << "[migraphx] adaptive tile batch selected: "
                   << tileConfig.batch << std::endl;
     }
@@ -1862,25 +2042,27 @@ StageResult MiGraphXBackend::processVideoFile(
     // Verify input/output contracts
     TensorContract inputContract;
     TensorContract outputContract;
+    std::shared_ptr<ModelProgram> loadedProgram;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         const auto pit = impl_->programs.find(modelId);
-        if (pit == impl_->programs.end()) {
+        if (pit == impl_->programs.end() || pit->second == nullptr) {
             error = InferenceError::runtimeFailure(
                 "Program unexpectedly missing after successful load: " + modelId).format();
             return StageResult::Error;
         }
-        if (pit->second.inputContracts.empty()) {
+        loadedProgram = pit->second;
+        if (loadedProgram->inputContracts.empty()) {
             return deferToFfmpeg("Model has no input contracts.");
         }
-        inputContract = pit->second.inputContracts.front();
-        for (const auto& c : pit->second.inputContracts) {
+        inputContract = loadedProgram->inputContracts.front();
+        for (const auto& c : loadedProgram->inputContracts) {
             if (c.name == "input") { inputContract = c; break; }
         }
-        if (pit->second.outputContracts.empty()) {
+        if (loadedProgram->outputContracts.empty()) {
             return deferToFfmpeg("Model has no output contracts.");
         }
-        outputContract = pit->second.outputContracts.front();
+        outputContract = loadedProgram->outputContracts.front();
     }
 
     int modelInW = 0, modelInH = 0, modelInC = 0;
@@ -2101,9 +2283,57 @@ StageResult MiGraphXBackend::processVideoFile(
     std::vector<float> batchedInputTensorFp32;
     std::vector<std::uint16_t> batchedInputTensorFp16;
     if (inputContract.dtype == TensorDtype::Fp32) {
-        batchedInputTensorFp32.reserve(batchedInputTensorElements);
+        batchedInputTensorFp32.resize(batchedInputTensorElements);
     } else {
-        batchedInputTensorFp16.reserve(batchedInputTensorElements);
+        batchedInputTensorFp16.resize(batchedInputTensorElements);
+    }
+
+    if (loadedProgram != nullptr && !loadedProgram->warmupComplete) {
+        std::cout << "[migraphx] warming compiled program for '" << modelId
+                  << "' before first frame." << std::endl;
+        obs::logMiGraphXEnvironment(
+            loadedProgram->runtimeFields,
+            "runtime-warmup",
+            loadedProgram->sourcePath,
+            "start");
+
+        const void* warmupOutputData = nullptr;
+        std::size_t warmupOutputElements = 0;
+        TensorDtype warmupOutputDtype = TensorDtype::Unknown;
+        std::string warmupError;
+        const void* warmupInputData = nullptr;
+        std::size_t warmupInputElements = batchedInputTensorElements;
+        if (inputContract.dtype == TensorDtype::Fp16) {
+            std::fill(batchedInputTensorFp16.begin(), batchedInputTensorFp16.end(), 0u);
+            warmupInputData = batchedInputTensorFp16.data();
+            warmupInputElements = batchedInputTensorFp16.size();
+        } else {
+            std::fill(batchedInputTensorFp32.begin(), batchedInputTensorFp32.end(), 0.0f);
+            warmupInputData = batchedInputTensorFp32.data();
+            warmupInputElements = batchedInputTensorFp32.size();
+        }
+
+        if (!impl_->runInference(modelId, warmupInputData, warmupInputElements,
+                                 inputContract.dtype, warmupOutputData,
+                                 warmupOutputElements, warmupOutputDtype,
+                                 warmupError, false)) {
+            pclose(decodePipe);
+            const int encodeStatus = pclose(encodePipe);
+            AVE_ROCTX_RANGE_END();
+            error = formatEncodeFailure("MiGraphX warmup failed: " + warmupError, encodeStatus);
+            cleanupEncodeLog();
+            return StageResult::Error;
+        }
+        {
+            std::lock_guard<std::mutex> evalLock(loadedProgram->evalMutex);
+            loadedProgram->prog.experimental_get_context().finish();
+            loadedProgram->warmupComplete = true;
+        }
+        obs::logMiGraphXEnvironment(
+            loadedProgram->runtimeFields,
+            "runtime-warmup",
+            loadedProgram->sourcePath,
+            "complete");
     }
     using Clock = std::chrono::steady_clock;
     std::chrono::nanoseconds readTime{0};
@@ -2115,14 +2345,16 @@ StageResult MiGraphXBackend::processVideoFile(
         int frameIdx = 0;
         std::vector<std::uint8_t> pixels;
     };
-    constexpr std::size_t kQueuedEncodeDepth = 2u;
+    constexpr std::size_t kQueuedEncodeDepth = 4u;
     std::mutex encodeQueueMtx;
     std::condition_variable encodeQueueCv;
     std::deque<QueuedFrame> encodeQueue;
+    // Pre-allocate kQueuedEncodeDepth + 1 buffers so the producer thread is
+    // never blocked waiting for a free buffer while the encode queue is full.
     std::deque<std::vector<std::uint8_t>> freeFrameBuffers;
-    freeFrameBuffers.emplace_back(outFrameBytes);
-    freeFrameBuffers.emplace_back(outFrameBytes);
-    freeFrameBuffers.emplace_back(outFrameBytes);
+    for (std::size_t i = 0; i < kQueuedEncodeDepth + 1u; ++i) {
+        freeFrameBuffers.emplace_back(outFrameBytes);
+    }
     bool encodeInputClosed = false;
     bool encodeWriterFailed = false;
     std::string encodeWriterError;
@@ -2287,7 +2519,6 @@ StageResult MiGraphXBackend::processVideoFile(
             const void* inputTensorData = nullptr;
             std::size_t inputTensorElements = batchedInputTensorElements;
             if (inputContract.dtype == TensorDtype::Fp16) {
-                batchedInputTensorFp16.resize(batchedInputTensorElements);
                 for (std::size_t slot = 0; slot < static_cast<std::size_t>(compiledBatch); ++slot) {
                     const std::size_t dispatchIndex =
                         batchStart + std::min(slot, activeTiles - 1u);
@@ -2301,7 +2532,6 @@ StageResult MiGraphXBackend::processVideoFile(
                 inputTensorData = batchedInputTensorFp16.data();
                 inputTensorElements = batchedInputTensorFp16.size();
             } else {
-                batchedInputTensorFp32.resize(batchedInputTensorElements);
                 for (std::size_t slot = 0; slot < static_cast<std::size_t>(compiledBatch); ++slot) {
                     const std::size_t dispatchIndex =
                         batchStart + std::min(slot, activeTiles - 1u);
@@ -2321,16 +2551,13 @@ StageResult MiGraphXBackend::processVideoFile(
             const void* outputTensorData = nullptr;
             std::size_t outputTensorElements = 0;
             TensorDtype outputTensorDtype = TensorDtype::Unknown;
-            {
-                std::lock_guard<std::mutex> lk(impl_->mtx);
-                if (!impl_->runInference(modelId, inputTensorData, inputTensorElements,
-                                         inputContract.dtype, outputTensorData,
-                                         outputTensorElements, outputTensorDtype, error)) {
-                    std::cerr << "[migraphx] Frame " << frameIdx
-                              << " tile batch starting at " << batchStart
-                              << " inference FAILED: " << error << std::endl;
-                    return abortProcessing(error);
-                }
+            if (!impl_->runInference(modelId, inputTensorData, inputTensorElements,
+                                     inputContract.dtype, outputTensorData,
+                                     outputTensorElements, outputTensorDtype, error)) {
+                std::cerr << "[migraphx] Frame " << frameIdx
+                          << " tile batch starting at " << batchStart
+                          << " inference FAILED: " << error << std::endl;
+                return abortProcessing(error);
             }
             inferenceTime += Clock::now() - inferenceStart;
 

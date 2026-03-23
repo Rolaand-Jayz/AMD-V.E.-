@@ -673,8 +673,7 @@ StageResult VulkanComputeBackend::processVideoFile(
         std::string& error,
         const ProcessVideoOptions& opts) {
 #ifdef AVE_HAVE_VULKAN
-    const char* glslSrc = shaderSourceForStage(stage.kind);
-    if (!glslSrc) {
+    if (!shaderSourceForStage(stage.kind)) {
         return StageResult::Deferred;
     }
 
@@ -747,61 +746,42 @@ StageResult VulkanComputeBackend::processVideoFile(
               << ": " << inW << "x" << inH << " → " << outW << "x" << outH
               << " param=" << param << std::endl;
 
-    // Open FFmpeg decode pipe
-    std::string decodeTimeLim;
-    int64_t maxFrames = 0;  // 0 = no limit
-    if (opts.previewDurationSec > 0.0) {
-        std::ostringstream tlss;
-        tlss << " -t " << opts.previewDurationSec;
-        decodeTimeLim = tlss.str();
-        // Estimate frame limit from duration × fps
-        double fpsNum = probe.fps > 0.0 ? probe.fps : 30.0;
-        maxFrames = static_cast<int64_t>(opts.previewDurationSec * fpsNum + 0.5);
-    }
-    const std::string decodeCmd =
-        "ffmpeg -hide_banner -loglevel error" + decodeTimeLim +
-        " -i \"" + inputVideo + "\" "
-        "-f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null";
-    FILE* decodePipe = popen(decodeCmd.c_str(), "r");
-    if (!decodePipe) {
-        error = "Failed to open FFmpeg decode pipe";
+    frame_io::VulkanVideoReader reader;
+    if (!reader.open(inputVideo, error)) {
         return StageResult::Error;
     }
 
-    // Open FFmpeg encode pipe
-    std::ostringstream encodeOss;
-    encodeOss << "ffmpeg -y -hide_banner -loglevel error "
-              << "-f rawvideo -pix_fmt rgb24 "
-              << "-s " << outW << "x" << outH << " "
-              << "-r " << probe.fps << " "
-              << "-i pipe:0 "
-              << "-i \"" << inputVideo << "\" "
-              << "-map 0:v:0 -map 1:a? "
-              << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
-              << "\"" << outputVideo << "\" 2>/dev/null";
-    FILE* encodePipe = popen(encodeOss.str().c_str(), "w");
-    if (!encodePipe) {
-        pclose(decodePipe);
-        error = "Failed to open FFmpeg encode pipe";
+    frame_io::VulkanVideoWriter writer;
+    AVRational fps = reader.frameRate();
+    if (fps.num <= 0 || fps.den <= 0) {
+        fps = AVRational{static_cast<int>(std::round(probe.fps > 0.0 ? probe.fps : 30.0)), 1};
+    }
+    if (!writer.open(outputVideo, outW, outH, fps, error)) {
+        reader.close();
         return StageResult::Error;
     }
 
-    const std::size_t inFrameBytes  = static_cast<std::size_t>(inW) *
-                                       static_cast<std::size_t>(inH) * 3u;
-    const std::size_t outFrameBytes = static_cast<std::size_t>(outW) *
-                                       static_cast<std::size_t>(outH) * 3u;
-    const std::size_t inFloats  = static_cast<std::size_t>(inW) *
-                                   static_cast<std::size_t>(inH) * 3u;
-    const std::size_t outFloats = static_cast<std::size_t>(outW) *
-                                   static_cast<std::size_t>(outH) * 3u;
+    const std::size_t inFrameBytes  = static_cast<std::size_t>(inW) * static_cast<std::size_t>(inH) * 3u;
+    const std::size_t outFrameBytes = static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u;
+    const std::size_t inFloats  = static_cast<std::size_t>(inW) * static_cast<std::size_t>(inH) * 3u;
+    const std::size_t outFloats = static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u;
+
+    const int64_t maxFrames = opts.previewDurationSec > 0.0
+        ? static_cast<int64_t>(opts.previewDurationSec * (probe.fps > 0.0 ? probe.fps : 30.0) + 0.5)
+        : 0;
 
     std::vector<uint8_t> rgbIn(inFrameBytes);
-    std::vector<float> tensorIn;
+    std::vector<uint8_t> rgbOut(outFrameBytes);
+    std::vector<float> tensorIn(inFloats);
     std::vector<float> tensorOut(outFloats);
     int frameIdx = 0;
     bool cancelled = false;
 
     while (true) {
+        if (maxFrames > 0 && frameIdx >= maxFrames) {
+            break;
+        }
+
         // ── Cancel / Pause check ────────────────────────────────
         if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
             std::cout << "[vulkan-compute] Cancelled at frame " << frameIdx << std::endl;
@@ -817,27 +797,26 @@ StageResult VulkanComputeBackend::processVideoFile(
         }
         if (cancelled) break;
 
-        // Read one frame
-        std::size_t totalRead = 0;
-        while (totalRead < inFrameBytes) {
-            const std::size_t n = std::fread(rgbIn.data() + totalRead, 1,
-                                              inFrameBytes - totalRead, decodePipe);
-            if (n == 0) break;
-            totalRead += n;
+        AVFrame* inputFrame = nullptr;
+        if (!reader.readFrame(inputFrame, error)) {
+            writer.close();
+            reader.close();
+            return StageResult::Error;
         }
-        if (totalRead == 0) break;
-        if (totalRead != inFrameBytes) {
-            std::cerr << "[vulkan-compute] Partial frame " << frameIdx
-                      << " — skipping." << std::endl;
+        if (inputFrame == nullptr) {
             break;
         }
 
-        // Convert RGB24 → float [0,1]
-        tensorIn.resize(inFloats);
-        for (std::size_t i = 0; i < inFrameBytes; ++i)
-            tensorIn[i] = static_cast<float>(rgbIn[i]) / 255.0f;
+        if (!frame_io::avFrameToRgb24(inputFrame, inW, inH, rgbIn, error)) {
+            writer.close();
+            reader.close();
+            return StageResult::Error;
+        }
 
-        // Run Vulkan compute
+        for (std::size_t i = 0; i < inFrameBytes; ++i) {
+            tensorIn[i] = static_cast<float>(rgbIn[i]) / 255.0f;
+        }
+
         {
             std::lock_guard<std::mutex> lk(impl_->mtx);
             if (!impl_->processFrame(pipeline,
@@ -846,24 +825,28 @@ StageResult VulkanComputeBackend::processVideoFile(
                                       inW, inH, param, error)) {
                 std::cerr << "[vulkan-compute] Frame " << frameIdx
                           << " compute FAILED: " << error << std::endl;
-                pclose(decodePipe);
-                pclose(encodePipe);
+                writer.close();
+                reader.close();
                 return StageResult::Error;
             }
         }
 
-        // Convert float → RGB24 and write to encode pipe
-        std::vector<uint8_t> rgbOut(outFrameBytes);
         for (std::size_t i = 0; i < outFrameBytes; ++i) {
             float v = std::clamp(tensorOut[i], 0.0f, 1.0f);
             rgbOut[i] = static_cast<uint8_t>(std::round(v * 255.0f));
         }
 
-        const std::size_t written = std::fwrite(rgbOut.data(), 1, outFrameBytes, encodePipe);
-        if (written != outFrameBytes) {
-            error = "Encode pipe write failed at frame " + std::to_string(frameIdx);
-            pclose(decodePipe);
-            pclose(encodePipe);
+        AVFrame* outputFrame = frame_io::rgb24ToAvFrame(rgbOut.data(), outW, outH, error);
+        if (outputFrame == nullptr) {
+            writer.close();
+            reader.close();
+            return StageResult::Error;
+        }
+        const bool writeOk = writer.writeFrame(outputFrame, error);
+        av_frame_free(&outputFrame);
+        if (!writeOk) {
+            writer.close();
+            reader.close();
             return StageResult::Error;
         }
 
@@ -895,8 +878,8 @@ StageResult VulkanComputeBackend::processVideoFile(
         }
     }
 
-    pclose(decodePipe);
-    const int encRet = pclose(encodePipe);
+    writer.close();
+    reader.close();
 
     if (cancelled) {
         error = "Processing cancelled by user at frame " + std::to_string(frameIdx);
@@ -904,10 +887,6 @@ StageResult VulkanComputeBackend::processVideoFile(
     }
     if (frameIdx == 0) {
         error = "No frames decoded from " + inputVideo;
-        return StageResult::Error;
-    }
-    if (encRet != 0) {
-        error = "FFmpeg encode pipe exited with code " + std::to_string(encRet);
         return StageResult::Error;
     }
 

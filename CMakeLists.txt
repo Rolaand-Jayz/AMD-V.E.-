@@ -175,6 +175,18 @@ function(ave_add_warnings target)
 endfunction()
 
 # ─────────────────────────────────────────────────────────────────
+# Performance optimisation flags helper
+# Enables native CPU ISA (AVX2, F16C, etc.) for the hot inference
+# and pack/blit paths. Only applied to GCC/Clang on x86-family
+# targets to keep cross-compilation and MSVC builds unaffected.
+# ─────────────────────────────────────────────────────────────────
+function(ave_add_native_optimizations target)
+    if(NOT MSVC AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
+        target_compile_options(${target} PRIVATE -march=native -O3)
+    endif()
+endfunction()
+
+# ─────────────────────────────────────────────────────────────────
 # ave_core — static library
 # ─────────────────────────────────────────────────────────────────
 add_library(ave_core
@@ -209,6 +221,7 @@ add_library(ave_core
 target_include_directories(ave_core PUBLIC include ${FFMPEG_INCLUDE_DIRS})
 target_compile_definitions(ave_core PUBLIC ${AVE_COMPILE_DEFS})
 ave_add_warnings(ave_core)
+ave_add_native_optimizations(ave_core)
 
 # Link optional libraries to ave_core
 target_link_libraries(ave_core PUBLIC ${FFMPEG_LIBRARIES})

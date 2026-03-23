@@ -1,0 +1,52 @@
+[  2%] Building CXX object CMakeFiles/ave_core.dir/src/backend.cpp.o
+[  2%] Built target planner_tests_autogen_timestamp_deps
+[  4%] Building CXX object CMakeFiles/ave_core.dir/src/app_settings.cpp.o
+[  6%] Building CXX object CMakeFiles/ave_core.dir/src/backend_manager.cpp.o
+[  9%] Building CXX object CMakeFiles/ave_core.dir/src/ffmpeg_runner.cpp.o
+[ 11%] Building CXX object CMakeFiles/ave_core.dir/src/cli.cpp.o
+[ 13%] Building CXX object CMakeFiles/ave_core.dir/src/error_taxonomy.cpp.o
+[ 15%] Building CXX object CMakeFiles/ave_core.dir/src/filter_catalog.cpp.o
+[ 18%] Building CXX object CMakeFiles/ave_core.dir/src/interop_bridge.cpp.o
+[ 20%] Building CXX object CMakeFiles/ave_core.dir/src/frame_io.cpp.o
+[ 22%] Building CXX object CMakeFiles/ave_core.dir/src/model_catalog.cpp.o
+[ 25%] Building CXX object CMakeFiles/ave_core.dir/src/model_manager.cpp.o
+[ 27%] Building CXX object CMakeFiles/ave_core.dir/src/frame_io_vulkan.cpp.o
+[ 29%] Building CXX object CMakeFiles/ave_core.dir/src/planner.cpp.o
+[ 31%] Building CXX object CMakeFiles/ave_core.dir/src/observability.cpp.o
+[ 34%] Building CXX object CMakeFiles/ave_core.dir/src/stage.cpp.o
+[ 36%] Building CXX object CMakeFiles/ave_core.dir/src/scene_detector.cpp.o
+[ 38%] Building CXX object CMakeFiles/ave_core.dir/src/tensor_contract.cpp.o
+[ 40%] Building CXX object CMakeFiles/ave_core.dir/src/types.cpp.o
+[ 43%] Building CXX object CMakeFiles/ave_core.dir/src/vulkan_runtime.cpp.o
+[ 45%] Building CXX object CMakeFiles/ave_core.dir/src/video_processor.cpp.o
+[ 47%] Building CXX object CMakeFiles/ave_core.dir/src/backends/glsl_shader_backend.cpp.o
+[ 50%] Building CXX object CMakeFiles/ave_core.dir/src/backends/ncnn_vulkan_backend.cpp.o
+[ 52%] Automatic MOC and UIC for target planner_tests
+[ 54%] Building CXX object CMakeFiles/ave_core.dir/src/backends/vapoursynth_backend.cpp.o
+[ 56%] Building CXX object CMakeFiles/ave_core.dir/src/backends/migraphx_backend.cpp.o
+[ 59%] Building CXX object CMakeFiles/ave_core.dir/src/backends/vulkan_compute_backend.cpp.o
+[ 59%] Built target planner_tests_autogen
+[ 61%] Building CXX object CMakeFiles/planner_tests.dir/planner_tests_autogen/mocs_compilation.cpp.o
+[ 63%] Building CXX object CMakeFiles/planner_tests.dir/src/stage.cpp.o
+[ 65%] Building CXX object CMakeFiles/planner_tests.dir/src/planner.cpp.o
+[ 68%] Building CXX object CMakeFiles/planner_tests.dir/src/types.cpp.o
+[ 70%] Building CXX object CMakeFiles/planner_tests.dir/tests/planner_tests.cpp.o
+[ 72%] Linking CXX executable planner_tests
+[ 72%] Built target planner_tests
+[ 75%] Linking CXX static library libave_core.a
+[ 75%] Built target ave_core
+[ 75%] Built target ave_gui_autogen_timestamp_deps
+[ 77%] Building CXX object CMakeFiles/ave.dir/src/main.cpp.o
+[ 79%] Automatic MOC and UIC for target ave_gui
+[ 79%] Built target ave_gui_autogen
+[ 81%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/model_manager_dialog.cpp.o
+[ 84%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/main_window.cpp.o
+[ 86%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/settings_dialog.cpp.o
+[ 88%] Building CXX object CMakeFiles/ave_gui.dir/ave_gui_autogen/mocs_compilation.cpp.o
+[ 90%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/filter_browser.cpp.o
+[ 93%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/main_gui.cpp.o
+[ 95%] Building CXX object CMakeFiles/ave_gui.dir/src/gui/toggle_switch.cpp.o
+[ 97%] Linking CXX executable ave
+[ 97%] Built target ave
+[100%] Linking CXX executable ave_gui
+[100%] Built target ave_gui

@@ -25,6 +25,14 @@ namespace obs {
 
 namespace {
 
+std::string envOrDefault(const char* name, const char* fallback = "") {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return std::string(fallback);
+    }
+    return std::string(value);
+}
+
 // Run a shell command and capture its first line of stdout.
 std::string captureFirstLine(const std::string& cmd) {
     FILE* p = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c)
@@ -128,6 +136,14 @@ void logMiGraphXEnvironment() {
         "MIGRAPHX_TRACE_MLIR",
         "MIGRAPHX_ENABLE_NHWC",
         "MIGRAPHX_ENABLE_CK",
+        "MIGRAPHX_PROBLEM_CACHE",
+        "MIOPEN_USER_DB_PATH",
+        "MIOPEN_CUSTOM_CACHE_DIR",
+        "MIOPEN_FIND_MODE",
+        "MIOPEN_COMPILE_PARALLEL_LEVEL",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "AVE_MIGRAPHX_COMPILE_PROFILE",
         nullptr
     };
     std::cout << "[migraphx-env]";
@@ -141,6 +157,36 @@ void logMiGraphXEnvironment() {
     }
     if (!anySet) {
         std::cout << " (no MIGRAPHX_* env vars set – using defaults)";
+    }
+    std::cout << std::endl;
+}
+
+void logMiGraphXEnvironment(const ArtifactManifestFields& effective,
+                            const std::string& phase,
+                            const std::string& artifactPath,
+                            const std::string& warmupStatus) {
+    std::cout << "[migraphx-env] phase=" << phase << '\n'
+              << "  migraphx_version=" << effective.migraphxVersion << '\n'
+              << "  rocm_version=" << effective.rocmVersion << '\n'
+              << "  gpu_gfx_target=" << effective.gpuGfxTarget << '\n'
+              << "  precision=" << effective.precision << '\n'
+              << "  compile_profile=" << effective.compileProfile << '\n'
+              << "  offload_copy=" << effective.offloadCopy << '\n'
+              << "  MIGRAPHX_DISABLE_MLIR=" << effective.disableMlir << '\n'
+              << "  MIGRAPHX_ENABLE_NHWC=" << effective.enableNhwc << '\n'
+              << "  MIGRAPHX_ENABLE_CK=" << effective.enableCk << '\n'
+              << "  MIGRAPHX_PROBLEM_CACHE=" << effective.problemCachePath << '\n'
+              << "  MIOPEN_USER_DB_PATH=" << effective.miopenUserDbPath << '\n'
+              << "  MIOPEN_CUSTOM_CACHE_DIR=" << effective.miopenCustomCacheDir << '\n'
+              << "  MIOPEN_FIND_MODE=" << effective.miopenFindMode << '\n'
+              << "  MIOPEN_COMPILE_PARALLEL_LEVEL=" << effective.miopenCompileParallelLevel << '\n'
+              << "  visible_devices=" << effective.visibleDevices << '\n'
+              << "  runtime_fingerprint=" << effective.runtimeFingerprint;
+    if (!artifactPath.empty()) {
+        std::cout << '\n' << "  artifact_path=" << artifactPath;
+    }
+    if (!warmupStatus.empty()) {
+        std::cout << '\n' << "  warmup_status=" << warmupStatus;
     }
     std::cout << std::endl;
 }
@@ -178,9 +224,17 @@ bool writeArtifactManifest(const std::string&            manifestPath,
         << "onnx_mtime="       << f.onnxMtimeStr     << '\n'
         << "offload_copy="     << f.offloadCopy      << '\n'
         << "precision="        << f.precision        << '\n'
+        << "compile_profile="  << f.compileProfile   << '\n'
         << "disable_mlir="     << f.disableMlir      << '\n'
         << "enable_nhwc="      << f.enableNhwc       << '\n'
-        << "enable_ck="        << f.enableCk         << '\n';
+        << "enable_ck="        << f.enableCk         << '\n'
+        << "problem_cache_path=" << f.problemCachePath << '\n'
+        << "miopen_user_db_path=" << f.miopenUserDbPath << '\n'
+        << "miopen_custom_cache_dir=" << f.miopenCustomCacheDir << '\n'
+        << "miopen_find_mode=" << f.miopenFindMode << '\n'
+        << "miopen_compile_parallel_level=" << f.miopenCompileParallelLevel << '\n'
+        << "visible_devices=" << f.visibleDevices << '\n'
+        << "runtime_fingerprint=" << f.runtimeFingerprint << '\n';
     return true;
 }
 
@@ -224,9 +278,17 @@ bool validateArtifactManifest(const std::string&            manifestPath,
         && check("onnx_mtime",       expected.onnxMtimeStr)
         && check("offload_copy",     expected.offloadCopy)
         && check("precision",        expected.precision)
+        && check("compile_profile",  expected.compileProfile)
         && check("disable_mlir",     expected.disableMlir)
         && check("enable_nhwc",      expected.enableNhwc)
-        && check("enable_ck",        expected.enableCk);
+        && check("enable_ck",        expected.enableCk)
+        && check("problem_cache_path", expected.problemCachePath)
+        && check("miopen_user_db_path", expected.miopenUserDbPath)
+        && check("miopen_custom_cache_dir", expected.miopenCustomCacheDir)
+        && check("miopen_find_mode", expected.miopenFindMode)
+        && check("miopen_compile_parallel_level", expected.miopenCompileParallelLevel)
+        && check("visible_devices", expected.visibleDevices)
+        && check("runtime_fingerprint", expected.runtimeFingerprint);
 }
 
 }  // namespace obs

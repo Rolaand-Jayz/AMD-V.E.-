@@ -1,0 +1,2 @@
+benchmarks/*.mp4 filter=lfs diff=lfs merge=lfs -text
+benchmarks/**/*.mp4 filter=lfs diff=lfs merge=lfs -text

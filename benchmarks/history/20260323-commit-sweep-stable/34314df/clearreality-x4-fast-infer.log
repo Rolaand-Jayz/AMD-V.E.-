@@ -1,0 +1,54 @@
+[plan] Pipeline planned (1 stage): upscale
+[backend-manager] interop-bridge: GPU interop available
+[backend] Selected MiGraphX (ROCm).
+[version] rocm=7.2.0
+[version] migraphx=2.15.0
+[version] vulkan_info=	apiVersion         = 1.4.335
+[version] ffmpeg=ffmpeg version n8.1 Copyright (c) 2000-2026 the FFmpeg developers
+[version] gpu_gfx_target=gfx1100
+[version] kernel=6.19.9-1-cachyos
+[migraphx-env] (no MIGRAPHX_* env vars set – using defaults)
+[backend] MiGraphX initialised on device 0 — compile options: offload_copy=1 precision=fp16
+[backend] ready: MiGraphX (ROCm)
+[progress] Starting enhancement pipeline…
+[model] upscale — model 'clearreality-x4-fast' is available on disk but not yet compiled to .mxr; MiGraphX will resolve/compile the inference artifact.
+[progress] Backend pass 1/1: upscale via MiGraphX (ROCm)
+[pipeline] upscale → deferred to FFmpeg filter chain
+[progress] upscale — complete
+[pipeline] stage summary: 0 AI-processed, 1 deferred to FFmpeg filters
+[progress] Starting FFmpeg encode pipeline…
+[cmd] create-preview-clip: ffmpeg -y -hide_banner -loglevel error -progress - -i "/home/rolaandjayz/Desktop/C++ Video Enhancer/benchmarks/ave_benchmark_960x540_20s.mp4" -t 60 -c:v libx264 -crf 0 -preset ultrafast -c:a copy "/tmp/ave-history-bench-20260323-140842-stable/34314df/ave_ai_job_25889527878078/temp_0.mkv"
+[migraphx] Input: 960x540 fps=30 frames=600
+[auto-compile] Model 'clearreality-x4-fast' already compiled for 192x192: "/home/rolaandjayz/.local/share/ave/models/migraphx/clearreality-x4-fast_192x192_fp16.mxr"
+[migraphx] using frame-size specific .mxr for 'clearreality-x4-fast': /home/rolaandjayz/.local/share/ave/models/migraphx/clearreality-x4-fast_192x192_fp16.mxr (192x192)
+[migraphx] loaded model='clearreality-x4-fast' source='/home/rolaandjayz/.local/share/ave/models/migraphx/clearreality-x4-fast_192x192_fp16.mxr' format=mxr
+  in:  input [1×3×192×192 NCHW fp32]
+  out: output_0 [1×3×768×768 NCHW fp32]
+  compile_opts: offload_copy=1 precision=fp16
+[migraphx] processVideoFile: model='clearreality-x4-fast' input=960x540 output=3840x2160 tile=192x192 overlap=16 scale=4x4 tiles/frame=24 stage=upscale direct_final_encode=on
+[migraphx] Processed 30 frames / 600
+[migraphx] Processed 60 frames / 600
+[migraphx] Processed 90 frames / 600
+[migraphx] Processed 120 frames / 600
+[migraphx] Processed 150 frames / 600
+[migraphx] Processed 180 frames / 600
+[migraphx] Processed 210 frames / 600
+[migraphx] Processed 240 frames / 600
+[migraphx] Processed 270 frames / 600
+[migraphx] Processed 300 frames / 600
+[migraphx] Processed 330 frames / 600
+[migraphx] Processed 360 frames / 600
+[migraphx] Processed 390 frames / 600
+[migraphx] Processed 420 frames / 600
+[migraphx] Processed 450 frames / 600
+[migraphx] Processed 480 frames / 600
+[migraphx] Processed 510 frames / 600
+[migraphx] Processed 540 frames / 600
+[migraphx] Processed 570 frames / 600
+[migraphx] Processed 600 frames / 600
+[migraphx] AI inference complete: 600 frames processed via MiGraphX for stage upscale
+[migraphx] timing: total=39.3898s fps=15.2324 avg_ms/frame read=1.27224 preprocess=2.01567 infer=35.6192 postprocess=17.9545 write=6.18287 direct_final_encode=on
+[ai-pipeline] upscale → AI complete via MiGraphX (ROCm) (direct final encode)
+[ai-pipeline] Final delivery encode completed inside MiGraphX (ROCm); skipping redundant FFmpeg re-encode.
+done.
+WALL 40.091

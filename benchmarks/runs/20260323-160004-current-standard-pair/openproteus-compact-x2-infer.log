@@ -1,0 +1,119 @@
+[plan] Pipeline planned (1 stage): upscale
+[backend-manager] interop-bridge: GPU interop available
+[backend] Selected MiGraphX (ROCm).
+[version] rocm=7.2.0
+[version] migraphx=2.15.0
+[version] vulkan_info=	apiVersion         = 1.4.335
+[version] ffmpeg=ffmpeg version n8.1 Copyright (c) 2000-2026 the FFmpeg developers
+[version] gpu_gfx_target=gfx1100
+[version] kernel=6.19.9-1-cachyos
+[migraphx-env]
+  MIOPEN_FIND_MODE=FAST
+  MIOPEN_COMPILE_PARALLEL_LEVEL=1
+  HIP_VISIBLE_DEVICES=0
+  ROCR_VISIBLE_DEVICES=0
+[interop-bridge] status=gpu-interop
+[interop-bridge] required: VK_KHR_external_memory_fd, VK_KHR_external_semaphore_fd, VK_KHR_synchronization2
+[interop-bridge] handle-type: OPAQUE_FD (same-process preferred)
+[backend] MiGraphX initialised on device 0 — compile options: offload_copy=1 precision=fp16
+[backend] ready: MiGraphX (ROCm)
+[progress] Starting enhancement pipeline…
+[model] upscale — model 'openproteus-compact-x2' is available on disk but not yet compiled to .mxr; MiGraphX will resolve/compile the inference artifact.
+[progress] Backend pass 1/1: upscale via MiGraphX (ROCm)
+[pipeline] upscale → deferred to FFmpeg filter chain
+[progress] upscale — complete
+[pipeline] stage summary: 0 AI-processed, 1 deferred to FFmpeg filters
+[progress] Starting continuous AI/FFmpeg encode session…
+[migraphx] Input: 960x540 fps=30 frames=600
+[migraphx] adaptive tile batch selected: 8
+[auto-compile] Reusing exact artifact: /home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr
+[migraphx] using frame-size specific .mxr for 'openproteus-compact-x2': /home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr (192x192)
+[migraphx-env] phase=runtime-load
+  migraphx_version=unknown
+  rocm_version=7.2.0
+  gpu_gfx_target=gfx1100
+  precision=fp16
+  compile_profile=fast
+  offload_copy=1
+  MIGRAPHX_DISABLE_MLIR=0
+  MIGRAPHX_ENABLE_NHWC=0
+  MIGRAPHX_ENABLE_CK=0
+  MIGRAPHX_PROBLEM_CACHE=
+  MIOPEN_USER_DB_PATH=
+  MIOPEN_CUSTOM_CACHE_DIR=
+  MIOPEN_FIND_MODE=FAST
+  MIOPEN_COMPILE_PARALLEL_LEVEL=1
+  visible_devices=0
+  runtime_fingerprint=3007885397264527580
+  artifact_path=/home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr
+  warmup_status=pending
+[migraphx] loaded model='openproteus-compact-x2' source='/home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr' format=mxr
+  in:  input [8×3×192×192 NCHW fp32]
+  out: output_0 [8×3×384×384 NCHW fp32]
+  compile_opts: offload_copy=1 precision=fp16
+[migraphx] processVideoFile: model='openproteus-compact-x2' input=960x540 output=1920x1080 tile=192x192 overlap=16 batch=8 scale=2x2 tiles/frame=24 batches/frame=3 stage=upscale direct_final_encode=on
+[migraphx] warming compiled program for 'openproteus-compact-x2' before first frame.
+[migraphx-env] phase=runtime-warmup
+  migraphx_version=unknown
+  rocm_version=7.2.0
+  gpu_gfx_target=gfx1100
+  precision=fp16
+  compile_profile=fast
+  offload_copy=1
+  MIGRAPHX_DISABLE_MLIR=0
+  MIGRAPHX_ENABLE_NHWC=0
+  MIGRAPHX_ENABLE_CK=0
+  MIGRAPHX_PROBLEM_CACHE=
+  MIOPEN_USER_DB_PATH=
+  MIOPEN_CUSTOM_CACHE_DIR=
+  MIOPEN_FIND_MODE=FAST
+  MIOPEN_COMPILE_PARALLEL_LEVEL=1
+  visible_devices=0
+  runtime_fingerprint=3007885397264527580
+  artifact_path=/home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr
+  warmup_status=start
+[migraphx-env] phase=runtime-warmup
+  migraphx_version=unknown
+  rocm_version=7.2.0
+  gpu_gfx_target=gfx1100
+  precision=fp16
+  compile_profile=fast
+  offload_copy=1
+  MIGRAPHX_DISABLE_MLIR=0
+  MIGRAPHX_ENABLE_NHWC=0
+  MIGRAPHX_ENABLE_CK=0
+  MIGRAPHX_PROBLEM_CACHE=
+  MIOPEN_USER_DB_PATH=
+  MIOPEN_CUSTOM_CACHE_DIR=
+  MIOPEN_FIND_MODE=FAST
+  MIOPEN_COMPILE_PARALLEL_LEVEL=1
+  visible_devices=0
+  runtime_fingerprint=3007885397264527580
+  artifact_path=/home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_192x192_b8_fp16.mxr
+  warmup_status=complete
+[migraphx] Processed 30 frames / 600
+[migraphx] Processed 60 frames / 600
+[migraphx] Processed 90 frames / 600
+[migraphx] Processed 120 frames / 600
+[migraphx] Processed 150 frames / 600
+[migraphx] Processed 180 frames / 600
+[migraphx] Processed 210 frames / 600
+[migraphx] Processed 240 frames / 600
+[migraphx] Processed 270 frames / 600
+[migraphx] Processed 300 frames / 600
+[migraphx] Processed 330 frames / 600
+[migraphx] Processed 360 frames / 600
+[migraphx] Processed 390 frames / 600
+[migraphx] Processed 420 frames / 600
+[migraphx] Processed 450 frames / 600
+[migraphx] Processed 480 frames / 600
+[migraphx] Processed 510 frames / 600
+[migraphx] Processed 540 frames / 600
+[migraphx] Processed 570 frames / 600
+[migraphx] Processed 600 frames / 600
+[migraphx] AI inference complete: 600 frames processed via MiGraphX for stage upscale
+[migraphx] timing: total=19.2996s fps=31.0887 avg_ms/frame read=0.658021 preprocess=0.292367 infer=27.5977 postprocess=3.00455 write=2.30824 direct_final_encode=on
+[ai-pipeline] upscale → AI complete via MiGraphX (ROCm) (direct final encode)
+[ai-pipeline] Final delivery encode completed inside MiGraphX (ROCm); skipping redundant FFmpeg re-encode.
+done.
+WALL 19.742

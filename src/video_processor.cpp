@@ -225,7 +225,8 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     }
 
     // The backend pre-load pass is fast (model validation only);
-    // real AI work happens inside ffmpeg_.encode() → encodeWithAiProcessing().
+    // real AI work happens inside ffmpeg_.encode() as one continuous
+    // processing session for AI-capable stages.
     // So we allocate only 5% to the pre-load phase, 95% to the encode phase.
     constexpr int kPreloadPct = 5;
 
@@ -361,7 +362,9 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
 
     // ── FFmpeg encode pass ─────────────────────────────────────────
     const int encodeBase = kPreloadPct;
-    reportProgress(encodeBase, 0, "Starting FFmpeg encode pipeline\u2026");
+    reportProgress(encodeBase, 0,
+        backend ? "Starting continuous AI/FFmpeg encode session…"
+                : "Starting FFmpeg encode pipeline…");
 
     // Wrap progressCb: encode task% maps from encodeBase (5%) to 100%.
     // The inner FFmpeg/AI pipeline reports 0-100 as taskPct; we map that

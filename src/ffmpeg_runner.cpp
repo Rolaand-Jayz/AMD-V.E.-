@@ -625,31 +625,25 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
     std::string currentVideoPath = job.inputPath;
     int fileIndex = 0;
+    bool previewLimitPending = job.previewMode && job.previewDurationSec > 0.0;
 
     auto makeTempVideo = [&]() -> std::string {
         return (tempGuard.path / ("temp_" + std::to_string(fileIndex++) + ".mkv")).string();
     };
-    auto makePreviewVideo = [&]() -> std::string {
-        return (tempGuard.path / ("preview_" + std::to_string(fileIndex++) + ".mp4")).string();
+    auto appendPreviewLimit = [&](std::ostringstream& cmd) {
+        if (!previewLimitPending) {
+            return;
+        }
+        cmd << "-t " << job.previewDurationSec << ' ';
+        previewLimitPending = false;
     };
-
-    // ── Preview: create a duration-limited clip if preview mode ──
-    const bool isPreview = job.previewMode && job.previewDurationSec > 0.0;
-    if (isPreview) {
-        std::string previewClip = makePreviewVideo();
-        std::ostringstream pvCmd;
-        pvCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-              << "-i " << quoteArg(currentVideoPath) << ' '
-              << "-t " << job.previewDurationSec << ' '
-              << "-map 0:v:0 -map 0:a? "
-              << "-c:v libx264 -crf 0 -preset ultrafast "
-              << "-c:a aac -b:a 160k "
-              << quoteArg(previewClip);
-        if (!runFfmpegWithProgress(pvCmd.str(), "create-preview-clip",
-                                   totalInputFrames, nullptr, error))
-            return false;
-        currentVideoPath = previewClip;
-    }
+    auto consumePreviewDurationForBackend = [&]() -> double {
+        if (!previewLimitPending) {
+            return 0.0;
+        }
+        previewLimitPending = false;
+        return job.previewDurationSec;
+    };
 
     std::vector<std::string> pendingFilters;
     std::vector<std::string> postFilters;
@@ -706,13 +700,16 @@ bool encodeWithAiProcessing(const VideoJob& job,
             std::string nextVideo = makeTempVideo();
             std::ostringstream filterCmd;
             filterCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                      << "-i " << quoteArg(currentVideoPath) << ' '
+                      << "-i " << quoteArg(currentVideoPath) << ' ';
+            appendPreviewLimit(filterCmd);
+            filterCmd
                       << "-vf " << quoteArg(joinFilters(pendingFilters)) << ' '
                       << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
                       << quoteArg(nextVideo);
 
             if (!runFfmpegWithProgress(filterCmd.str(), "apply-intermediate-filters",
-                                       totalInputFrames, nullptr, error))
+                                       totalInputFrames, nullptr, error,
+                                       job.cancelFlag))
                 return false;
 
             currentVideoPath = nextVideo;
@@ -738,10 +735,7 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
             // Build process options for preview support
             ProcessVideoOptions pvOpts;
-            // The pipeline already materialises a duration-limited preview clip
-            // before invoking backend processing, so backends should process
-            // that clip as-is instead of trimming it a second time.
-            pvOpts.previewDurationSec = 0.0;
+            pvOpts.previewDurationSec = consumePreviewDurationForBackend();
             pvOpts.framePreviewCb     = job.framePreviewCb;
             pvOpts.previewFrameInterval = job.previewFrameInterval;
             pvOpts.cancelFlag         = job.cancelFlag;
@@ -799,12 +793,15 @@ bool encodeWithAiProcessing(const VideoJob& job,
             if (!fallbackFilter.empty()) {
                 std::ostringstream fbCmd;
                 fbCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                      << "-i " << quoteArg(currentVideoPath) << ' '
+                    << "-i " << quoteArg(currentVideoPath) << ' ';
+                appendPreviewLimit(fbCmd);
+                fbCmd
                       << "-vf " << quoteArg(joinFilters(fallbackFilter)) << ' '
                       << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
                       << quoteArg(aiOutputVideo);
                 if (!runFfmpegWithProgress(fbCmd.str(), "fallback-filter",
-                                           totalInputFrames, nullptr, error))
+                                 totalInputFrames, nullptr, error,
+                                 job.cancelFlag))
                     return false;
             } else {
                 aiOutputVideo = currentVideoPath;
@@ -836,7 +833,9 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
     std::ostringstream encCmd;
     encCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-           << "-i " << quoteArg(currentVideoPath) << ' ';
+            << "-i " << quoteArg(currentVideoPath) << ' ';
+
+        appendPreviewLimit(encCmd);
 
     if (currentVideoPath != job.inputPath) {
         encCmd << "-i " << quoteArg(job.inputPath) << ' ';

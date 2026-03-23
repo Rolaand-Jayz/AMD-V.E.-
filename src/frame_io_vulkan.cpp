@@ -1,4 +1,9 @@
 #include "ave/frame_io.hpp"
+
+extern "C" {
+#include <libavutil/hwcontext_vulkan.h>
+}
+
 #include <iostream>
 
 namespace ave {
@@ -12,6 +17,7 @@ struct VulkanVideoReader::Impl {
     AVPacket* pkt = nullptr;
     AVFrame* frame = nullptr;
     AVFrame* sw_frame = nullptr;
+    bool decoderDraining = false;
 };
 
 static enum AVPixelFormat get_hw_format(AVCodecContext */*ctx*/, const enum AVPixelFormat *pix_fmts) {
@@ -77,17 +83,27 @@ bool VulkanVideoReader::open(const std::string& path, std::string& error) {
 
 bool VulkanVideoReader::readFrame(AVFrame*& outFrame, std::string& error) {
     while (true) {
-        int ret = av_read_frame(impl_->fmt_ctx, impl_->pkt);
-        if (ret < 0) {
-            if (ret == AVERROR_EOF) {
-                outFrame = nullptr;
-                return true; // EOF
+        int ret = 0;
+        if (!impl_->decoderDraining) {
+            ret = av_read_frame(impl_->fmt_ctx, impl_->pkt);
+            if (ret < 0) {
+                if (ret != AVERROR_EOF) {
+                    error = "Error reading frame";
+                    return false;
+                }
+                impl_->decoderDraining = true;
+                av_packet_unref(impl_->pkt);
+                ret = avcodec_send_packet(impl_->codec_ctx, nullptr);
+                if (ret < 0) {
+                    error = "Error draining decoder";
+                    return false;
+                }
             }
-            error = "Error reading frame";
-            return false;
+        } else {
+            ret = AVERROR_EOF;
         }
 
-        if (impl_->pkt->stream_index == impl_->video_stream_idx) {
+        if (!impl_->decoderDraining && impl_->pkt->stream_index == impl_->video_stream_idx) {
             ret = avcodec_send_packet(impl_->codec_ctx, impl_->pkt);
             if (ret < 0) {
                 error = "Error sending packet to decoder";
@@ -121,6 +137,28 @@ bool VulkanVideoReader::readFrame(AVFrame*& outFrame, std::string& error) {
                     return true;
                 }
             }
+        } else if (impl_->decoderDraining) {
+            ret = avcodec_receive_frame(impl_->codec_ctx, impl_->frame);
+            if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) {
+                outFrame = nullptr;
+                return true;
+            }
+            if (ret < 0) {
+                error = "Error receiving drained frame from decoder";
+                return false;
+            }
+
+            if (impl_->frame->format == AV_PIX_FMT_VULKAN) {
+                outFrame = impl_->frame;
+                return true;
+            }
+
+            if (av_hwframe_transfer_data(impl_->sw_frame, impl_->frame, 0) < 0) {
+                error = "Error transferring drained frame to Vulkan";
+                return false;
+            }
+            outFrame = impl_->sw_frame;
+            return true;
         }
         av_packet_unref(impl_->pkt);
     }
@@ -146,6 +184,7 @@ struct VulkanVideoWriter::Impl {
     AVPacket* pkt = nullptr;
     AVFrame* sw_frame = nullptr;
     int frame_count = 0;
+    bool header_written = false;
 };
 
 VulkanVideoWriter::VulkanVideoWriter() : impl_(std::make_unique<Impl>()) {
@@ -163,9 +202,15 @@ bool VulkanVideoWriter::open(const std::string& path, int width, int height, AVR
         return false;
     }
 
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    AVCodecID codecId = AV_CODEC_ID_H264;
+    const auto extension = std::filesystem::path(path).extension().string();
+    if (extension == ".mkv" || extension == ".avi") {
+        codecId = AV_CODEC_ID_FFV1;
+    }
+
+    const AVCodec* codec = avcodec_find_encoder(codecId);
     if (!codec) {
-        error = "H.264 encoder not found";
+        error = "Requested video encoder not found";
         return false;
     }
 
@@ -183,8 +228,9 @@ bool VulkanVideoWriter::open(const std::string& path, int width, int height, AVR
 
     impl_->codec_ctx->width = width;
     impl_->codec_ctx->height = height;
-    impl_->codec_ctx->time_base = av_inv_q(fps);
-    impl_->codec_ctx->framerate = fps;
+    const AVRational safeFps = (fps.num > 0 && fps.den > 0) ? fps : AVRational{30, 1};
+    impl_->codec_ctx->time_base = av_inv_q(safeFps);
+    impl_->codec_ctx->framerate = safeFps;
     impl_->codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // Fallback to software encoding for now
     impl_->video_stream->time_base = impl_->codec_ctx->time_base;
 
@@ -213,6 +259,7 @@ bool VulkanVideoWriter::open(const std::string& path, int width, int height, AVR
         error = "Error occurred when opening output file";
         return false;
     }
+    impl_->header_written = true;
 
     impl_->sw_frame->format = impl_->codec_ctx->pix_fmt;
     impl_->sw_frame->width = impl_->codec_ctx->width;
@@ -269,8 +316,26 @@ bool VulkanVideoWriter::writeFrame(AVFrame* frame, std::string& error) {
 }
 
 void VulkanVideoWriter::close() {
+    if (impl_->codec_ctx != nullptr && impl_->fmt_ctx != nullptr && impl_->header_written) {
+        avcodec_send_frame(impl_->codec_ctx, nullptr);
+        while (true) {
+            const int ret = avcodec_receive_packet(impl_->codec_ctx, impl_->pkt);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                break;
+            }
+            if (ret < 0) {
+                break;
+            }
+            av_packet_rescale_ts(impl_->pkt, impl_->codec_ctx->time_base, impl_->video_stream->time_base);
+            impl_->pkt->stream_index = impl_->video_stream->index;
+            av_interleaved_write_frame(impl_->fmt_ctx, impl_->pkt);
+            av_packet_unref(impl_->pkt);
+        }
+    }
     if (impl_->fmt_ctx) {
-        av_write_trailer(impl_->fmt_ctx);
+        if (impl_->header_written) {
+            av_write_trailer(impl_->fmt_ctx);
+        }
         if (!(impl_->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
             avio_closep(&impl_->fmt_ctx->pb);
         }
@@ -289,6 +354,7 @@ void VulkanVideoWriter::close() {
         av_frame_free(&impl_->sw_frame);
         impl_->sw_frame = nullptr;
     }
+    impl_->header_written = false;
 }
 
 } // namespace frame_io

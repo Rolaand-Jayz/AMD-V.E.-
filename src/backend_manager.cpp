@@ -56,23 +56,8 @@ std::vector<BackendInfo> BackendManager::probeBackends() const {
 
 std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType requested,
                                                                     std::string& selectionSummary) const {
-    MiGraphXBackend migraphx;
-    VulkanComputeBackend vkCompute;
-    NcnnVulkanBackend ncnn;
-
-    std::string migraphxReason;
-    const bool migraphxAvailable = migraphx.isAvailable(migraphxReason);
-
-    std::string vkReason;
-    const bool vkAvailable = vkCompute.isAvailable(vkReason);
-
-    std::string ncnnReason;
-    const bool ncnnAvailable = ncnn.isAvailable(ncnnReason);
-
     auto selectMigraphx = [&selectionSummary]() -> std::unique_ptr<IAcceleratorBackend> {
         selectionSummary = "Selected MiGraphX (ROCm).";
-        // Log InteropBridge status alongside backend selection so the
-        // pipeline mode (GPU interop vs CPU staging) appears in startup logs.
         InteropBridge bridge;
         std::string bridgeReason;
         const bool bridgeUp = bridge.isAvailable(bridgeReason);
@@ -82,67 +67,80 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
         return std::make_unique<MiGraphXBackend>();
     };
 
-    // Explicit requests must fail honestly. Only Auto is allowed to fall back.
     if (requested == BackendType::MiGraphX) {
-        if (migraphxAvailable) {
+        MiGraphXBackend migraphx;
+        std::string reason;
+        if (migraphx.isAvailable(reason)) {
             return selectMigraphx();
         }
-        selectionSummary = "MiGraphX explicitly requested but unavailable: " + migraphxReason;
+        selectionSummary = "MiGraphX explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
     if (requested == BackendType::VulkanCompute) {
-        if (vkAvailable) {
+        VulkanComputeBackend vkCompute;
+        std::string reason;
+        if (vkCompute.isAvailable(reason)) {
             selectionSummary = "Selected Vulkan Compute.";
             return std::make_unique<VulkanComputeBackend>();
         }
-        selectionSummary = "Vulkan Compute explicitly requested but unavailable: " + vkReason;
+        selectionSummary = "Vulkan Compute explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
     if (requested == BackendType::NcnnVulkan) {
-        if (ncnnAvailable) {
+        NcnnVulkanBackend ncnn;
+        std::string reason;
+        if (ncnn.isAvailable(reason)) {
             selectionSummary = "Selected NCNN Vulkan.";
             return std::make_unique<NcnnVulkanBackend>();
         }
-        selectionSummary = "NCNN Vulkan explicitly requested but unavailable: " + ncnnReason;
+        selectionSummary = "NCNN Vulkan explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
     if (requested == BackendType::VapourSynth) {
         VapourSynthBackend vs;
-        std::string vsReason;
-        if (vs.isAvailable(vsReason)) {
+        std::string reason;
+        if (vs.isAvailable(reason)) {
             selectionSummary = "Selected VapourSynth.";
             return std::make_unique<VapourSynthBackend>();
         }
-        selectionSummary = "VapourSynth explicitly requested but unavailable: " + vsReason;
+        selectionSummary = "VapourSynth explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
     if (requested == BackendType::GlslShader) {
         GlslShaderBackend glsl;
-        std::string glslReason;
-        if (glsl.isAvailable(glslReason)) {
+        std::string reason;
+        if (glsl.isAvailable(reason)) {
             selectionSummary = "Selected GLSL Shader.";
             return std::make_unique<GlslShaderBackend>();
         }
-        selectionSummary = "GLSL Shader explicitly requested but unavailable: " + glslReason;
+        selectionSummary = "GLSL Shader explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
     if (requested == BackendType::Auto) {
-        if (migraphxAvailable) {
+        MiGraphXBackend migraphx;
+        std::string migraphxReason;
+        if (migraphx.isAvailable(migraphxReason)) {
             return selectMigraphx();
         }
-        if (vkAvailable) {
+
+        VulkanComputeBackend vkCompute;
+        std::string vkReason;
+        if (vkCompute.isAvailable(vkReason)) {
             std::ostringstream os;
             os << "MiGraphX unavailable: " << migraphxReason
                << " Falling back to Vulkan Compute.";
             selectionSummary = os.str();
             return std::make_unique<VulkanComputeBackend>();
         }
-        if (ncnnAvailable) {
+
+        NcnnVulkanBackend ncnn;
+        std::string ncnnReason;
+        if (ncnn.isAvailable(ncnnReason)) {
             std::ostringstream os;
             os << "MiGraphX unavailable: " << migraphxReason
                << " Vulkan Compute unavailable: " << vkReason
@@ -150,14 +148,17 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
             selectionSummary = os.str();
             return std::make_unique<NcnnVulkanBackend>();
         }
+
+        std::ostringstream os;
+        os << "No supported AMD backend is available. "
+           << "MiGraphX: " << migraphxReason << " | "
+           << "Vulkan Compute: " << vkReason << " | "
+           << "NCNN Vulkan: " << ncnnReason;
+        selectionSummary = os.str();
+        return nullptr;
     }
 
-    std::ostringstream os;
-    os << "No supported AMD backend is available. "
-       << "MiGraphX: " << migraphxReason << " | "
-       << "Vulkan Compute: " << vkReason << " | "
-       << "NCNN Vulkan: " << ncnnReason;
-    selectionSummary = os.str();
+    selectionSummary = "Unsupported backend request.";
     return nullptr;
 }
 

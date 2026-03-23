@@ -134,6 +134,16 @@ class ModelManager {
         int compileBatch = 1,
         std::optional<std::string> calibrationVideoPath = std::nullopt);
 
+    // Returns an already-compiled .mxr artifact only when its manifest matches
+    // the current effective MiGraphX/MiOpen runtime identity.
+    std::optional<std::string> validatedCompiledArtifactPath(
+        const std::string& modelId,
+        ModelPrecision compilePrecision,
+        std::optional<std::int64_t> inputWidth = std::nullopt,
+        std::optional<std::int64_t> inputHeight = std::nullopt,
+        int compileBatch = 1,
+        std::string* validationDetail = nullptr) const;
+
     // ── UI helpers ───────────────────────────────────────────────
 
     // Returns a UI-ready label for a model, e.g. "[Compiled] Real-ESRGAN x4"

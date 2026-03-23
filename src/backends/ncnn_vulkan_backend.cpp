@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ave/frame_io.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/model_manager.hpp"
 #include "ave/stage.hpp"
@@ -383,41 +385,24 @@ StageResult NcnnVulkanBackend::processVideoFile(
               << " fps=" << vi.fps
               << " frames=" << vi.totalFrames << std::endl;
 
-    // ── 3. Open FFmpeg decode pipe ──────────────────────────────
-    std::string decodeTimeLim;
-    if (opts.previewDurationSec > 0.0) {
-        decodeTimeLim = " -t " + std::to_string(opts.previewDurationSec);
-    }
-    std::string decodeCmdStr =
-        "ffmpeg -v error" + decodeTimeLim +
-        " -i \"" + inputVideo + "\""
-        " -f rawvideo -pix_fmt rgb24 -s " +
-        std::to_string(vi.width) + "x" + std::to_string(vi.height) +
-        " pipe:1";
-
-    FILE* decodePipe = popen(decodeCmdStr.c_str(), "r");
-    if (!decodePipe) {
-        error = "Failed to start FFmpeg decode pipe.";
+    frame_io::VulkanVideoReader reader;
+    if (!reader.open(inputVideo, error)) {
         return StageResult::Error;
     }
 
-    // ── 4. Open FFmpeg encode pipe ──────────────────────────────
-    std::string encodeCmdStr =
-        "ffmpeg -v error -y"
-        " -f rawvideo -pix_fmt rgb24"
-        " -s " + std::to_string(outW) + "x" + std::to_string(outH) +
-        " -r " + std::to_string(vi.fps) +
-        " -i pipe:0"
-        " -i \"" + inputVideo + "\""
-        " -map 0:v:0 -map 1:a? -c:v libx264 -crf 18 -preset medium"
-        " -c:a copy \"" + outputVideo + "\"";
-
-    FILE* encodePipe = popen(encodeCmdStr.c_str(), "w");
-    if (!encodePipe) {
-        pclose(decodePipe);
-        error = "Failed to start FFmpeg encode pipe.";
+    frame_io::VulkanVideoWriter writer;
+    AVRational fps = reader.frameRate();
+    if (fps.num <= 0 || fps.den <= 0) {
+        fps = AVRational{static_cast<int>(std::round(vi.fps > 0.0 ? vi.fps : 25.0)), 1};
+    }
+    if (!writer.open(outputVideo, outW, outH, fps, error)) {
+        reader.close();
         return StageResult::Error;
     }
+
+    const int maxFrames = opts.previewDurationSec > 0.0
+        ? static_cast<int>(opts.previewDurationSec * (vi.fps > 0.0 ? vi.fps : 25.0) + 0.5)
+        : 0;
 
     // ── 5. Per-frame inference loop ─────────────────────────────
     std::vector<uint8_t> inBuf(inFrameBytes);
@@ -427,6 +412,10 @@ StageResult NcnnVulkanBackend::processVideoFile(
     bool cancelled = false;
 
     while (true) {
+        if (maxFrames > 0 && frameIdx >= maxFrames) {
+            break;
+        }
+
         // ── Cancel / Pause check ────────────────────────────────
         if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
             std::cout << "[ncnn] Cancelled at frame " << frameIdx << std::endl;
@@ -442,10 +431,19 @@ StageResult NcnnVulkanBackend::processVideoFile(
         }
         if (cancelled) break;
 
-        // Read one raw RGB24 frame
-        std::size_t bytesRead = fread(inBuf.data(), 1, inFrameBytes, decodePipe);
-        if (bytesRead < inFrameBytes) {
-            break;  // End of stream (or partial frame — skip)
+        AVFrame* inputFrame = nullptr;
+        if (!reader.readFrame(inputFrame, error)) {
+            writer.close();
+            reader.close();
+            return StageResult::Error;
+        }
+        if (inputFrame == nullptr) {
+            break;
+        }
+        if (!frame_io::avFrameToRgb24(inputFrame, vi.width, vi.height, inBuf, error)) {
+            writer.close();
+            reader.close();
+            return StageResult::Error;
         }
 
         // Create NCNN input mat from RGB24 (HWC pixel order, 3 channels)
@@ -508,10 +506,14 @@ StageResult NcnnVulkanBackend::processVideoFile(
             break;
         }
 
-        // Write processed frame to encode pipe
-        std::size_t written = fwrite(outBuf.data(), 1, outFrameBytes, encodePipe);
-        if (written < outFrameBytes) {
-            error = "FFmpeg encode pipe write failed.";
+        AVFrame* outputFrame = frame_io::rgb24ToAvFrame(outBuf.data(), outW, outH, error);
+        if (outputFrame == nullptr) {
+            ok = false;
+            break;
+        }
+        const bool writeOk = writer.writeFrame(outputFrame, error);
+        av_frame_free(&outputFrame);
+        if (!writeOk) {
             ok = false;
             break;
         }
@@ -542,8 +544,8 @@ StageResult NcnnVulkanBackend::processVideoFile(
     }
 
     // ── 6. Cleanup ──────────────────────────────────────────────
-    int decodeRc = pclose(decodePipe);
-    int encodeRc = pclose(encodePipe);
+    writer.close();
+    reader.close();
 
     if (cancelled) {
         error = "Processing cancelled by user at frame " + std::to_string(frameIdx);
@@ -551,15 +553,6 @@ StageResult NcnnVulkanBackend::processVideoFile(
     }
 
     if (!ok) {
-        return StageResult::Error;
-    }
-
-    if (decodeRc != 0) {
-        error = "FFmpeg decode pipe exited with code " + std::to_string(decodeRc);
-        return StageResult::Error;
-    }
-    if (encodeRc != 0) {
-        error = "FFmpeg encode pipe exited with code " + std::to_string(encodeRc);
         return StageResult::Error;
     }
 

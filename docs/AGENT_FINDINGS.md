@@ -1,0 +1,36 @@
+# Agent Findings
+
+This document summarizes the parallel agent reviews for app-level throughput, MiGraphX integration, and MiOpen configuration in this repo.
+
+## App-wide Pipeline
+- *Critical*: `encodeWithAiProcessing()` materializes temporary videos and runs additional `ffmpeg` transcodes before, between, and after AI stages, so stage count multiplies the total work regardless of frame count. (`src/ffmpeg_runner.cpp:676`, `src/ffmpeg_runner.cpp:706`, `src/ffmpeg_runner.cpp:759`, `src/ffmpeg_runner.cpp:801`, `src/ffmpeg_runner.cpp:837`)
+- *Critical*: Vulkan compute backend rebuilds buffers, descriptors, command buffers, and fences each frame, converts RGBfloat on CPU before dispatch, and floatsRGB after; the backend never holds persistent device resources. (`src/backends/vulkan_compute_backend.cpp:835`, `src/backends/vulkan_compute_backend.cpp:856`, `src/backends/vulkan_compute_backend.cpp:1195`, `src/backends/vulkan_compute_backend.cpp:1270`, `src/backends/vulkan_compute_backend.cpp:1303`, `src/backends/vulkan_compute_backend.cpp:1365`, `src/backends/vulkan_compute_backend.cpp:1377`)
+- *High*: NCNN Vulkan path still stages every frame through CPU `ncnn::Mat` allocations, normalization, extractor creation, denormalization, and pipe IO, leaving GPU work starved by host overhead. (`src/backends/ncnn_vulkan_backend.cpp:132`, `src/backends/ncnn_vulkan_backend.cpp:386`, `src/backends/ncnn_vulkan_backend.cpp:453`, `src/backends/ncnn_vulkan_backend.cpp:461`, `src/backends/ncnn_vulkan_backend.cpp:492`, `src/backends/ncnn_vulkan_backend.cpp:512`)
+- *High*: Direct FFmpeg/Vulkan reader/writer helpers exist, but the hot paths still spawn `ffmpeg`/`ffprobe` and pass rawvideo through pipes, wasting zero-copy opportunities. (`include/ave/frame_io.hpp:8`, `src/frame_io_vulkan.cpp:37`, `src/frame_io_vulkan.cpp:160`, `src/backends/vulkan_compute_backend.cpp:761`, `src/backends/ncnn_vulkan_backend.cpp:391`)
+- *Medium*: `backend_manager::createBackend` probes all backends each job even when the request specifies one, so startup repeatedly hits library discovery costs that don’t contribute to frame throughput. (`src/backend_manager.cpp:57`, `src/backend_manager.cpp:63`, `src/backend_manager.cpp:66`, `src/backend_manager.cpp:69`)
+- *Medium*: Preview mode performs a whole-video transcode before AI work begins, meaning throughput reports include this extra encode step. (`src/ffmpeg_runner.cpp:637`, `src/ffmpeg_runner.cpp:648`)
+
+## MiGraphX-specific
+- *High*: The backend stages every tile on the host—`packRgbTileClampToNchw*`, `runInference()` with CPU pointers, immediate `finish()`, and CPU blit—so MiGraphX never gets a zero-copy path and per-batch mutex/`finish()` blocks overlap. (`include/ave/backends/migraphx_backend.hpp:101`, `src/backends/migraphx_backend.cpp:1104`, `src/backends/migraphx_backend.cpp:1439`, `src/backends/migraphx_backend.cpp:1455`, `src/backends/migraphx_backend.cpp:1457`, `src/backends/migraphx_backend.cpp:2286`)
+- *High*: Tile pack/blit conversions run inside each batch and include scalar fp16 loops, so small tiles amplify CPU work. (`src/backends/migraphx_backend.cpp:899`, `src/backends/migraphx_backend.cpp:931`, `src/backends/migraphx_backend.cpp:963`, `src/backends/migraphx_backend.cpp:998`)
+- *High*: Inference is serialized via the backend mutex, `prog.eval()`, and `experimental_get_context().finish()` each batch, eliminating overlap between CPU staging and GPU evaluation and blocking concurrent streams. (`src/backends/migraphx_backend.cpp:1148`, `src/backends/migraphx_backend.cpp:1453`, `src/backends/migraphx_backend.cpp:2325`)
+- *Medium-high*: Artifact reuse ignores MiGraphX/MiOpen tuning state, so `.mxr` files compiled with different profiles, ROCm versions, or env toggles can be reused without invalidation. (`src/model_manager.cpp:265`, `src/model_manager.cpp:2088`, `src/model_manager.cpp:2223`, `src/backends/migraphx_backend.cpp:511`)
+- *Medium*: Batch selection uses a heuristic based only on tile area and frame size, which may pick suboptimal batches or cause frequent fallbacks to smaller fp32 artifacts. (`src/backends/migraphx_backend.cpp:698`, `src/model_manager.cpp:2224`, `src/model_manager.cpp:2347`)
+- *Medium*: MiGraphX compilation via the in-process library is globally serialized by `ScopedEnvOverrides`, hurting cold-start throughput especially for int8/no-driver compile paths. (`src/model_manager.cpp:69`, `src/model_manager.cpp:90`, `src/model_manager.cpp:1213`)
+- *Medium-low*: `loadProgram()` constructs a new `ModelManager` per load, causing refresh work before each preload attempt. (`src/backends/migraphx_backend.cpp:1192`, `src/model_manager.cpp:1707`)
+
+## MiOpen tuning
+- *High*: MiOpen-affecting env vars (`MIOPEN_*`) are not part of artifact identity and manifest validation appears unused, so artifacts persist through MiOpen setting changes. (`src/model_manager.cpp:419`, `src/backends/migraphx_backend.cpp:511`, `src/observability.cpp:174`)
+- *High*: MiOpen tuning env overrides are only applied during compilation (`migraphx-driver` or `compileWithMigraphxLibrary`), but runtime load/eval does not reapply them, so any lazy solver/handler initializations occur under default ambient settings. (`src/model_manager.cpp:1213`, `src/model_manager.cpp:1321`, `src/backends/migraphx_backend.cpp:1566`, `src/backends/migraphx_backend.cpp:1301`, `src/backends/migraphx_backend.cpp:1455`)
+- *Medium*: No dedicated warmup call exists; first-frame inference is the first touch of MiOpen/MiGraphX, so solver JIT and cache population happen during real work. (`src/backends/migraphx_backend.cpp:1610`, `src/backends/migraphx_backend.cpp:1301`, `src/backends/migraphx_backend.cpp:1455`)
+- *Medium*: MiOpen cache dirs default to shared user/global locations (with `/tmp` fallbacks), so cache contamination can occur across GPUs or ROCm versions. (`src/model_manager.cpp:336`, `src/model_manager.cpp:340`, `src/model_manager.cpp:348`)
+- *Medium*: Default compile profile is `Fast` → `MIOPEN_FIND_MODE=FAST`, sacrificing steady-state solver quality for compile speed. (`src/model_manager.cpp:366`, `src/model_manager.cpp:393`, `src/model_manager.cpp:1222`)
+- *Medium*: Observability logs only `MIGRAPHX_*` env toggles, not the MiOpen cache/solver settings that matter for performance; the docs recommend richer tracing. (`src/observability.cpp:115`, `docs/migraphx_debugging_playbook.md:198`, `docs/migraphx_debugging_playbook.md:212`)
+- *Low-medium*: Compile path pins `ROCR_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES`, but runtime only warns when `HIP_VISIBLE_DEVICES` is unset, so compile/run may hit different GPUs on mixed systems. (`src/model_manager.cpp:442`, `src/backends/migraphx_backend.cpp:1582`)
+
+## Suggested Next Steps
+1. Remove redundant `ffmpeg` transcodes by keeping frames resident and reusing decoded data between filters and AI stages.
+2. Rewrite MiGraphX backend to stage into persistent device buffers and drop the per-batch `finish()`/mutex block.
+3. Make MiGraphX/MiOpen tuning state part of artifact identity and manifest validation plus warmup/eval passes.
+4. Adopt persistent Vulkan/NCNN resources and reuse the Vulkan AVFrame utilities instead of raw pipes.
+5. Improve observability for MiOpen-specific env vars, cache paths, and compile profiles.
