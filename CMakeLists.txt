@@ -382,6 +382,15 @@ if(AVE_GLSL_COMPILER_EXECUTABLE)
 endif()
 list(REMOVE_DUPLICATES AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES)
 
+find_program(AVE_FFMPEG_CLI_EXECUTABLE NAMES ffmpeg)
+find_program(AVE_FFPROBE_CLI_EXECUTABLE NAMES ffprobe)
+foreach(_ave_media_tool IN LISTS AVE_FFMPEG_CLI_EXECUTABLE AVE_FFPROBE_CLI_EXECUTABLE)
+    if(_ave_media_tool)
+        list(APPEND AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES "${_ave_media_tool}")
+    endif()
+endforeach()
+list(REMOVE_DUPLICATES AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES)
+
 # ─────────────────────────────────────────────────────────────────
 # ave — CLI executable
 # ─────────────────────────────────────────────────────────────────
@@ -749,6 +758,16 @@ if(AVE_GLSL_COMPILER_EXECUTABLE)
     list(APPEND AVE_INSTALL_TOOL_EXECUTABLE_PATHS
         "${AVE_INSTALL_TOOLS_PATH}/${_ave_glsl_compiler_name}")
 endif()
+foreach(_ave_media_tool IN ITEMS "${AVE_FFMPEG_CLI_EXECUTABLE}" "${AVE_FFPROBE_CLI_EXECUTABLE}")
+    if(_ave_media_tool)
+        get_filename_component(_ave_media_tool_name "${_ave_media_tool}" NAME)
+        install(PROGRAMS
+            "${_ave_media_tool}"
+            DESTINATION ${AVE_INSTALL_TOOLS_PATH})
+        list(APPEND AVE_INSTALL_TOOL_EXECUTABLE_PATHS
+            "${AVE_INSTALL_TOOLS_PATH}/${_ave_media_tool_name}")
+    endif()
+endforeach()
 list(REMOVE_DUPLICATES AVE_INSTALL_TOOL_EXECUTABLE_PATHS)
 
 if(AVE_INSTALL_BUNDLED_MODELS)

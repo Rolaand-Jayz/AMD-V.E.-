@@ -1,0 +1,33 @@
+Name: amd-video-enhancer
+Version: @RPM_VERSION@
+Release: @RPM_RELEASE@
+Summary: Open-alpha AMD GPU video enhancement app
+License: Custom
+URL: https://github.com/Rolaand-Jayz/AMD-V.E.-
+BuildArch: x86_64
+Source1: @RPM_FILELIST_NAME@
+AutoReqProv: no
+Requires: /usr/bin/bash
+
+%description
+Native package built from the Arch-origin staged release root.
+
+The app and bundled userspace dependencies remain private under
+/opt/amd-video-enhancer, with only thin entrypoints exposed under /usr/bin.
+
+Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE is the only tested stack.
+All other distro packages are experimental in the current open alpha.
+
+%prep
+
+%build
+
+%install
+mkdir -p %{buildroot}
+cp -a %{staged_root}/. %{buildroot}/
+
+%files -f %{SOURCE1}
+
+%changelog
+* @RPM_CHANGELOG_DATE@ @PACKAGE_MAINTAINER@ - @RPM_VERSION@-@RPM_RELEASE@
+- Native open-alpha release packaging refresh

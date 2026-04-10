@@ -18,6 +18,7 @@ bundled_migraphx="$(resolve_path "@AVE_INSTALL_MIGRAPHX_PATH@")"
 bundled_runtime="$(resolve_path "@AVE_INSTALL_RUNTIME_PATH@")"
 bundled_qt_plugins="$(resolve_path "@AVE_INSTALL_QT_PLUGIN_PATH@")"
 bundled_models="$(resolve_path "@AVE_INSTALL_MODELS_PATH@")"
+bundled_tools="$(resolve_path "@AVE_INSTALL_TOOLS_PATH@")"
 bundled_migraphx_lib="${bundled_migraphx}/lib"
 bundled_migraphx_nested_lib="${bundled_migraphx}/lib/migraphx/lib"
 
@@ -54,6 +55,10 @@ fi
 
 if [[ -d "${bundled_models}" ]]; then
     export AVE_BUNDLED_MODELS_DIR="${bundled_models}"
+fi
+
+if [[ -d "${bundled_tools}" ]]; then
+    prepend_path PATH "${bundled_tools}"
 fi
 
 export AVE_APP_INSTALL_PREFIX="${prefix}"

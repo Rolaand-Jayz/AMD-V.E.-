@@ -1,5 +1,11 @@
 # AMD Video Enhancer
 
+## **OPEN ALPHA**
+
+## **ONLY TESTED ON ARCH LINUX ON RYZEN 7 7800X3D + RADEON RX 7900 GRE**
+
+## **ALL OTHER DISTROS, KERNELS, ROCM STACKS, AND GPU CONFIGURATIONS ARE EXPERIMENTAL**
+
 Linux-first C++ video enhancement for AMD GPUs. The project keeps the main app native, uses MiGraphX as the primary inference path, and falls back to Vulkan Compute, NCNN Vulkan, or FFmpeg when a given model or runtime is not available.
 
 ## Scope
@@ -85,7 +91,8 @@ For tiled MiGraphX inference, the app compiles the requested tile size first and
 
 ## Notes
 
-- `ffmpeg` and `ffprobe` must be in `PATH`
+- Release packages bundle app-private `ffmpeg` and `ffprobe`
+- Source builds still require `ffmpeg` and `ffprobe` in `PATH`
 - ROCm and MiGraphX must be installed for the primary backend
 - Mixed iGPU+dGPU systems may need `HIP_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES`
 - On unsupported ROCm distributions, backend behavior is best-effort
@@ -104,3 +111,31 @@ MiGraphX compile tuning:
 - `docs/PARITY_PLAN.md`
 - `docs/GOLD_STANDARD_FOR_IMPLEMENTATION.md`
 - `docs/migraphx_debugging_playbook.md`
+- `docs/PACKAGING.md`
+- `docs/RELEASING.md`
+- `CONTRIBUTING.md`
+
+## Packaging
+
+Native packages are the release format.
+
+- Arch Linux: `.pkg.tar.zst`
+- Ubuntu 24.04 and 22.04: `.deb`
+- Debian 12: `.deb`
+- Fedora 41: `.rpm`
+- openSUSE Leap 15.6 and Tumbleweed: `.rpm`
+- Rocky Linux 9: `.rpm`
+- AlmaLinux 9: `.rpm`
+
+No AppImage, Flatpak, or Snap packages are produced.
+
+The release pipeline builds one canonical Arch-origin staged install tree with bundled app-private userspace dependencies, then repackages that sealed payload into distro-native packages. This keeps the app's customized dependency closure private and reduces interference with unrelated host libraries.
+
+## Feedback
+
+Feedback is wanted in this open alpha.
+
+- Bugs: use the GitHub bug report template
+- Experimental distro reports: use the distro report template
+- Features: use the feature request template
+- Code contributions: open a PR and follow `CONTRIBUTING.md`

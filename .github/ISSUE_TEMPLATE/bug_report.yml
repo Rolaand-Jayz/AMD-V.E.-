@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible bug in the app, packaging, or runtime behavior.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Open alpha notice
+
+        **This project is only tested on Arch Linux on a Ryzen 7 7800X3D + Radeon RX 7900 GRE.**
+
+        If you are reporting from any other distro or hardware stack, the report is still wanted, but the environment must be filled in completely.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      placeholder: One-sentence description of the failure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact steps, commands, inputs, and package used
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+      placeholder: Arch Linux, Ubuntu 24.04, Fedora 41, openSUSE Leap 15.6, etc.
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+    validations:
+      required: true
+  - type: input
+    id: rocm
+    attributes:
+      label: ROCm version
+      placeholder: unknown if not installed
+    validations:
+      required: true
+  - type: input
+    id: migraphx
+    attributes:
+      label: MiGraphX version
+      placeholder: unknown if not installed
+    validations:
+      required: true
+  - type: input
+    id: package_type
+    attributes:
+      label: Package type
+      placeholder: source build, Arch package, Ubuntu package, Debian package, RPM package
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and stderr
+      render: text
+    validations:
+      required: true

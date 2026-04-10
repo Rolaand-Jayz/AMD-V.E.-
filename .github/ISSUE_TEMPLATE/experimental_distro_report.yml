@@ -1,0 +1,46 @@
+name: Experimental distro report
+description: Report startup, packaging, or runtime behavior on a non-Arch distro.
+title: "[distro] "
+labels:
+  - experimental-distro
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Experimental distro report
+
+        **All non-Arch distro support is experimental in the current open alpha.**
+
+        These reports are useful, but they need full environment detail.
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+    validations:
+      required: true
+  - type: input
+    id: package_asset
+    attributes:
+      label: Package asset used
+      placeholder: Exact asset filename
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU and GPU
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What worked and what failed
+    validations:
+      required: true
+  - type: textarea
+    id: journal
+    attributes:
+      label: Logs, journal output, or screenshots
+      render: text
+    validations:
+      required: true

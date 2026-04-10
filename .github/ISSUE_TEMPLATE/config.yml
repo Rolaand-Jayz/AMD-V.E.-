@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/README.md
+    about: Read the current open-alpha support and packaging guidance first.

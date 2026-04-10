@@ -62,13 +62,18 @@ _ave_resolve_install_path(_ave_runtime_out "@CMAKE_INSTALL_LIBDIR@/ave/runtime")
 _ave_resolve_install_path(_ave_cli_executable "@CMAKE_INSTALL_LIBEXECDIR@/ave/ave")
 set(_ave_executables "${_ave_cli_executable}")
 set(_ave_runtime_seed_libs "@AVE_RUNTIME_BUNDLE_SEED_LIBS@")
+set(_ave_runtime_seed_executables "@AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES@")
 list(FILTER _ave_runtime_seed_libs EXCLUDE REGEX "^$")
 list(REMOVE_DUPLICATES _ave_runtime_seed_libs)
+list(FILTER _ave_runtime_seed_executables EXCLUDE REGEX "^$")
+list(REMOVE_DUPLICATES _ave_runtime_seed_executables)
 
 if("@AVE_INSTALL_HAS_GUI_TARGET@" STREQUAL "TRUE")
     _ave_resolve_install_path(_ave_gui_executable "@CMAKE_INSTALL_LIBEXECDIR@/ave/ave_gui")
     list(APPEND _ave_executables "${_ave_gui_executable}")
 endif()
+list(APPEND _ave_executables ${_ave_runtime_seed_executables})
+list(REMOVE_DUPLICATES _ave_executables)
 
 file(MAKE_DIRECTORY "${_ave_runtime_out}")
 

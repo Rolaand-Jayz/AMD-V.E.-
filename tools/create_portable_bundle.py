@@ -107,6 +107,7 @@ def build_app_launch_env(stage_dir: pathlib.Path) -> dict[str, str]:
     qt_plugin_dir = stage_dir / "lib" / "ave" / "qt-plugins"
     bundled_models = stage_dir / "share" / "ave" / "models"
     bundled_migraphx = stage_dir / "lib" / "ave" / "migraphx"
+    bundled_tools = stage_dir / "libexec" / "ave" / "tools"
     bundled_migraphx_lib = bundled_migraphx / "lib"
     bundled_migraphx_nested_lib = bundled_migraphx_lib / "migraphx" / "lib"
 
@@ -115,6 +116,7 @@ def build_app_launch_env(stage_dir: pathlib.Path) -> dict[str, str]:
         "LD_LIBRARY_PATH",
         [runtime_dir, bundled_migraphx_lib, bundled_migraphx_nested_lib],
     )
+    prepend_env_paths(env, "PATH", [bundled_tools])
     prepend_env_paths(env, "QT_PLUGIN_PATH", [qt_plugin_dir])
 
     platform_dir = qt_plugin_dir / "platforms"
@@ -169,6 +171,8 @@ def verify_portable_bundle(stage_dir: pathlib.Path) -> None:
         stage_dir / "libexec" / "ave" / "ave_gui",
     ]
     tool_targets = [
+        stage_dir / "libexec" / "ave" / "tools" / "ffmpeg",
+        stage_dir / "libexec" / "ave" / "tools" / "ffprobe",
         stage_dir / "lib" / "ave" / "migraphx" / "bin" / "migraphx-driver",
         stage_dir / "lib" / "ave" / "migraphx" / "bin" / "migraphx-hiprtc-driver",
     ]

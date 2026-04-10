@@ -1,0 +1,24 @@
+pkgname=amd-video-enhancer
+pkgver=@ARCH_PKGVER@
+pkgrel=@ARCH_PKGREL@
+pkgdesc="Open-alpha AMD GPU video enhancement app with app-private bundled userspace dependencies"
+arch=('x86_64')
+url='https://github.com/Rolaand-Jayz/AMD-V.E.-'
+license=('custom')
+depends=('bash')
+optdepends=(
+  'ffmpeg: fallback media tooling when using a source build instead of the bundled package payload'
+)
+provides=('amd-video-enhancer')
+conflicts=('amd-video-enhancer')
+source=()
+sha256sums=()
+
+package() {
+  if [[ -z "${AVE_STAGED_ROOT:-}" ]]; then
+    echo "AVE_STAGED_ROOT is not set" >&2
+    return 1
+  fi
+
+  cp -a "${AVE_STAGED_ROOT}/." "${pkgdir}/"
+}

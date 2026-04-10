@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a feature, packaging improvement, or workflow enhancement.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: input
+    id: problem
+    attributes:
+      label: Problem
+      placeholder: What user-facing problem exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

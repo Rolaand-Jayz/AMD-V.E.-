@@ -1,6 +1,14 @@
 # Packaging
 
-The app now supports two deployment styles from the same install layout:
+## Release Status
+
+## **OPEN ALPHA**
+
+## **ONLY TESTED ON ARCH LINUX ON RYZEN 7 7800X3D + RADEON RX 7900 GRE**
+
+## **ALL OTHER DISTRO PACKAGES ARE EXPERIMENTAL**
+
+The app now supports three packaging layers:
 
 1. Standard installed layout
    - `bin/ave` and `bin/ave_gui` are launcher scripts.
@@ -14,6 +22,14 @@ The app now supports two deployment styles from the same install layout:
    - That folder can be archived as `tar.gz`, extracted anywhere, and run in place.
    - The launchers resolve all bundled paths relative to their own location.
    - The bundle now includes a root-level `PORTABLE_RUNTIME_NOTES.txt` file that documents bundled paths, MiGraphX tooling, and the remaining host-side GPU driver requirements.
+
+3. Native distro packages
+   - Arch Linux `.pkg.tar.zst`
+   - Debian/Ubuntu `.deb`
+   - Fedora/openSUSE/Rocky `.rpm`
+   - All native packages are built from one canonical Arch-origin staged release root
+   - The app payload remains private under `/opt/amd-video-enhancer`
+   - Public entrypoints remain thin under `/usr/bin`
 
 ## Build
 
@@ -58,6 +74,8 @@ Important packaging options:
   - Download and stage the model catalog into the app tree.
 - `AVE_INSTALL_RUNTIME_DEPS=ON`
   - Copy non-system runtime shared libraries into `lib/ave/runtime`.
+
+Release packages also bundle `ffmpeg` and `ffprobe` into the private app tools directory so packaged installs do not depend on host media-tool binaries for the primary execution path.
 
 ## Portable Bundle
 
@@ -115,11 +133,42 @@ Profiles:
    - standard installed layout under `INSTALL_PREFIX`
    - useful for system packaging or integration into a larger installer
 
+## Native Packages
+
+Stage the canonical release root:
+
+```bash
+./tools/stage_release_root.sh
+```
+
+Build native packages from that staged root:
+
+```bash
+python3 ./tools/build_native_packages.py \
+  --staged-root ./dist/stage-root \
+  --output-dir ./dist/native-packages
+```
+
+Default targets:
+
+- `archlinux`
+- `ubuntu-24.04`
+- `ubuntu-22.04`
+- `debian-12`
+- `fedora-41`
+- `opensuse-leap-15.6`
+- `opensuse-tumbleweed`
+- `rocky-9`
+- `almalinux-9`
+
+The native packages all carry the same private payload layout and differ only in package manager metadata and containerized release validation path.
+
 ## Verification
 
 Portable bundle creation now verifies runtime dependency closure after staging:
 
 - installed executables are checked with `ldd`
+- bundled `ffmpeg` and `ffprobe` binaries are checked with `ldd` when present
 - bundled MiGraphX drivers are checked with `ldd` when compiler tools are present
 - bundled MiGraphX shared libraries are checked with `ldd`, not just the app binaries
 - portable runtime bundling now seeds MiGraphX runtime sonames explicitly instead of depending only on generic dependency discovery
@@ -129,6 +178,8 @@ The launchers now keep the bundled MiGraphX compiler toolchain isolated from the
 Portable bundles intentionally ship the user-space dependency closure, but they cannot bundle the host kernel-side AMD stack. A target machine still needs a working `amdgpu`/KFD environment and GPU device access for ROCm/MiGraphX execution.
 
 If the custom MiGraphX prefix is incomplete, packaging fails with the unresolved sonames instead of producing a broken archive.
+
+The same host-side limitation applies to native packages. These packages isolate bundled userspace dependencies from the host, but they still rely on a working host AMD kernel/driver stack.
 
 ## Portable Profiles
 
