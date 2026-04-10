@@ -44,8 +44,11 @@ def git_version() -> str:
         if tag.startswith("v"):
             return tag[1:]
         return tag
-    except subprocess.CalledProcessError:
-        short = capture("git", "rev-parse", "--short", "HEAD")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        try:
+            short = capture("git", "rev-parse", "--short", "HEAD")
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            short = os.environ.get("AVE_VERSION_FALLBACK_SHA", "nogit")
         date = dt.datetime.now(dt.UTC).strftime("%Y%m%d")
         return f"0.1.0-alpha.1.git{date}.{short}"
 
@@ -66,7 +69,7 @@ def ensure_payload_root(staged_root: pathlib.Path) -> pathlib.Path:
         target = usr_bin / entry
         if target.exists() or target.is_symlink():
             target.unlink()
-        target.symlink_to(INSTALL_PREFIX / "bin" / entry)
+        write_launcher_script(target, entry)
 
     if (payload_prefix / "bin" / "ave_gui").exists():
         app_dir = staged_root / "usr" / "share" / "applications"
@@ -98,6 +101,18 @@ def arch_pkgver(version: str) -> str:
 def write_text(path: pathlib.Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def write_launcher_script(path: pathlib.Path, command_name: str) -> None:
+    write_text(
+        path,
+        (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n\n"
+            f'exec "{INSTALL_PREFIX}/bin/{command_name}" "$@"\n'
+        ),
+    )
+    path.chmod(0o755)
 
 
 def render_template(template_path: pathlib.Path, values: dict[str, str]) -> str:
@@ -136,7 +151,15 @@ def create_deb(staged_root: pathlib.Path, output_dir: pathlib.Path, version: str
         artifact = output_dir / f"{PROJECT_SLUG}_{deb_version(version)}_{distro_label}_amd64.deb"
         if artifact.exists():
             artifact.unlink()
-        run("dpkg-deb", "--build", str(package_root), str(artifact))
+        run(
+            "dpkg-deb",
+            "--build",
+            "--uniform-compression",
+            "-Zzstd",
+            "-z10",
+            str(package_root),
+            str(artifact),
+        )
         return artifact
     finally:
         shutil.rmtree(package_root, ignore_errors=True)
