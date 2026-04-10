@@ -18,6 +18,8 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
+
+#include "ave/runtime_diagnostics.hpp"
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -480,12 +482,21 @@ void SettingsDialog::refreshDiagnostics() {
 
     BackendManager manager;
     const auto infos = manager.probeBackends();
+    const auto diagnostics = manager.runtimeDiagnostics();
     QStringList backendLines;
     for (const auto& info : infos) {
         backendLines << availabilityLine(
             QString::fromStdString(info.name),
             info.available,
             QString::fromStdString(info.detail));
+    }
+    backendLines << QStringLiteral("<br/><b>AMD runtime</b>: %1")
+                        .arg(QString::fromStdString(diagnostics.summary()).toHtmlEscaped());
+    for (const auto& check : diagnostics.checks) {
+        backendLines << availabilityLine(
+            QString::fromStdString(check.title),
+            check.status == ave::RuntimeDiagnosticStatus::Ok,
+            QString::fromStdString(check.detail));
     }
     backendSummaryLabel_->setText(backendLines.join("<br/>"));
 

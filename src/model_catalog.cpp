@@ -1,8 +1,72 @@
 #include "ave/model_catalog.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace ave {
+
+namespace {
+
+struct BuiltinFamilyInfo {
+    const char* id;
+    const char* name;
+    bool supportsFusedExecution;
+    bool supportsSelectiveCapabilities;
+};
+
+const BuiltinFamilyInfo* builtinFamilyInfoForId(const std::string& modelId) {
+    static const std::unordered_map<std::string, BuiltinFamilyInfo> map = {
+        {"nomos2-otf-x4", {"nomos2-otf", "Nomos2 OTF ESRGAN", true, false}},
+        {"realesrgan-x4-restore", {"realesrgan-x4", "Real-ESRGAN x4", true, false}},
+        {"realesrgan-x4-general", {"realesrgan-x4", "Real-ESRGAN x4", true, false}},
+        {"realesrgan-x4plus-pth", {"realesrgan-x4plus-pth", "Real-ESRGAN x4+ (PyTorch)", false, false}},
+        {"realesrgan-x4-axera", {"realesrgan-x4-axera", "Real-ESRGAN x4 (AXERA export)", false, false}},
+        {"openproteus-compact-x2", {"openproteus-compact-x2", "OpenProteus Compact x2", true, false}},
+        {"realesrgan-x4plus-ncnn", {"realesrgan-x4plus-ncnn", "Real-ESRGAN x4+ NCNN", false, false}},
+        {"realesrgan-x4plus-anime-ncnn", {"realesrgan-x4plus-anime-ncnn", "Real-ESRGAN x4+ Anime NCNN", false, false}},
+        {"realesr-animevideov3-x2-ncnn", {"realesr-animevideov3-x2-ncnn", "Real-ESRGAN AnimeVideo v3 x2 NCNN", false, false}},
+        {"realesr-animevideov3-x3-ncnn", {"realesr-animevideov3-x3-ncnn", "Real-ESRGAN AnimeVideo v3 x3 NCNN", false, false}},
+        {"realesr-animevideov3-x4-ncnn", {"realesr-animevideov3-x4-ncnn", "Real-ESRGAN AnimeVideo v3 x4 NCNN", false, false}},
+        {"realesrnet-x2plus", {"realesrnet-x2plus", "Real-ESRNet x2+", true, false}},
+        {"realesrnet-deblur-x2", {"realesrnet-x2plus", "Real-ESRNet x2+", true, false}},
+        {"nmkd-siax-x4", {"nmkd-siax-x4", "NMKD Siax 200k", true, false}},
+        {"ultrasharp-x4", {"ultrasharp-x4", "UltraSharp x4", true, false}},
+        {"wtp-uds-esrgan-x4", {"wtp-uds-esrgan-x4", "WTP-UDS-ESRGAN x4", true, false}},
+        {"nafnet-denoise", {"nafnet-restoration", "NAFNet Blind Restoration", true, false}},
+        {"nafnet-dehalo", {"nafnet-restoration", "NAFNet Blind Restoration", true, false}},
+        {"openproteus-deblur-x2", {"openproteus-compact-x2", "OpenProteus Compact x2", true, false}},
+        {"clearreality-x4-denoise", {"clearreality-v1", "ClearReality V1", true, false}},
+        {"clearreality-deblur-x4", {"clearreality-v1", "ClearReality V1", true, false}},
+        {"clearreality-x4-fast", {"clearreality-v1", "ClearReality V1", true, false}},
+        {"remacri-x4", {"remacri-x4", "Remacri x4", true, false}},
+        {"ultrasharpv2-x4", {"ultrasharpv2", "UltraSharp V2", true, false}},
+        {"ultrasharpv2-lite-x4", {"ultrasharpv2-lite", "UltraSharp V2 Lite", true, false}},
+        {"iqa-color-enhance", {"parametric-color-fix", "Parametric Color Fix", false, false}},
+        {"swinir-color", {"swinir-x4", "SwinIR x4", true, false}},
+        {"swinir-x4-general", {"swinir-x4", "SwinIR x4", true, false}},
+        {"animesharp-x4", {"animesharp-x4", "AnimeSharp x4", true, false}},
+        {"modernspanimation-x2", {"modernspanimation-v2", "ModernSpanimation v2 x2", true, false}},
+        {"modernspanimation-x2-fp32", {"modernspanimation-v2-fp32", "ModernSpanimation v2 x2 fp32", true, false}},
+        {"modernspanimation-x2-v1compact", {"modernspanimation-v1-compact", "ModernSpanimation v1 Compact x2", true, false}},
+        {"animejananai-hd-compact-x2", {"animejanai-hd-v3", "AnimeJaNai HD V3 Compact x2", true, false}},
+        {"realistic-rescaler-x4", {"realistic-rescaler-x4", "RealisticRescaler x4", true, false}},
+        {"sharpen-cas", {"cas-sharpen", "Contrast-Adaptive Sharpening", false, false}},
+        {"rife-v4-7", {"rife-v4-7", "RIFE v4.7", false, false}},
+        {"rife-v4-8", {"rife-v4-8", "RIFE v4.8", false, false}},
+        {"rife-v4-9", {"rife-v4-9", "RIFE v4.9", false, false}},
+        {"interp-ffmpeg", {"interp-ffmpeg", "FFmpeg Interpolation", false, false}},
+    };
+    const auto it = map.find(modelId);
+    if (it == map.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+}  // namespace
 
 // ─────────────────────────────────────────────────────────────────
 // Built-in model catalog
@@ -160,36 +224,52 @@ static const std::vector<ModelEntry> kCatalog = {
     // Deblur
     // ════════════════════════════════════════════════════════════
     {
-        /* id          */ "nafnet-deblur-gopro",
-        /* displayName */ "NAFNet GoPro Motion Deblur (ONNX)",
+        /* id          */ "realesrnet-deblur-x2",
+        /* displayName */ "Real-ESRNet x2+ (MiGraphX-safe deblur + restore)",
         /* stage       */ StageKind::Deblur,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
-        /* scale       */ 1,
+        /* scale       */ 2,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://huggingface.co/opencv/deblurring_nafnet/resolve/main/deblurring_nafnet_2025may.onnx",
-        /* filename    */ "deblurring_nafnet_2025may.onnx",
+        /* downloadUrl */ "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
+        /* filename    */ "2x_ModernSpanimationV2_clamp_op20_onnxslim.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "NAFNet trained on GoPro – strong motion blur removal at native resolution. Official OpenCV Zoo model.",
+        /* description */ "Compile-proven x2 restoration model used as the default MiGraphX deblur option. Conservative sharpening and stable reconstruction make it a safer substitute for hostile native deblur exports.",
         /* isDefault   */ true,
-        /* minVram     */ 1024
+        /* minVram     */ 512
     },
     {
-        /* id          */ "ultrasharpv2-deblur",
-        /* displayName */ "4x-UltraSharpV2 (deblur + upscale)",
+        /* id          */ "openproteus-deblur-x2",
+        /* displayName */ "OpenProteus Compact x2 (detail-focused deblur)",
+        /* stage       */ StageKind::Deblur,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 2,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://github.com/Sirosky/Upscale-Hub/releases/download/OpenProteus/2x_OpenProteus_Compact_i2_70K_fp32.onnx",
+        /* filename    */ "2x_OpenProteus_Compact_i2_70K_fp32.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Compile-proven x2 OpenProteus export tuned for restrained sharpening and detail recovery. Best suited when the deblur stage should recover crispness without aggressive GAN-style overshoot.",
+        /* isDefault   */ false,
+        /* minVram     */ 512
+    },
+    {
+        /* id          */ "clearreality-deblur-x4",
+        /* displayName */ "ClearReality V1 x4 (fast deblur + upscale)",
         /* stage       */ StageKind::Deblur,
         /* format      */ ModelFormat::Onnx,
         /* precision   */ ModelPrecision::Fp32,
         /* scale       */ 4,
         /* fpsMul      */ 1.0,
-        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-UltraSharpV2.onnx",
-        /* filename    */ "4x-UltraSharpV2.onnx",
+        /* downloadUrl */ "https://huggingface.co/yuvraj108c/ComfyUI-Upscaler-Onnx/resolve/main/4x-ClearRealityV1.onnx",
+        /* filename    */ "4x-ClearRealityV1.onnx",
         /* dlUrlAux    */ "",
         /* filenameAux */ "",
-        /* description */ "4x-UltraSharpV2 – second-generation UltraSharp with improved deblurring and sharpness recovery.",
+        /* description */ "Fastest compile-proven MiGraphX-compatible deblur replacement in the repo history. Lightweight x4 restoration that trades peak fidelity for predictable compilation and throughput.",
         /* isDefault   */ false,
-        /* minVram     */ 2048
+        /* minVram     */ 256
     },
 
     // ════════════════════════════════════════════════════════════
@@ -617,6 +697,133 @@ static const std::vector<ModelEntry> kCatalog = {
     },
 
     // ════════════════════════════════════════════════════════════
+    // Stereo 3D / 2D -> 3D SBS
+    // ════════════════════════════════════════════════════════════
+    {
+        /* id          */ "depth-anything-v2-small-fp16",
+        /* displayName */ "Depth Anything V2 Small fp16 (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp16,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+        /* filename    */ "depth-anything-v2-small-fp16.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Depth Anything V2 Small ONNX export. Fast relative-depth model suitable for 2D-to-3D SBS generation with iw3-style divergence and convergence controls.",
+        /* isDefault   */ true,
+        /* minVram     */ 1024,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0,
+        /* migraphxOnnxTransform */ MiGraphXOnnxTransform::ResizeCubicToLinear
+    },
+    {
+        /* id          */ "depth-anything-v2-base-fp16",
+        /* displayName */ "Depth Anything V2 Base fp16 (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp16,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx",
+        /* filename    */ "depth-anything-v2-base-fp16.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Depth Anything V2 Base fp16 ONNX export. Better scene geometry than the small model at a moderate VRAM cost.",
+        /* isDefault   */ false,
+        /* minVram     */ 2048,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0,
+        /* migraphxOnnxTransform */ MiGraphXOnnxTransform::ResizeCubicToLinear
+    },
+    {
+        /* id          */ "depth-anything-v2-large-fp16",
+        /* displayName */ "Depth Anything V2 Large fp16 (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp16,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/onnx-community/depth-anything-v2-large/resolve/main/onnx/model_fp16.onnx",
+        /* filename    */ "depth-anything-v2-large-fp16.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Depth Anything V2 Large fp16 ONNX export. Highest-detail Depth Anything V2 variant in the built-in stereo catalog.",
+        /* isDefault   */ false,
+        /* minVram     */ 4096,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0,
+        /* migraphxOnnxTransform */ MiGraphXOnnxTransform::ResizeCubicToLinear
+    },
+    {
+        /* id          */ "distill-any-depth-small",
+        /* displayName */ "Distill Any Depth Small (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/FuryTMP/Distill-Any-Depth-Small-onnx/resolve/main/Distill%20Any%20Depth%20Small/model.onnx",
+        /* filename    */ "distill-any-depth-small.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Distill Any Depth Small ONNX export. Compact distilled depth model for fast 2D-to-3D conversion; the source export is fp32, but the app compiles fp16 artifacts by default.",
+        /* isDefault   */ false,
+        /* minVram     */ 1536,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0
+    },
+    {
+        /* id          */ "distill-any-depth-base",
+        /* displayName */ "Distill Any Depth Base (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/FuryTMP/Distill-Any-Depth-Base-onnx/resolve/main/Distill%20Any%20Depth%20Base/model.onnx",
+        /* filename    */ "distill-any-depth-base.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Distill Any Depth Base ONNX export. Balanced distilled depth estimator for stereo synthesis; the source export is fp32, but the app compiles fp16 artifacts by default.",
+        /* isDefault   */ false,
+        /* minVram     */ 3072,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0
+    },
+    {
+        /* id          */ "distill-any-depth-large",
+        /* displayName */ "Distill Any Depth Large (2D -> 3D depth, ONNX)",
+        /* stage       */ StageKind::Stereo3D,
+        /* format      */ ModelFormat::Onnx,
+        /* precision   */ ModelPrecision::Fp32,
+        /* scale       */ 1,
+        /* fpsMul      */ 1.0,
+        /* downloadUrl */ "https://huggingface.co/FuryTMP/Distill-Any-Depth-Large-onnx/resolve/main/Distill%20Any%20Depth%20Large/model.onnx",
+        /* filename    */ "distill-any-depth-large.onnx",
+        /* dlUrlAux    */ "",
+        /* filenameAux */ "",
+        /* description */ "Distill Any Depth Large ONNX export. Highest-capacity distilled monocular depth model in the built-in stereo catalog; the source export is fp32, but the app compiles fp16 artifacts by default.",
+        /* isDefault   */ false,
+        /* minVram     */ 6144,
+        /* archiveSubPath */ "",
+        /* archiveSubPathAux */ "",
+        /* migraphxCompileWidth */ 0,
+        /* migraphxCompileHeight */ 0
+    },
+
+    // ════════════════════════════════════════════════════════════
     // Interpolate (Frame Interpolation)
     // ════════════════════════════════════════════════════════════
     {
@@ -706,6 +913,228 @@ const ModelEntry* catalogEntryById(const std::string& id) {
             return &entry;
         }
     }
+    return nullptr;
+}
+
+std::string inferModelIdFromPath(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    auto candidate = std::filesystem::path(path).stem().string();
+    if (candidate.empty()) {
+        return {};
+    }
+
+    if (const auto* entry = catalogEntryById(candidate); entry != nullptr) {
+        return entry->id;
+    }
+
+    const auto trimSuffix = [&](const std::string& suffix) {
+        if (candidate.size() > suffix.size() &&
+            candidate.compare(candidate.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            candidate.resize(candidate.size() - suffix.size());
+            return true;
+        }
+        return false;
+    };
+
+    trimSuffix("_fp16");
+    trimSuffix("_fp32");
+    trimSuffix("_int8");
+    if (const auto* entry = catalogEntryById(candidate); entry != nullptr) {
+        return entry->id;
+    }
+
+    auto isDigits = [](const std::string& value) {
+        return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        });
+    };
+
+    while (true) {
+        const std::size_t lastUnderscore = candidate.rfind('_');
+        if (lastUnderscore == std::string::npos) {
+            break;
+        }
+        const std::string suffix = candidate.substr(lastUnderscore + 1);
+        bool stripped = false;
+        if ((suffix.size() >= 2 && suffix[0] == 'b' && isDigits(suffix.substr(1))) ||
+            suffix == "fp16" || suffix == "fp32" || suffix == "int8") {
+            stripped = true;
+        } else {
+            const std::size_t xPos = suffix.find('x');
+            if (xPos != std::string::npos &&
+                isDigits(suffix.substr(0, xPos)) &&
+                isDigits(suffix.substr(xPos + 1))) {
+                stripped = true;
+            }
+        }
+        if (!stripped) {
+            break;
+        }
+        candidate.resize(lastUnderscore);
+        if (const auto* entry = catalogEntryById(candidate); entry != nullptr) {
+            return entry->id;
+        }
+    }
+
+    return {};
+}
+
+std::string modelFamilyId(const ModelEntry& entry) {
+    if (!entry.familyId.empty()) {
+        return entry.familyId;
+    }
+    if (const auto* builtin = builtinFamilyInfoForId(entry.id); builtin != nullptr) {
+        return builtin->id;
+    }
+    return entry.id;
+}
+
+std::string modelFamilyName(const ModelEntry& entry) {
+    if (!entry.familyName.empty()) {
+        return entry.familyName;
+    }
+    if (const auto* builtin = builtinFamilyInfoForId(entry.id); builtin != nullptr) {
+        return builtin->name;
+    }
+    return entry.displayName;
+}
+
+std::vector<StageKind> modelCapabilities(const ModelEntry& entry) {
+    if (!entry.capabilities.empty()) {
+        return entry.capabilities;
+    }
+
+    std::vector<StageKind> out = {entry.stage};
+    const std::string familyId = modelFamilyId(entry);
+    std::unordered_set<int> seen = {static_cast<int>(entry.stage)};
+    for (const auto& candidate : kCatalog) {
+        if (candidate.id == entry.id) {
+            continue;
+        }
+        if (modelFamilyId(candidate) != familyId) {
+            continue;
+        }
+        if (seen.insert(static_cast<int>(candidate.stage)).second) {
+            out.push_back(candidate.stage);
+        }
+    }
+    return out;
+}
+
+bool modelSupportsCapability(const ModelEntry& entry, const StageKind capability) {
+    const auto capabilities = modelCapabilities(entry);
+    return std::find(capabilities.begin(), capabilities.end(), capability) != capabilities.end();
+}
+
+bool modelCanFuseRequestedCapabilities(const ModelEntry& entry,
+                                       const std::vector<StageKind>& requested) {
+    if (requested.size() <= 1) {
+        return true;
+    }
+
+    bool supportsFusedExecution = entry.supportsFusedExecution;
+    bool supportsSelectiveCapabilities = entry.supportsSelectiveCapabilities;
+    if (const auto* builtin = builtinFamilyInfoForId(entry.id); builtin != nullptr) {
+        supportsFusedExecution = supportsFusedExecution || builtin->supportsFusedExecution;
+        supportsSelectiveCapabilities =
+            supportsSelectiveCapabilities || builtin->supportsSelectiveCapabilities;
+    }
+    if (!supportsFusedExecution) {
+        return false;
+    }
+
+    const auto capabilities = modelCapabilities(entry);
+    std::unordered_set<int> supported;
+    for (const auto kind : capabilities) {
+        supported.insert(static_cast<int>(kind));
+    }
+    for (const auto kind : requested) {
+        if (supported.find(static_cast<int>(kind)) == supported.end()) {
+            return false;
+        }
+    }
+    if (supportsSelectiveCapabilities) {
+        return true;
+    }
+    return requested.size() == capabilities.size();
+}
+
+bool modelLooksAnimationFocused(const ModelEntry& entry) {
+    auto containsKeyword = [](const std::string& haystack,
+                              const char* needle) {
+        if (needle == nullptr || *needle == '\0') {
+            return false;
+        }
+        std::string lowered;
+        lowered.reserve(haystack.size());
+        for (const char ch : haystack) {
+            lowered.push_back(
+                static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        return lowered.find(needle) != std::string::npos;
+    };
+
+    return containsKeyword(entry.id, "anime")
+        || containsKeyword(entry.id, "animation")
+        || containsKeyword(entry.displayName, "anime")
+        || containsKeyword(entry.displayName, "animation")
+        || containsKeyword(entry.description, "anime")
+        || containsKeyword(entry.description, "animation")
+        || containsKeyword(entry.description, "animated")
+        || containsKeyword(entry.description, "cartoon")
+        || containsKeyword(entry.description, "cgi");
+}
+
+bool modelSupportsBackend(const ModelEntry& entry, const BackendType backend) {
+    switch (backend) {
+        case BackendType::NcnnVulkan:
+            return entry.sourceFormat == ModelFormat::NcnnBin;
+        case BackendType::MiGraphX:
+            return entry.sourceFormat == ModelFormat::Onnx
+                || entry.sourceFormat == ModelFormat::Pytorch;
+        default:
+            return true;
+    }
+}
+
+const ModelEntry* preferredBackendModelForStage(const StageKind stage,
+                                                const BackendType backend) {
+    const auto entries = catalogEntriesForStage(stage);
+    if (entries.empty()) {
+        return nullptr;
+    }
+
+    const auto pickMatching = [&](const auto& predicate) -> const ModelEntry* {
+        for (const auto* entry : entries) {
+            if (entry != nullptr && predicate(*entry)) {
+                return entry;
+            }
+        }
+        return nullptr;
+    };
+
+    if (const auto* preferred = pickMatching([backend](const ModelEntry& entry) {
+            return entry.isDefault && modelSupportsBackend(entry, backend);
+        })) {
+        return preferred;
+    }
+
+    if (const auto* preferred = pickMatching([backend](const ModelEntry& entry) {
+            return modelSupportsBackend(entry, backend)
+                && !modelLooksAnimationFocused(entry);
+        })) {
+        return preferred;
+    }
+
+    if (const auto* preferred = pickMatching([backend](const ModelEntry& entry) {
+            return modelSupportsBackend(entry, backend);
+        })) {
+        return preferred;
+    }
+
     return nullptr;
 }
 

@@ -24,11 +24,31 @@ struct EnhancementStage {
 };
 
 std::string parameterValueToString(const ParameterValue& value);
+ParameterValue parameterValueFromString(const std::string& value);
+std::optional<EnhancementStage> parseStageSpec(const std::string& spec,
+                                               std::string& error);
+std::string scopedStageParamKey(StageKind kind, const std::string& key);
 bool tryGetDouble(const std::unordered_map<std::string, ParameterValue>& params,
                   const std::string& key,
                   double& outValue);
 bool tryGetInt(const std::unordered_map<std::string, ParameterValue>& params,
                const std::string& key,
                std::int64_t& outValue);
+bool tryGetDouble(const EnhancementStage& stage,
+                  StageKind scope,
+                  const std::string& key,
+                  double& outValue);
+bool tryGetInt(const EnhancementStage& stage,
+               StageKind scope,
+               const std::string& key,
+               std::int64_t& outValue);
+bool tryGetBool(const EnhancementStage& stage,
+                StageKind scope,
+                const std::string& key,
+                bool& outValue);
+bool tryGetString(const EnhancementStage& stage,
+                  StageKind scope,
+                  const std::string& key,
+                  std::string& outValue);
 
 }  // namespace ave

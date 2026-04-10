@@ -3,6 +3,10 @@
 #include <memory>
 #include <string>
 
+extern "C" {
+struct AVBufferRef;
+}
+
 #ifdef AVE_HAVE_VULKAN
 #include <vulkan/vulkan.h>
 #endif
@@ -15,6 +19,7 @@ public:
     ~VulkanRuntime();
 
     bool initialize(std::string& error);
+    bool initialize(const AVBufferRef* ffmpegHwDeviceContext, std::string& error);
     bool isAvailable(std::string& reason) const;
 
 #ifdef AVE_HAVE_VULKAN

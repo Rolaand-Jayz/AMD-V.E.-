@@ -67,6 +67,7 @@ QString stageBadge(ave::StageKind kind) {
         case ave::StageKind::ColorFix:           return QStringLiteral("Color Fix");
         case ave::StageKind::Upscale:            return QStringLiteral("Upscale");
         case ave::StageKind::Sharpen:            return QStringLiteral("Sharpen");
+        case ave::StageKind::Stereo3D:           return QStringLiteral("2D to 3D");
         case ave::StageKind::Interpolate:        return QStringLiteral("Interpolate");
     }
     return QStringLiteral("Unknown");

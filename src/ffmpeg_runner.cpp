@@ -48,6 +48,9 @@ struct TempDirectoryGuard {
     }
 };
 
+bool isAiProcessable(const EnhancementStage& stage,
+                     const IAcceleratorBackend* backend);
+
 bool commandInPath(const std::string& command) {
     const char* pathEnv = std::getenv("PATH");
     if (pathEnv == nullptr) {
@@ -412,6 +415,36 @@ std::optional<std::string> buildVibranceFilter(const EnhancementStage& stage) {
     return "vibrance=intensity=" + formatDouble(intensity);
 }
 
+bool stageSupportsFfmpegFallback(const StageKind kind) {
+    switch (kind) {
+        case StageKind::Stereo3D:
+            return false;
+        case StageKind::RestoreCompression:
+        case StageKind::RemoveArtifacts:
+        case StageKind::Denoise:
+        case StageKind::Deblur:
+        case StageKind::Dehalo:
+        case StageKind::ColorFix:
+        case StageKind::Upscale:
+        case StageKind::Sharpen:
+        case StageKind::Interpolate:
+            return true;
+    }
+    return false;
+}
+
+bool validateStageFallbackSupport(const EnhancementStage& stage,
+                                  const bool aiProcessable,
+                                  std::string& error) {
+    if (aiProcessable || stageSupportsFfmpegFallback(stage.kind)) {
+        return true;
+    }
+
+    error = "Stage '" + toString(stage.kind) +
+            "' requires an AI backend with an available model; FFmpeg fallback is not supported.";
+    return false;
+}
+
 void appendFiltersForStage(const EnhancementStage& stage, std::vector<std::string>& filters, const bool includeUpscale) {
     // If the accelerator backend already performed AI inference for
     // this stage, do NOT add FFmpeg filters — they would either
@@ -518,6 +551,9 @@ void appendFiltersForStage(const EnhancementStage& stage, std::vector<std::strin
             filters.push_back("unsharp=5:5:" + formatDouble(amount) + ":3:3:0");
             break;
         }
+        case StageKind::Stereo3D:
+            // stereo_3d must run through an AI-capable backend.
+            break;
         case StageKind::Interpolate: {
             const double fps = clampDouble(getDoubleParam(stage, "fps", 60.0), 1.0, 240.0);
             std::ostringstream os;
@@ -625,25 +661,31 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
     std::string currentVideoPath = job.inputPath;
     int fileIndex = 0;
-    bool previewLimitPending = job.previewMode && job.previewDurationSec > 0.0;
 
     auto makeTempVideo = [&]() -> std::string {
         return (tempGuard.path / ("temp_" + std::to_string(fileIndex++) + ".mkv")).string();
     };
-    auto appendPreviewLimit = [&](std::ostringstream& cmd) {
-        if (!previewLimitPending) {
-            return;
-        }
-        cmd << "-t " << job.previewDurationSec << ' ';
-        previewLimitPending = false;
+    auto makePreviewVideo = [&]() -> std::string {
+        return (tempGuard.path / ("preview_" + std::to_string(fileIndex++) + ".mp4")).string();
     };
-    auto consumePreviewDurationForBackend = [&]() -> double {
-        if (!previewLimitPending) {
-            return 0.0;
-        }
-        previewLimitPending = false;
-        return job.previewDurationSec;
-    };
+
+    // ── Preview: create a duration-limited clip if preview mode ──
+    const bool isPreview = job.previewMode && job.previewDurationSec > 0.0;
+    if (isPreview) {
+        std::string previewClip = makePreviewVideo();
+        std::ostringstream pvCmd;
+        pvCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
+              << "-i " << quoteArg(currentVideoPath) << ' '
+              << "-t " << job.previewDurationSec << ' '
+              << "-map 0:v:0 -map 0:a? "
+              << "-c:v libx264 -crf 0 -preset ultrafast "
+              << "-c:a aac -b:a 160k "
+              << quoteArg(previewClip);
+        if (!runFfmpegWithProgress(pvCmd.str(), "create-preview-clip",
+                                   totalInputFrames, nullptr, error))
+            return false;
+        currentVideoPath = previewClip;
+    }
 
     std::vector<std::string> pendingFilters;
     std::vector<std::string> postFilters;
@@ -651,7 +693,11 @@ bool encodeWithAiProcessing(const VideoJob& job,
     std::size_t lastAiIdx = 0;
     bool hasAnyAi = false;
     for (std::size_t i = 0; i < orderedStages.size(); ++i) {
-        if (isAiProcessable(orderedStages[i], backend)) {
+        const bool aiProcessable = isAiProcessable(orderedStages[i], backend);
+        if (!validateStageFallbackSupport(orderedStages[i], aiProcessable, error)) {
+            return false;
+        }
+        if (aiProcessable) {
             lastAiIdx = i;
             hasAnyAi = true;
         }
@@ -700,16 +746,13 @@ bool encodeWithAiProcessing(const VideoJob& job,
             std::string nextVideo = makeTempVideo();
             std::ostringstream filterCmd;
             filterCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                      << "-i " << quoteArg(currentVideoPath) << ' ';
-            appendPreviewLimit(filterCmd);
-            filterCmd
+                      << "-i " << quoteArg(currentVideoPath) << ' '
                       << "-vf " << quoteArg(joinFilters(pendingFilters)) << ' '
                       << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
                       << quoteArg(nextVideo);
 
             if (!runFfmpegWithProgress(filterCmd.str(), "apply-intermediate-filters",
-                                       totalInputFrames, nullptr, error,
-                                       job.cancelFlag))
+                                       totalInputFrames, nullptr, error))
                 return false;
 
             currentVideoPath = nextVideo;
@@ -735,7 +778,10 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
             // Build process options for preview support
             ProcessVideoOptions pvOpts;
-            pvOpts.previewDurationSec = consumePreviewDurationForBackend();
+            // The pipeline already materialises a duration-limited preview clip
+            // before invoking backend processing, so backends should process
+            // that clip as-is instead of trimming it a second time.
+            pvOpts.previewDurationSec = 0.0;
             pvOpts.framePreviewCb     = job.framePreviewCb;
             pvOpts.previewFrameInterval = job.previewFrameInterval;
             pvOpts.cancelFlag         = job.cancelFlag;
@@ -788,20 +834,24 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
         // Fallback: backend is null or deferred — apply FFmpeg filter
         if (!aiHandled) {
+            if (!stageSupportsFfmpegFallback(stage.kind)) {
+                error = "Stage '" + toString(stage.kind) +
+                        "' could not be processed by " +
+                        (backend ? backend->name() : std::string("the selected backend")) +
+                        " and has no FFmpeg fallback.";
+                return false;
+            }
             std::vector<std::string> fallbackFilter;
             appendFiltersForStage(stage, fallbackFilter, true);
             if (!fallbackFilter.empty()) {
                 std::ostringstream fbCmd;
                 fbCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-                    << "-i " << quoteArg(currentVideoPath) << ' ';
-                appendPreviewLimit(fbCmd);
-                fbCmd
+                      << "-i " << quoteArg(currentVideoPath) << ' '
                       << "-vf " << quoteArg(joinFilters(fallbackFilter)) << ' '
                       << "-c:v libx264 -crf 0 -preset ultrafast -c:a copy "
                       << quoteArg(aiOutputVideo);
                 if (!runFfmpegWithProgress(fbCmd.str(), "fallback-filter",
-                                 totalInputFrames, nullptr, error,
-                                 job.cancelFlag))
+                                           totalInputFrames, nullptr, error))
                     return false;
             } else {
                 aiOutputVideo = currentVideoPath;
@@ -833,9 +883,7 @@ bool encodeWithAiProcessing(const VideoJob& job,
 
     std::ostringstream encCmd;
     encCmd << "ffmpeg -y -hide_banner -loglevel error -progress - "
-            << "-i " << quoteArg(currentVideoPath) << ' ';
-
-        appendPreviewLimit(encCmd);
+           << "-i " << quoteArg(currentVideoPath) << ' ';
 
     if (currentVideoPath != job.inputPath) {
         encCmd << "-i " << quoteArg(job.inputPath) << ' ';
@@ -892,7 +940,11 @@ bool FfmpegRunner::encode(const VideoJob& job,
     // Check whether any stage should be processed via AI inference.
     bool hasAiStages = false;
     for (const auto& stage : orderedStages) {
-        if (isAiProcessable(stage, backend)) {
+        const bool aiProcessable = isAiProcessable(stage, backend);
+        if (!validateStageFallbackSupport(stage, aiProcessable, error)) {
+            return false;
+        }
+        if (aiProcessable) {
             hasAiStages = true;
             break;
         }

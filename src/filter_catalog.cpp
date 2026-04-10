@@ -1072,6 +1072,15 @@ except:
 clip.set_output()
 )";
 
+static const char* const kVsQtgmc = R"(
+# QTGMC deinterlace
+import vapoursynth as vs
+core = vs.core
+clip = video
+clip = core.qtgmc.QTGMC(clip, Preset="Slower", InputType=0)
+clip.set_output()
+)";
+
 static const char* const kVsMvtoolsDenoise = R"(
 # MVTools Temporal Denoise (motion-compensated)
 import vapoursynth as vs
@@ -1288,7 +1297,7 @@ try:
     clip = core.focus2.TemporalSoften2(clip, radius=radius,
         luma_threshold=luma_threshold, chroma_threshold=chroma_threshold)
 except:
-clip = core.focus.TemporalSoften(clip, radius=radius,
+    clip = core.focus.TemporalSoften(clip, radius=radius,
         luma_threshold=luma_threshold, chroma_threshold=chroma_threshold)
 clip.set_output()
 )";
@@ -1829,6 +1838,15 @@ std::vector<EmbeddedFilter> buildCatalog() {
     // ═════════════════════════════════════════════════════════════
     //  VapourSynth Filters
     // ═════════════════════════════════════════════════════════════
+
+    filters.push_back({
+        "vs.qtgmc",
+        "QTGMC Deinterlace",
+        "High-quality motion-compensated deinterlacing for damaged or interlaced sources.",
+        FilterCategory::Denoise, FilterRuntime::VapourSynth, StageKind::Denoise, 5,
+        kVsQtgmc,
+        {}
+    });
 
     filters.push_back({
         "vs.knlmeanscl",

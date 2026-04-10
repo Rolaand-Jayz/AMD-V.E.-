@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -20,8 +21,11 @@
 #include <vector>
 
 #include "ave/frame_io.hpp"
+#include "ave/process_observer.hpp"
+#include "ave/rgb_video_loop.hpp"
 #include "ave/stage.hpp"
 #include "ave/types.hpp"
+#include "ave/video_probe.hpp"
 
 #ifdef AVE_HAVE_VULKAN
 #include <vulkan/vulkan.h>
@@ -33,6 +37,29 @@ namespace ave {
 // Embedded GLSL compute shader sources
 // ─────────────────────────────────────────────────────────────────
 namespace {
+
+std::optional<int> readNonNegativeEnvIntVk(const char* name) {
+    if (name == nullptr) {
+        return std::nullopt;
+    }
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    const long value = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || value < 0L) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+std::optional<int> preferredVulkanDeviceIndexFromEnv() {
+    if (const auto explicitVk = readNonNegativeEnvIntVk("AVE_VULKAN_DEVICE_INDEX"); explicitVk.has_value()) {
+        return explicitVk;
+    }
+    return readNonNegativeEnvIntVk("AVE_GPU_INDEX");
+}
 
 // All shaders operate on RGB float buffers in SSBO layout:
 //   Buffer[pixelIndex * 3 + 0] = R
@@ -352,28 +379,6 @@ void main() {
 
 // ─── Utility helpers ────────────────────────────────────────────
 
-bool fileExistsVk(const std::string& p) {
-    std::error_code ec;
-    return std::filesystem::exists(p, ec);
-}
-
-bool commandInPathVk(const std::string& cmd) {
-    const char* pathEnv = std::getenv("PATH");
-    if (!pathEnv) return false;
-    std::string path(pathEnv);
-    std::size_t start = 0;
-    while (start <= path.size()) {
-        auto end = path.find(':', start);
-        if (end == std::string::npos) end = path.size();
-        const std::string dir = path.substr(start, end - start);
-        if (!dir.empty() && fileExistsVk((std::filesystem::path(dir) / cmd).string()))
-            return true;
-        if (end == path.size()) break;
-        start = end + 1;
-    }
-    return false;
-}
-
 std::string spirvCacheDir() {
     const char* home = std::getenv("HOME");
     if (!home) return "/tmp/ave-spirv";
@@ -390,7 +395,7 @@ bool compileGlslToSpirv(const std::string& glslSource,
     const std::string cachePath = cacheDir + "/" + cacheKey + ".spv";
 
     // Check cache first
-    if (fileExistsVk(cachePath)) {
+    if (process_observer::fileExists(cachePath)) {
         std::ifstream f(cachePath, std::ios::binary | std::ios::ate);
         if (f.is_open()) {
             const auto size = f.tellg();
@@ -420,18 +425,14 @@ bool compileGlslToSpirv(const std::string& glslSource,
     // Compile via glslc
     const std::string cmd = "glslc -fshader-stage=compute -o \""
         + cachePath + "\" \"" + tmpGlsl + "\" 2>&1";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
+    int rc = 0;
+    const auto output = process_observer::captureCommandStdout(cmd, rc);
+    if (!output.has_value()) {
         error = "Failed to start glslc";
         return false;
     }
-    std::string output;
-    std::array<char, 512> buf{};
-    while (std::fgets(buf.data(), static_cast<int>(buf.size()), pipe))
-        output += buf.data();
-    const int rc = pclose(pipe);
     if (rc != 0) {
-        error = "glslc compilation failed: " + output;
+        error = "glslc compilation failed: " + *output;
         std::filesystem::remove(cachePath);
         return false;
     }
@@ -461,50 +462,6 @@ bool compileGlslToSpirv(const std::string& glslSource,
 }
 
 // ─── Video probe ────────────────────────────────────────────────
-
-struct ProbeResultVk {
-    int width       = 0;
-    int height      = 0;
-    double fps      = 0.0;
-    int64_t totalFrames = 0;
-};
-
-bool probeVideoVk(const std::string& path, ProbeResultVk& result, std::string& error) {
-    {
-        const std::string cmd =
-            "ffprobe -v error -select_streams v:0 "
-            "-show_entries stream=width,height,r_frame_rate "
-            "-of csv=p=0 \"" + path + "\" 2>/dev/null";
-        FILE* p = popen(cmd.c_str(), "r");
-        if (!p) { error = "ffprobe failed (popen)"; return false; }
-        std::array<char, 256> buf{};
-        if (std::fgets(buf.data(), static_cast<int>(buf.size()), p)) {
-            int num = 0, den = 1;
-            if (std::sscanf(buf.data(), "%d,%d,%d/%d",
-                            &result.width, &result.height, &num, &den) >= 3) {
-                if (den > 0) result.fps = static_cast<double>(num) / static_cast<double>(den);
-            }
-        }
-        pclose(p);
-    }
-    {
-        const std::string cmd =
-            "ffprobe -v error -count_packets -select_streams v:0 "
-            "-show_entries stream=nb_read_packets -of csv=p=0 \"" + path + "\" 2>/dev/null";
-        FILE* p = popen(cmd.c_str(), "r");
-        if (p) {
-            std::array<char, 64> buf{};
-            if (std::fgets(buf.data(), static_cast<int>(buf.size()), p))
-                result.totalFrames = std::atoll(buf.data());
-            pclose(p);
-        }
-    }
-    if (result.width <= 0 || result.height <= 0) {
-        error = "ffprobe returned invalid dimensions for " + path;
-        return false;
-    }
-    return true;
-}
 
 // ─── Map StageKind to shader ────────────────────────────────────
 
@@ -595,7 +552,7 @@ std::string VulkanComputeBackend::name() const { return "Vulkan Compute"; }
 
 bool VulkanComputeBackend::isAvailable(std::string& reason) const {
 #ifdef AVE_HAVE_VULKAN
-    if (!commandInPathVk("glslc")) {
+    if (!process_observer::commandInPath("glslc")) {
         reason = "glslc (Vulkan SDK shader compiler) not found in PATH.";
         return false;
     }
@@ -697,41 +654,38 @@ StageResult VulkanComputeBackend::processVideoFile(
     // Get strength/scale parameter
     float param = defaultStrength(stage.kind);
     {
-        auto it = stage.params.find("strength");
-        if (it != stage.params.end()) {
-            if (const auto* d = std::get_if<double>(&it->second))
-                param = static_cast<float>(*d);
+        double value = static_cast<double>(param);
+        if (tryGetDouble(stage, stage.kind, "strength", value)) {
+            param = static_cast<float>(value);
         }
         if (stage.kind == StageKind::Upscale) {
-            auto sit = stage.params.find("scale");
-            if (sit != stage.params.end()) {
-                if (const auto* d = std::get_if<double>(&sit->second))
-                    param = static_cast<float>(*d);
+            if (tryGetDouble(stage, StageKind::Upscale, "scale", value)) {
+                param = static_cast<float>(value);
             }
         }
     }
 
     // Probe input video
-    ProbeResultVk probe;
-    if (!probeVideoVk(inputVideo, probe, error)) {
+    const auto probe = probeVideoStream(inputVideo, error);
+    if (!probe.has_value()) {
         return StageResult::Error;
     }
 
-    const int inW = probe.width;
-    const int inH = probe.height;
-    const int64_t totalFrames = probe.totalFrames;
+    const int inW = static_cast<int>(probe->width);
+    const int inH = static_cast<int>(probe->height);
+    const int64_t totalFrames = probe->estimatedFrameCount();
+    const double inputFps = probe->effectiveFrameRate(30.0);
 
     int outW = inW;
     int outH = inH;
     if (stage.kind == StageKind::Upscale) {
         // Check for explicit width/height params
-        auto wit = stage.params.find("width");
-        auto hit = stage.params.find("height");
-        if (wit != stage.params.end() && hit != stage.params.end()) {
-            if (const auto* dw = std::get_if<double>(&wit->second))
-                outW = static_cast<int>(*dw);
-            if (const auto* dh = std::get_if<double>(&hit->second))
-                outH = static_cast<int>(*dh);
+        double widthValue = static_cast<double>(outW);
+        double heightValue = static_cast<double>(outH);
+        if (tryGetDouble(stage, StageKind::Upscale, "width", widthValue) &&
+            tryGetDouble(stage, StageKind::Upscale, "height", heightValue)) {
+            outW = static_cast<int>(widthValue);
+            outH = static_cast<int>(heightValue);
             if (outW > 0 && outH > 0) {
                 param = static_cast<float>(outW) / static_cast<float>(inW);
             }
@@ -746,160 +700,71 @@ StageResult VulkanComputeBackend::processVideoFile(
               << ": " << inW << "x" << inH << " → " << outW << "x" << outH
               << " param=" << param << std::endl;
 
-    frame_io::VulkanVideoReader reader;
-    if (!reader.open(inputVideo, error)) {
-        return StageResult::Error;
-    }
-
-    frame_io::VulkanVideoWriter writer;
-    AVRational fps = reader.frameRate();
-    if (fps.num <= 0 || fps.den <= 0) {
-        fps = AVRational{static_cast<int>(std::round(probe.fps > 0.0 ? probe.fps : 30.0)), 1};
-    }
-    if (!writer.open(outputVideo, outW, outH, fps, error)) {
-        reader.close();
-        return StageResult::Error;
-    }
-
     const std::size_t inFrameBytes  = static_cast<std::size_t>(inW) * static_cast<std::size_t>(inH) * 3u;
     const std::size_t outFrameBytes = static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u;
     const std::size_t inFloats  = static_cast<std::size_t>(inW) * static_cast<std::size_t>(inH) * 3u;
     const std::size_t outFloats = static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u;
-
-    const int64_t maxFrames = opts.previewDurationSec > 0.0
-        ? static_cast<int64_t>(opts.previewDurationSec * (probe.fps > 0.0 ? probe.fps : 30.0) + 0.5)
-        : 0;
-
-    std::vector<uint8_t> rgbIn(inFrameBytes);
-    std::vector<uint8_t> rgbOut(outFrameBytes);
     std::vector<float> tensorIn(inFloats);
     std::vector<float> tensorOut(outFloats);
-    int frameIdx = 0;
-    bool cancelled = false;
+    RgbVideoLoopOptions loopOptions;
+    loopOptions.inputVideo = inputVideo;
+    loopOptions.outputVideo = outputVideo;
+    loopOptions.inputWidth = inW;
+    loopOptions.inputHeight = inH;
+    loopOptions.outputWidth = outW;
+    loopOptions.outputHeight = outH;
+    loopOptions.fps = inputFps;
+    loopOptions.fallbackFps = 30.0;
+    loopOptions.totalFrames = totalFrames;
+    loopOptions.backendTag = "vulkan-compute";
+    loopOptions.progressLabel = "Vulkan compute";
+    loopOptions.noFramesError = "No frames decoded from " + inputVideo;
+    loopOptions.preferredSourceMode = frame_io::RgbVideoSourceMode::VulkanTransfer;
+    loopOptions.allowSourceFallback = true;
+    loopOptions.processOptions = opts;
 
-    while (true) {
-        if (maxFrames > 0 && frameIdx >= maxFrames) {
-            break;
-        }
-
-        // ── Cancel / Pause check ────────────────────────────────
-        if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
-            std::cout << "[vulkan-compute] Cancelled at frame " << frameIdx << std::endl;
-            cancelled = true;
-            break;
-        }
-        while (opts.pauseFlag && opts.pauseFlag->load(std::memory_order_relaxed)) {
-            if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
-                cancelled = true;
-                break;
+    const auto loopResult = runRgbVideoLoop(
+        loopOptions,
+        [&](const std::vector<std::uint8_t>& rgbIn,
+            std::vector<std::uint8_t>& rgbOut,
+            const int frameIdx,
+            std::string& loopError) {
+            for (std::size_t i = 0; i < inFrameBytes; ++i) {
+                tensorIn[i] = static_cast<float>(rgbIn[i]) / 255.0f;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (cancelled) break;
 
-        AVFrame* inputFrame = nullptr;
-        if (!reader.readFrame(inputFrame, error)) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-        if (inputFrame == nullptr) {
-            break;
-        }
-
-        if (!frame_io::avFrameToRgb24(inputFrame, inW, inH, rgbIn, error)) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-
-        for (std::size_t i = 0; i < inFrameBytes; ++i) {
-            tensorIn[i] = static_cast<float>(rgbIn[i]) / 255.0f;
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(impl_->mtx);
-            if (!impl_->processFrame(pipeline,
-                                      tensorIn.data(), inFloats,
-                                      tensorOut.data(), outFloats,
-                                      inW, inH, param, error)) {
-                std::cerr << "[vulkan-compute] Frame " << frameIdx
-                          << " compute FAILED: " << error << std::endl;
-                writer.close();
-                reader.close();
-                return StageResult::Error;
+            {
+                std::lock_guard<std::mutex> lk(impl_->mtx);
+                if (!impl_->processFrame(pipeline,
+                                         tensorIn.data(), inFloats,
+                                         tensorOut.data(), outFloats,
+                                         inW, inH, param, loopError)) {
+                    std::cerr << "[vulkan-compute] Frame " << frameIdx
+                              << " compute FAILED: " << loopError << std::endl;
+                    return false;
+                }
             }
-        }
 
-        for (std::size_t i = 0; i < outFrameBytes; ++i) {
-            float v = std::clamp(tensorOut[i], 0.0f, 1.0f);
-            rgbOut[i] = static_cast<uint8_t>(std::round(v * 255.0f));
-        }
-
-        AVFrame* outputFrame = frame_io::rgb24ToAvFrame(rgbOut.data(), outW, outH, error);
-        if (outputFrame == nullptr) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-        const bool writeOk = writer.writeFrame(outputFrame, error);
-        av_frame_free(&outputFrame);
-        if (!writeOk) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-
-        ++frameIdx;
-
-        // Emit live frame preview
-        const int pvInterval = opts.previewFrameInterval > 0 ? opts.previewFrameInterval : 15;
-        if (opts.framePreviewCb && (frameIdx % pvInterval == 1 || pvInterval == 1)) {
-            opts.framePreviewCb(rgbOut.data(), outW, outH);
-        }
-
-        if (progressCb) {
-            float frac = 0.0f;
-            const int64_t effectiveTotal = maxFrames > 0 ? maxFrames : totalFrames;
-            if (effectiveTotal > 0) {
-                frac = static_cast<float>(frameIdx) / static_cast<float>(effectiveTotal);
-                frac = std::min(frac, 1.0f);
-            } else {
-                frac = 1.0f - 1.0f / (1.0f + static_cast<float>(frameIdx) * 0.01f);
+            if (rgbOut.size() != outFrameBytes) {
+                rgbOut.resize(outFrameBytes);
             }
-            progressCb(frac, "Vulkan compute: frame " + std::to_string(frameIdx)
-                        + (totalFrames > 0 ? "/" + std::to_string(totalFrames) : ""));
-        }
+            for (std::size_t i = 0; i < outFrameBytes; ++i) {
+                const float v = std::clamp(tensorOut[i], 0.0f, 1.0f);
+                rgbOut[i] = static_cast<uint8_t>(std::round(v * 255.0f));
+            }
+            return true;
+        },
+        progressCb,
+        error);
 
-        if (frameIdx % 30 == 0) {
-            std::cout << "[vulkan-compute] Processed " << frameIdx << " frames"
-                      << (totalFrames > 0 ? " / " + std::to_string(totalFrames) : "")
-                      << std::endl;
-        }
+    if (loopResult.stageResult != StageResult::Processed) {
+        return loopResult.stageResult;
     }
 
-    writer.close();
-    reader.close();
-
-    if (cancelled) {
-        error = "Processing cancelled by user at frame " + std::to_string(frameIdx);
-        return StageResult::Cancelled;
-    }
-    if (frameIdx == 0) {
-        error = "No frames decoded from " + inputVideo;
-        return StageResult::Error;
-    }
-
-    std::cout << "[vulkan-compute] Complete: " << frameIdx
+    std::cout << "[vulkan-compute] Complete: " << loopResult.frameCount
               << " frames via Vulkan compute for " << toString(stage.kind)
               << std::endl;
-
-    if (progressCb) {
-        progressCb(1.0f, "Vulkan compute complete — "
-                   + std::to_string(frameIdx) + " frames.");
-    }
-
-    return StageResult::Processed;
+    return loopResult.stageResult;
 #else
     (void)stage; (void)inputVideo; (void)outputVideo; (void)progressCb; (void)opts;
     error = "Vulkan not compiled in.";
@@ -942,16 +807,44 @@ bool VulkanComputeBackend::Impl::createDevice(std::string& error) {
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
-    // Prefer AMD GPU
-    physicalDevice = devices[0];
-    for (auto& dev : devices) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(dev, &props);
-        if (props.vendorID == 0x1002) { // AMD vendor ID
-            physicalDevice = dev;
-            std::cout << "[vulkan-compute] Selected AMD GPU: "
-                      << props.deviceName << std::endl;
-            break;
+    if (const auto preferredDevice = preferredVulkanDeviceIndexFromEnv(); preferredDevice.has_value()) {
+        if (*preferredDevice >= 0 && static_cast<uint32_t>(*preferredDevice) < deviceCount) {
+            physicalDevice = devices[static_cast<std::size_t>(*preferredDevice)];
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(physicalDevice, &props);
+            std::cout << "[vulkan-compute] Using explicit Vulkan device index "
+                      << *preferredDevice << ": " << props.deviceName << std::endl;
+        } else {
+            error = "Requested Vulkan device index " + std::to_string(*preferredDevice)
+                  + " is out of range for " + std::to_string(deviceCount) + " detected device(s).";
+            return false;
+        }
+    } else {
+        // Prefer AMD discrete GPU when available.
+        physicalDevice = devices[0];
+        bool foundAmdDiscrete = false;
+        for (auto& dev : devices) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(dev, &props);
+            if (props.vendorID == 0x1002 && props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                physicalDevice = dev;
+                foundAmdDiscrete = true;
+                std::cout << "[vulkan-compute] Selected discrete AMD GPU: "
+                          << props.deviceName << std::endl;
+                break;
+            }
+        }
+        if (!foundAmdDiscrete) {
+            for (auto& dev : devices) {
+                VkPhysicalDeviceProperties props;
+                vkGetPhysicalDeviceProperties(dev, &props);
+                if (props.vendorID == 0x1002) {
+                    physicalDevice = dev;
+                    std::cout << "[vulkan-compute] Selected AMD GPU: "
+                              << props.deviceName << std::endl;
+                    break;
+                }
+            }
         }
     }
 

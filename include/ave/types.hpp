@@ -14,6 +14,7 @@ enum class StageKind {
     ColorFix,
     Upscale,
     Sharpen,
+    Stereo3D,
     Interpolate
 };
 

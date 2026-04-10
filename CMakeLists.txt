@@ -22,26 +22,59 @@ option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # Requires roctracer-dev package: sudo apt install roctracer-dev
 option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
 option(AVE_INSTALL_BUNDLED_MIGRAPHX
-       "Install a bundled patched MiGraphX runtime with the app"     ON)
+       "Install the bundled MiGraphX compiler toolchain with the app" ON)
+option(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER
+       "Install bundled MiGraphX compiler tools and ONNX/TF sidecars with the app" ON)
+option(AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD
+       "Prefer AVE_BUNDLED_MIGRAPHX_PREFIX for build-time MiGraphX discovery" OFF)
+option(AVE_STRICT_BUNDLED_MIGRAPHX
+       "Fail packaging when the bundled MiGraphX runtime is missing transitive shared libraries" ON)
 option(AVE_INSTALL_BUNDLED_MODELS
        "Install the full model catalog with the app"                 ON)
+option(AVE_INSTALL_RUNTIME_DEPS
+       "Install non-system runtime shared libraries with the app"    ON)
 
 set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "")
 if(EXISTS "$ENV{HOME}/.local/opt/migraphx-codex/bin/migraphx-driver")
     set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{HOME}/.local/opt/migraphx-codex")
 endif()
 set(AVE_BUNDLED_MIGRAPHX_PREFIX "${_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX}" CACHE PATH
-    "Patched MiGraphX install prefix to bundle with the app")
+    "Optimized MiGraphX install prefix to bundle with the app")
+set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS "")
+foreach(_ave_extra_root IN ITEMS /usr/lib /usr/local/lib /opt/rocm/lib /opt/rocm/lib64)
+    if(EXISTS "${_ave_extra_root}")
+        list(APPEND _AVE_DEFAULT_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS "${_ave_extra_root}")
+    endif()
+endforeach()
+set(AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS
+    "${_AVE_DEFAULT_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS}" CACHE STRING
+    "Extra directories searched when bundling transitive MiGraphX compiler runtime libraries")
+
+if(AVE_HAVE_MIGRAPHX AND AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD AND
+   NOT AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "")
+    list(FIND CMAKE_PREFIX_PATH "${AVE_BUNDLED_MIGRAPHX_PREFIX}" _ave_migraphx_prefix_index)
+    if(_ave_migraphx_prefix_index EQUAL -1)
+        list(PREPEND CMAKE_PREFIX_PATH "${AVE_BUNDLED_MIGRAPHX_PREFIX}")
+    endif()
+    message(STATUS "Preferring optimized MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
+endif()
 
 if(AVE_INSTALL_BUNDLED_MIGRAPHX)
     if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "" OR
-       NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver")
+       NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib")
         message(WARNING
             "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but AVE_BUNDLED_MIGRAPHX_PREFIX does not contain "
-            "bin/migraphx-driver; disabling bundled MiGraphX install.")
+            "lib/migraphx/lib; disabling bundled MiGraphX install.")
         set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
     else()
-        message(STATUS "Bundling patched MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
+        message(STATUS "Bundling optimized MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
+        if(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER AND
+           NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver")
+            message(WARNING
+                "AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON but the bundled MiGraphX prefix does "
+                "not contain bin/migraphx-driver; disabling bundled MiGraphX compiler tools.")
+            set(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER OFF)
+        endif()
     endif()
 endif()
 
@@ -186,6 +219,53 @@ function(ave_add_native_optimizations target)
     endif()
 endfunction()
 
+function(ave_compute_prefix_rel_from_dir out_var install_dir)
+    if(NOT IS_ABSOLUTE "${install_dir}")
+        string(REPLACE "/" ";" _ave_dir_parts "${install_dir}")
+        set(_ave_rel ".")
+        foreach(_part IN LISTS _ave_dir_parts)
+            if(_part STREQUAL "" OR _part STREQUAL ".")
+                continue()
+            endif()
+            if(_ave_rel STREQUAL ".")
+                set(_ave_rel "..")
+            else()
+                string(APPEND _ave_rel "/..")
+            endif()
+        endforeach()
+    else()
+        set(_ave_rel ".")
+    endif()
+    set(${out_var} "${_ave_rel}" PARENT_SCOPE)
+endfunction()
+
+function(ave_append_imported_target_locations out_var target_name)
+    if(NOT TARGET ${target_name})
+        return()
+    endif()
+
+    set(_ave_locations "")
+    get_target_property(_ave_imported_configs ${target_name} IMPORTED_CONFIGURATIONS)
+    foreach(_ave_config IN LISTS _ave_imported_configs)
+        string(TOUPPER "${_ave_config}" _ave_config_upper)
+        get_target_property(_ave_location ${target_name} "IMPORTED_LOCATION_${_ave_config_upper}")
+        if(_ave_location AND EXISTS "${_ave_location}")
+            list(APPEND _ave_locations "${_ave_location}")
+        endif()
+    endforeach()
+
+    foreach(_ave_property IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
+        get_target_property(_ave_location ${target_name} ${_ave_property})
+        if(_ave_location AND EXISTS "${_ave_location}")
+            list(APPEND _ave_locations "${_ave_location}")
+        endif()
+    endforeach()
+
+    if(_ave_locations)
+        set(${out_var} "${${out_var}};${_ave_locations}" PARENT_SCOPE)
+    endif()
+endfunction()
+
 # ─────────────────────────────────────────────────────────────────
 # ave_core — static library
 # ─────────────────────────────────────────────────────────────────
@@ -200,15 +280,24 @@ add_library(ave_core
     src/frame_io.cpp
     src/frame_io_vulkan.cpp
     src/interop_bridge.cpp
+    src/job_recovery.cpp
+    src/job_queue.cpp
     src/model_catalog.cpp
     src/model_manager.cpp
     src/observability.cpp
     src/planner.cpp
+    src/process_observer.cpp
+    src/process_progress.cpp
+    src/process_loop.cpp
+    src/rgb_video_loop.cpp
     src/runtime_paths.cpp
+    src/runtime_diagnostics.cpp
     src/scene_detector.cpp
     src/stage.cpp
+    src/telemetry.cpp
     src/tensor_contract.cpp
     src/types.cpp
+    src/video_probe.cpp
     src/video_processor.cpp
     src/vulkan_runtime.cpp
     src/backends/glsl_shader_backend.cpp
@@ -250,12 +339,71 @@ if(AVE_HAVE_ROCTX)
     target_link_libraries(ave_core PUBLIC ${ROCTX_LIBRARY})
 endif()
 
+set(AVE_RUNTIME_BUNDLE_SEED_LIBS "")
+set(AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES "")
+if(AVE_HAVE_MIGRAPHX)
+    if(migraphx_FOUND)
+        ave_append_imported_target_locations(AVE_RUNTIME_BUNDLE_SEED_LIBS migraphx::c)
+        ave_append_imported_target_locations(AVE_RUNTIME_BUNDLE_SEED_LIBS migraphx::gpu)
+    endif()
+
+    if(MIGRAPHX_FOUND)
+        set(_AVE_MIGRAPHX_RUNTIME_SEARCH_DIRS ${MIGRAPHX_LIBRARY_DIRS})
+        foreach(_ave_dir IN LISTS MIGRAPHX_LIBRARY_DIRS)
+            if(EXISTS "${_ave_dir}/migraphx/lib")
+                list(APPEND _AVE_MIGRAPHX_RUNTIME_SEARCH_DIRS "${_ave_dir}/migraphx/lib")
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES _AVE_MIGRAPHX_RUNTIME_SEARCH_DIRS)
+
+        foreach(_ave_dir IN LISTS _AVE_MIGRAPHX_RUNTIME_SEARCH_DIRS)
+            foreach(_ave_pattern IN ITEMS
+                    libmigraphx_c.so*
+                    libmigraphx.so*
+                    libmigraphx_gpu.so*
+                    libmigraphx_device.so*
+                    libmigraphx_ref.so*)
+                file(GLOB _ave_seed_matches
+                    LIST_DIRECTORIES false
+                    "${_ave_dir}/${_ave_pattern}")
+                list(APPEND AVE_RUNTIME_BUNDLE_SEED_LIBS ${_ave_seed_matches})
+            endforeach()
+        endforeach()
+    endif()
+
+    list(REMOVE_DUPLICATES AVE_RUNTIME_BUNDLE_SEED_LIBS)
+endif()
+
+find_program(AVE_GLSL_COMPILER_EXECUTABLE
+    NAMES glslc glslangValidator)
+if(AVE_GLSL_COMPILER_EXECUTABLE)
+    list(APPEND AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES
+        "${AVE_GLSL_COMPILER_EXECUTABLE}")
+endif()
+list(REMOVE_DUPLICATES AVE_RUNTIME_BUNDLE_SEED_EXECUTABLES)
+
 # ─────────────────────────────────────────────────────────────────
 # ave — CLI executable
 # ─────────────────────────────────────────────────────────────────
 add_executable(ave src/main.cpp)
 target_link_libraries(ave PRIVATE ave_core)
 ave_add_warnings(ave)
+
+set(_AVE_INSTALL_RPATH
+    "$ORIGIN/../../${CMAKE_INSTALL_LIBDIR}/ave/runtime;$ORIGIN/../../${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib;$ORIGIN/../../${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib/migraphx/lib")
+set_target_properties(ave PROPERTIES
+    BUILD_RPATH_USE_ORIGIN ON
+    INSTALL_RPATH "${_AVE_INSTALL_RPATH}")
+
+add_executable(ave_model_compile_sweep
+    tools/compile_onnx_to_mxr.cpp
+)
+target_link_libraries(ave_model_compile_sweep PRIVATE ave_core)
+ave_add_warnings(ave_model_compile_sweep)
+ave_add_native_optimizations(ave_model_compile_sweep)
+set_target_properties(ave_model_compile_sweep PROPERTIES
+    BUILD_RPATH_USE_ORIGIN ON
+    INSTALL_RPATH "${_AVE_INSTALL_RPATH}")
 
 # ─────────────────────────────────────────────────────────────────
 # ave_gui — Qt desktop GUI
@@ -284,6 +432,9 @@ if(AVE_BUILD_GUI)
         target_link_libraries(ave_gui PRIVATE ave_core Qt6::Widgets)
         target_compile_definitions(ave_gui PRIVATE ${AVE_COMPILE_DEFS})
         ave_add_warnings(ave_gui)
+        set_target_properties(ave_gui PROPERTIES
+            BUILD_RPATH_USE_ORIGIN ON
+            INSTALL_RPATH "${_AVE_INSTALL_RPATH}")
         message(STATUS "Qt6 Widgets found — building ave_gui")
     else()
         message(STATUS "Qt6 Widgets not found — skipping ave_gui target")
@@ -316,7 +467,184 @@ target_compile_definitions(tensor_contract_tests PRIVATE ${AVE_COMPILE_DEFS})
 ave_add_warnings(tensor_contract_tests)
 add_test(NAME tensor_contract_tests COMMAND tensor_contract_tests)
 
+add_executable(runtime_diagnostics_tests
+    tests/runtime_diagnostics_tests.cpp
+    src/process_observer.cpp
+    src/runtime_diagnostics.cpp
+    src/runtime_paths.cpp
+    src/video_probe.cpp
+)
+target_include_directories(runtime_diagnostics_tests PRIVATE include)
+target_compile_definitions(runtime_diagnostics_tests PRIVATE ${AVE_COMPILE_DEFS})
+if(AVE_HAVE_HIP AND hip_FOUND)
+    target_link_libraries(runtime_diagnostics_tests PRIVATE hip::host)
+endif()
+ave_add_warnings(runtime_diagnostics_tests)
+add_test(NAME runtime_diagnostics_tests COMMAND runtime_diagnostics_tests)
+
+add_executable(runtime_paths_tests
+    tests/runtime_paths_tests.cpp
+    src/runtime_paths.cpp
+)
+target_include_directories(runtime_paths_tests PRIVATE include)
+target_compile_definitions(runtime_paths_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(runtime_paths_tests)
+add_test(NAME runtime_paths_tests COMMAND runtime_paths_tests)
+
+add_executable(model_manager_profile_tests
+    tests/model_manager_profile_tests.cpp
+)
+target_link_libraries(model_manager_profile_tests PRIVATE ave_core)
+target_include_directories(model_manager_profile_tests PRIVATE include)
+target_compile_definitions(model_manager_profile_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(model_manager_profile_tests)
+add_test(NAME model_manager_profile_tests COMMAND model_manager_profile_tests)
+
+add_executable(video_probe_tests
+    tests/video_probe_tests.cpp
+    src/process_observer.cpp
+    src/video_probe.cpp
+)
+target_include_directories(video_probe_tests PRIVATE include)
+target_compile_definitions(video_probe_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(video_probe_tests)
+add_test(NAME video_probe_tests COMMAND video_probe_tests)
+
+add_executable(process_loop_tests
+    tests/process_loop_tests.cpp
+    src/process_loop.cpp
+)
+target_include_directories(process_loop_tests PRIVATE include)
+target_compile_definitions(process_loop_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(process_loop_tests)
+add_test(NAME process_loop_tests COMMAND process_loop_tests)
+
+add_executable(process_observer_tests
+    tests/process_observer_tests.cpp
+    src/process_observer.cpp
+    src/video_probe.cpp
+)
+target_include_directories(process_observer_tests PRIVATE include)
+target_compile_definitions(process_observer_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(process_observer_tests)
+add_test(NAME process_observer_tests COMMAND process_observer_tests)
+
+add_executable(process_progress_tests
+    tests/process_progress_tests.cpp
+    src/process_observer.cpp
+    src/process_progress.cpp
+    src/video_probe.cpp
+)
+target_include_directories(process_progress_tests PRIVATE include)
+target_compile_definitions(process_progress_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(process_progress_tests)
+add_test(NAME process_progress_tests COMMAND process_progress_tests)
+
+add_executable(rgb_video_loop_tests
+    tests/rgb_video_loop_tests.cpp
+)
+target_link_libraries(rgb_video_loop_tests PRIVATE ave_core)
+target_include_directories(rgb_video_loop_tests PRIVATE include)
+target_compile_definitions(rgb_video_loop_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(rgb_video_loop_tests)
+add_test(NAME rgb_video_loop_tests COMMAND rgb_video_loop_tests)
+
+add_executable(frame_io_vulkan_tests
+    tests/frame_io_vulkan_tests.cpp
+)
+target_link_libraries(frame_io_vulkan_tests PRIVATE ave_core)
+target_include_directories(frame_io_vulkan_tests PRIVATE include)
+target_compile_definitions(frame_io_vulkan_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(frame_io_vulkan_tests)
+add_test(NAME frame_io_vulkan_tests COMMAND frame_io_vulkan_tests)
+
+add_executable(frame_io_pipe_tests
+    tests/frame_io_pipe_tests.cpp
+)
+target_link_libraries(frame_io_pipe_tests PRIVATE ave_core)
+target_include_directories(frame_io_pipe_tests PRIVATE include)
+target_compile_definitions(frame_io_pipe_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(frame_io_pipe_tests)
+add_test(NAME frame_io_pipe_tests COMMAND frame_io_pipe_tests)
+
+add_executable(frame_io_direct_pack_tests
+    tests/frame_io_direct_pack_tests.cpp
+)
+target_link_libraries(frame_io_direct_pack_tests PRIVATE ave_core)
+target_include_directories(frame_io_direct_pack_tests PRIVATE include)
+target_compile_definitions(frame_io_direct_pack_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(frame_io_direct_pack_tests)
+add_test(NAME frame_io_direct_pack_tests COMMAND frame_io_direct_pack_tests)
+
+add_executable(ffmpeg_runner_tests
+    tests/ffmpeg_runner_tests.cpp
+)
+target_link_libraries(ffmpeg_runner_tests PRIVATE ave_core)
+target_include_directories(ffmpeg_runner_tests PRIVATE include)
+target_compile_definitions(ffmpeg_runner_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(ffmpeg_runner_tests)
+add_test(NAME ffmpeg_runner_tests COMMAND ffmpeg_runner_tests)
+
+add_executable(job_recovery_tests
+    tests/job_recovery_tests.cpp
+    src/job_recovery.cpp
+    src/stage.cpp
+    src/types.cpp
+    src/filter_catalog.cpp
+    src/backend.cpp
+)
+target_include_directories(job_recovery_tests PRIVATE include)
+target_compile_definitions(job_recovery_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(job_recovery_tests)
+add_test(NAME job_recovery_tests COMMAND job_recovery_tests)
+
+add_executable(job_queue_tests
+    tests/job_queue_tests.cpp
+    src/job_queue.cpp
+    src/app_settings.cpp
+    src/backend.cpp
+    src/filter_catalog.cpp
+    src/stage.cpp
+    src/types.cpp
+)
+target_include_directories(job_queue_tests PRIVATE include)
+target_compile_definitions(job_queue_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(job_queue_tests)
+add_test(NAME job_queue_tests COMMAND job_queue_tests)
+
+add_executable(telemetry_tests
+    tests/telemetry_tests.cpp
+    src/process_observer.cpp
+    src/telemetry.cpp
+    src/video_probe.cpp
+)
+target_include_directories(telemetry_tests PRIVATE include)
+target_compile_definitions(telemetry_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(telemetry_tests)
+add_test(NAME telemetry_tests COMMAND telemetry_tests)
+
+add_executable(migraphx_backend_tests
+    tests/migraphx_backend_tests.cpp
+)
+target_link_libraries(migraphx_backend_tests PRIVATE ave_core)
+target_include_directories(migraphx_backend_tests PRIVATE include)
+target_compile_definitions(migraphx_backend_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(migraphx_backend_tests)
+add_test(NAME migraphx_backend_tests COMMAND migraphx_backend_tests)
+
+add_executable(interop_bridge_tests
+    tests/interop_bridge_tests.cpp
+)
+target_link_libraries(interop_bridge_tests PRIVATE ave_core)
+target_include_directories(interop_bridge_tests PRIVATE include)
+target_compile_definitions(interop_bridge_tests PRIVATE ${AVE_COMPILE_DEFS})
+ave_add_warnings(interop_bridge_tests)
+add_test(NAME interop_bridge_tests COMMAND interop_bridge_tests)
+
 install(TARGETS ave
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave
+)
+install(TARGETS ave_model_compile_sweep
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave
 )
 
@@ -326,32 +654,35 @@ if(TARGET ave_gui)
     )
 endif()
 
-if(NOT IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}")
-    string(REPLACE "/" ";" _ave_bindir_parts "${CMAKE_INSTALL_BINDIR}")
-    set(AVE_PREFIX_REL_FROM_BINDIR ".")
-    foreach(_part IN LISTS _ave_bindir_parts)
-        if(_part STREQUAL "" OR _part STREQUAL ".")
-            continue()
-        endif()
-        if(AVE_PREFIX_REL_FROM_BINDIR STREQUAL ".")
-            set(AVE_PREFIX_REL_FROM_BINDIR "..")
-        else()
-            string(APPEND AVE_PREFIX_REL_FROM_BINDIR "/..")
-        endif()
-    endforeach()
-else()
-    set(AVE_PREFIX_REL_FROM_BINDIR ".")
+set(AVE_INSTALL_HAS_GUI_TARGET FALSE)
+if(TARGET ave_gui)
+    set(AVE_INSTALL_HAS_GUI_TARGET TRUE)
 endif()
+
+ave_compute_prefix_rel_from_dir(AVE_PREFIX_REL_FROM_BINDIR "${CMAKE_INSTALL_BINDIR}")
+set(AVE_INSTALL_MIGRAPHX_BINDIR "${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin")
+ave_compute_prefix_rel_from_dir(AVE_PREFIX_REL_FROM_MIGRAPHX_BINDIR "${AVE_INSTALL_MIGRAPHX_BINDIR}")
 
 set(AVE_INSTALL_APP_BINARY_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/ave")
 set(AVE_INSTALL_MIGRAPHX_PATH "${CMAKE_INSTALL_LIBDIR}/ave/migraphx")
+set(AVE_INSTALL_RUNTIME_PATH "${CMAKE_INSTALL_LIBDIR}/ave/runtime")
+set(AVE_INSTALL_QT_PLUGIN_PATH "${CMAKE_INSTALL_LIBDIR}/ave/qt-plugins")
 set(AVE_INSTALL_MODELS_PATH "${CMAKE_INSTALL_DATADIR}/ave/models")
+set(AVE_INSTALL_TOOLS_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/tools")
 configure_file(cmake/ave-launch.sh.in
                ${CMAKE_CURRENT_BINARY_DIR}/ave-launch-wrapper.sh
                @ONLY)
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ave-launch-wrapper.sh
         DESTINATION ${CMAKE_INSTALL_BINDIR}
         RENAME ave)
+
+set(AVE_INSTALL_APP_BINARY_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/ave_model_compile_sweep")
+configure_file(cmake/ave-launch.sh.in
+               ${CMAKE_CURRENT_BINARY_DIR}/ave-model-compile-sweep-wrapper.sh
+               @ONLY)
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ave-model-compile-sweep-wrapper.sh
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        RENAME ave_model_compile_sweep)
 
 if(TARGET ave_gui)
     set(AVE_INSTALL_APP_BINARY_PATH "${CMAKE_INSTALL_LIBEXECDIR}/ave/ave_gui")
@@ -364,25 +695,61 @@ if(TARGET ave_gui)
 endif()
 
 if(AVE_INSTALL_BUNDLED_MIGRAPHX)
-    install(PROGRAMS
-        "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver"
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin
-    )
     install(DIRECTORY
         "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib/migraphx
         USE_SOURCE_PERMISSIONS
-    )
-    install(DIRECTORY
-        "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/"
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib
-        USE_SOURCE_PERMISSIONS
         FILES_MATCHING
-        PATTERN "cmake" EXCLUDE
-        PATTERN "migraphx" EXCLUDE
-        PATTERN "libmigraphx*.so*"
+        PATTERN "libmigraphx.so*"
+        PATTERN "libmigraphx_gpu.so*"
+        PATTERN "libmigraphx_device.so*"
+        PATTERN "libmigraphx_ref.so*"
     )
+    if(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER)
+        install(PROGRAMS
+            "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-driver"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin
+        )
+        if(EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-hiprtc-driver")
+            install(PROGRAMS
+                "${AVE_BUNDLED_MIGRAPHX_PREFIX}/bin/migraphx-hiprtc-driver"
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin
+            )
+        endif()
+        configure_file(cmake/ave-migraphx-driver.sh.in
+                       ${CMAKE_CURRENT_BINARY_DIR}/ave-migraphx-driver-wrapper.sh
+                       @ONLY)
+        install(PROGRAMS
+            ${CMAKE_CURRENT_BINARY_DIR}/ave-migraphx-driver-wrapper.sh
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/bin
+            RENAME ave-migraphx-driver
+        )
+        install(DIRECTORY
+            "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/ave/migraphx/lib/migraphx
+            USE_SOURCE_PERMISSIONS
+            FILES_MATCHING
+            PATTERN "libmigraphx_onnx.so*"
+            PATTERN "libmigraphx_py.so*"
+            PATTERN "libmigraphx_tf.so*"
+        )
+    endif()
+    configure_file(cmake/install_bundled_migraphx_deps.cmake.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/install_bundled_migraphx_deps.cmake
+                   @ONLY)
+    install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/install_bundled_migraphx_deps.cmake)
 endif()
+
+set(AVE_INSTALL_TOOL_EXECUTABLE_PATHS "")
+if(AVE_GLSL_COMPILER_EXECUTABLE)
+    get_filename_component(_ave_glsl_compiler_name "${AVE_GLSL_COMPILER_EXECUTABLE}" NAME)
+    install(PROGRAMS
+        "${AVE_GLSL_COMPILER_EXECUTABLE}"
+        DESTINATION ${AVE_INSTALL_TOOLS_PATH})
+    list(APPEND AVE_INSTALL_TOOL_EXECUTABLE_PATHS
+        "${AVE_INSTALL_TOOLS_PATH}/${_ave_glsl_compiler_name}")
+endif()
+list(REMOVE_DUPLICATES AVE_INSTALL_TOOL_EXECUTABLE_PATHS)
 
 if(AVE_INSTALL_BUNDLED_MODELS)
     configure_file(cmake/install_model_bundle.cmake.in
@@ -390,3 +757,79 @@ if(AVE_INSTALL_BUNDLED_MODELS)
                    @ONLY)
     install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/install_model_bundle.cmake)
 endif()
+
+if(AVE_INSTALL_RUNTIME_DEPS)
+    configure_file(cmake/install_runtime_deps.cmake.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/install_runtime_deps.cmake
+                   @ONLY)
+    install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/install_runtime_deps.cmake)
+endif()
+
+if(TARGET ave_gui AND Qt6Widgets_FOUND)
+    set(AVE_QT_PLUGINS_DIR "")
+    set(AVE_QT_PLUGIN_SUBDIRS
+        platforms
+        platformthemes
+        platforminputcontexts
+        styles
+        imageformats
+        iconengines
+        tls
+        xcbglintegrations
+        egldeviceintegrations
+        wayland-decoration-client
+        wayland-graphics-integration-client
+        wayland-shell-integration)
+    set(AVE_QT_PLUGIN_EXCLUDED_GLOBS
+        imageformats/kimg_jxr.so
+        imageformats/kimg_jxr.so.*)
+    if(TARGET Qt6::qmake)
+        get_target_property(AVE_QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
+        if(AVE_QT_QMAKE_EXECUTABLE AND EXISTS "${AVE_QT_QMAKE_EXECUTABLE}")
+            execute_process(
+                COMMAND "${AVE_QT_QMAKE_EXECUTABLE}" -query QT_INSTALL_PLUGINS
+                OUTPUT_VARIABLE AVE_QT_PLUGINS_DIR
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+        endif()
+    endif()
+    if(NOT AVE_QT_PLUGINS_DIR STREQUAL "")
+        configure_file(cmake/install_qt_plugins.cmake.in
+                       ${CMAKE_CURRENT_BINARY_DIR}/install_qt_plugins.cmake
+                       @ONLY)
+        install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/install_qt_plugins.cmake)
+    else()
+        message(WARNING "Qt GUI is enabled but the Qt plugin directory could not be resolved; portable GUI bundles may miss Qt platform plugins.")
+    endif()
+endif()
+
+if(NOT Python3_Interpreter_FOUND)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
+
+set(AVE_PORTABLE_BUNDLE_NAME "amd-video-enhancer-portable-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}"
+    CACHE STRING "Folder/archive name for the portable bundle output")
+set(AVE_PORTABLE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/dist"
+    CACHE PATH "Output directory for portable bundle staging and archives")
+
+set(_AVE_PORTABLE_TARGET_DEPS ave ave_model_compile_sweep)
+if(TARGET ave_gui)
+    list(APPEND _AVE_PORTABLE_TARGET_DEPS ave_gui)
+endif()
+
+add_custom_target(portable_stage
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/create_portable_bundle.py"
+            --build-dir "${CMAKE_CURRENT_BINARY_DIR}"
+            --output-dir "${AVE_PORTABLE_OUTPUT_DIR}"
+            --bundle-name "${AVE_PORTABLE_BUNDLE_NAME}"
+            --skip-archive
+    DEPENDS ${_AVE_PORTABLE_TARGET_DEPS}
+    COMMENT "Staging a self-contained portable AMD Video Enhancer bundle")
+
+add_custom_target(portable_bundle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/create_portable_bundle.py"
+            --build-dir "${CMAKE_CURRENT_BINARY_DIR}"
+            --output-dir "${AVE_PORTABLE_OUTPUT_DIR}"
+            --bundle-name "${AVE_PORTABLE_BUNDLE_NAME}"
+    DEPENDS portable_stage
+    COMMENT "Creating a compressed portable AMD Video Enhancer bundle")

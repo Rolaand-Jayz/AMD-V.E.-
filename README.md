@@ -43,6 +43,11 @@ ctest --test-dir build --output-on-failure
 
 Do not use a bare `cmake -S . -B build` here. The repo expects the backend flags above.
 
+The standard `build/` tree is the only supported build path. If an optimized
+MiGraphX install is available at `~/.local/opt/migraphx-codex`, the normal
+configure step above will prefer it automatically. There is no separate
+"patched" app or alternate launcher anymore.
+
 ## Run
 
 List detected backends:

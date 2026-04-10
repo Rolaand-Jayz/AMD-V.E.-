@@ -179,11 +179,14 @@ void ModelManagerDialog::buildUi() {
     auto* btnLayout = new QHBoxLayout;
     downloadBtn_   = new QPushButton(tr("Download"));
     convertBtn_    = new QPushButton(tr("Convert to MiGraphX"));
+    prewarmBtn_    = new QPushButton(tr("Prewarm 1080p / 4K"));
     cancelBtn_     = new QPushButton(tr("Cancel"));
     openFolderBtn_ = new QPushButton(tr("Open Folder"));
+    prewarmBtn_->setToolTip(tr("Prepare reusable exact-shape MiGraphX artifacts for standard delivery resolutions."));
     cancelBtn_->setEnabled(false);
     btnLayout->addWidget(downloadBtn_);
     btnLayout->addWidget(convertBtn_);
+    btnLayout->addWidget(prewarmBtn_);
     btnLayout->addWidget(cancelBtn_);
     btnLayout->addWidget(openFolderBtn_);
     btnLayout->addStretch();
@@ -207,6 +210,7 @@ void ModelManagerDialog::buildUi() {
             this, &ModelManagerDialog::onSelectionChanged);
     connect(downloadBtn_,  &QPushButton::clicked, this, &ModelManagerDialog::onDownloadClicked);
     connect(convertBtn_,   &QPushButton::clicked, this, &ModelManagerDialog::onConvertClicked);
+    connect(prewarmBtn_,   &QPushButton::clicked, this, &ModelManagerDialog::onPrewarmClicked);
     connect(cancelBtn_,    &QPushButton::clicked, this, &ModelManagerDialog::onCancelClicked);
     connect(openFolderBtn_,&QPushButton::clicked, this, &ModelManagerDialog::onOpenFolderClicked);
     connect(refreshBtn_,   &QPushButton::clicked, this, &ModelManagerDialog::onRefreshClicked);
@@ -226,7 +230,7 @@ void ModelManagerDialog::populateList() {
         StageKind::RestoreCompression, StageKind::RemoveArtifacts,
         StageKind::Denoise, StageKind::Deblur, StageKind::Dehalo,
         StageKind::ColorFix, StageKind::Upscale,
-        StageKind::Sharpen, StageKind::Interpolate,
+        StageKind::Sharpen, StageKind::Stereo3D, StageKind::Interpolate,
     };
 
     for (StageKind sk : order) {
@@ -298,7 +302,11 @@ void ModelManagerDialog::updateDetailPanel(const QString& modelId) {
     const bool canConvert =
         m.state == ModelState::Downloaded &&
         (m.entry.sourceFormat == ModelFormat::Onnx || m.entry.sourceFormat == ModelFormat::Pytorch);
+    const bool canPrewarm =
+        (m.state == ModelState::Downloaded || m.state == ModelState::Converted) &&
+        (m.entry.sourceFormat == ModelFormat::Onnx || m.entry.sourceFormat == ModelFormat::Pytorch);
     convertBtn_->setEnabled(canConvert);
+    prewarmBtn_->setEnabled(canPrewarm);
     cancelBtn_->setEnabled(busy);
     openFolderBtn_->setEnabled(true);
 }
@@ -306,6 +314,7 @@ void ModelManagerDialog::updateDetailPanel(const QString& modelId) {
 void ModelManagerDialog::setButtonsEnabled(bool enabled) {
     downloadBtn_->setEnabled(enabled);
     convertBtn_->setEnabled(enabled);
+    prewarmBtn_->setEnabled(enabled);
     cancelBtn_->setEnabled(false);
     openFolderBtn_->setEnabled(enabled);
 }
@@ -380,6 +389,30 @@ void ModelManagerDialog::onConvertClicked() {
             const QString msg = QString::fromStdString("MiGraphX conversion failed:\n" + err);
             QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
                 QMessageBox::warning(nullptr, "Conversion Failed", msg);
+            }, Qt::QueuedConnection);
+            QMetaObject::invokeMethod(QApplication::instance(), [self]() {
+                if (!self) { return; }
+                self->operationKickoff_ = false;
+            }, Qt::QueuedConnection);
+        }
+    }).detach();
+    updateDetailPanel(selectedModelId_);
+}
+
+void ModelManagerDialog::onPrewarmClicked() {
+    if (selectedModelId_.isEmpty()) return;
+    const std::string id = selectedModelId_.toStdString();
+    operationKickoff_ = true;
+    const auto progressCb = makeProgressCb(id);
+    const auto stateCb = makeStateCb(id);
+    ModelManager* manager = &manager_;
+    QPointer<ModelManagerDialog> self(this);
+    std::thread([manager, id, progressCb, stateCb, self]() {
+        std::string err;
+        if (!manager->prewarmStandardArtifacts(id, progressCb, stateCb, err)) {
+            const QString msg = QString::fromStdString("MiGraphX prewarm failed:\n" + err);
+            QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
+                QMessageBox::warning(nullptr, "Prewarm Failed", msg);
             }, Qt::QueuedConnection);
             QMetaObject::invokeMethod(QApplication::instance(), [self]() {
                 if (!self) { return; }

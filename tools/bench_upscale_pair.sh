@@ -4,13 +4,11 @@ set -euo pipefail
 repo_root=$(git rev-parse --show-toplevel)
 binary=${1:-"$repo_root/build/ave"}
 input=${2:-"$repo_root/benchmarks/ave_benchmark_960x540_20s.mp4"}
-out_dir=${3:-"$repo_root/benchmarks/results"}
+out_dir=${3:-"$repo_root/benchmarks/generated/upscale_pair"}
 benchmark_env=(
     HIP_VISIBLE_DEVICES=0
     ROCR_VISIBLE_DEVICES=0
     AVE_MIGRAPHX_VISIBLE_DEVICES=0
-    MIOPEN_FIND_MODE=FAST
-    MIOPEN_COMPILE_PARALLEL_LEVEL=1
 )
 
 mkdir -p "$out_dir"

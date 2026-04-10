@@ -1,0 +1,145 @@
+# Packaging
+
+The app now supports two deployment styles from the same install layout:
+
+1. Standard installed layout
+   - `bin/ave` and `bin/ave_gui` are launcher scripts.
+   - Real binaries live under `libexec/ave/`.
+   - Bundled runtime libraries live under `lib/ave/runtime/`.
+   - Optional MiGraphX compiler tooling lives under `lib/ave/migraphx/`.
+   - Bundled models live under `share/ave/models/` when model bundling is enabled.
+
+2. Portable extracted layout
+   - The install tree is staged into a single folder.
+   - That folder can be archived as `tar.gz`, extracted anywhere, and run in place.
+   - The launchers resolve all bundled paths relative to their own location.
+   - The bundle now includes a root-level `PORTABLE_RUNTIME_NOTES.txt` file that documents bundled paths, MiGraphX tooling, and the remaining host-side GPU driver requirements.
+
+## Build
+
+Always configure with all backends enabled:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DAVE_HAVE_CURL=ON \
+  -DAVE_HAVE_MIGRAPHX=ON \
+  -DAVE_HAVE_HIP=ON \
+  -DAVE_HAVE_VULKAN=ON \
+  -DAVE_HAVE_NCNN=ON
+cmake --build build -j
+```
+
+## Install
+
+```bash
+cmake --install build --prefix /path/to/install-root
+```
+
+Important packaging options:
+
+- `AVE_INSTALL_BUNDLED_MIGRAPHX=ON`
+  - Install the custom MiGraphX compiler toolchain under the app tree.
+  - The app runtime itself is bundled through `AVE_INSTALL_RUNTIME_DEPS`, so the launcher does not inject this toolchain into the app process.
+- `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON`
+  - Install `migraphx-driver` plus the MiGraphX ONNX/TF sidecars.
+  - Leave this `OFF` for a runtime-only portable bundle when you want a smaller archive that runs inference but does not compile new `.mxr` artifacts on the target machine.
+- `AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS=/path/one;/path/two`
+  - Extra directories searched when the installer closes transitive dependencies for the bundled custom MiGraphX compiler runtime.
+  - Use this when your custom `migraphx-driver` depends on side libraries that live outside the custom prefix.
+  - `tools/package_release.sh compiler-portable` now auto-stages matching ABI-pinned Abseil and Protobuf side libraries from the local package cache into the build tree before packaging.
+  - Set this manually when you are packaging on a different machine or have a bespoke dependency cache layout.
+- `AVE_STRICT_BUNDLED_MIGRAPHX=ON`
+  - Fail packaging if the bundled MiGraphX runtime is missing transitive shared libraries.
+  - This is the safe default for portable archives because compile-enabled MiGraphX bundles must be self-contained.
+- `AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD=ON`
+  - Build the app itself against `AVE_BUNDLED_MIGRAPHX_PREFIX`.
+  - Leave this `OFF` unless that prefix is a complete MiGraphX runtime suitable for linking the app, not just an external compiler toolchain.
+- `AVE_INSTALL_BUNDLED_MODELS=ON`
+  - Download and stage the model catalog into the app tree.
+- `AVE_INSTALL_RUNTIME_DEPS=ON`
+  - Copy non-system runtime shared libraries into `lib/ave/runtime`.
+
+## Portable Bundle
+
+Create an extracted self-contained folder:
+
+```bash
+cmake --build build --target portable_stage
+```
+
+Create an extracted folder plus a `tar.gz` archive:
+
+```bash
+cmake --build build --target portable_bundle
+```
+
+Outputs default to:
+
+```text
+build/dist/amd-video-enhancer-portable-<system>-<arch>/
+build/dist/amd-video-enhancer-portable-<system>-<arch>.tar.gz
+```
+
+The bundle name can be overridden with `AVE_PORTABLE_BUNDLE_NAME`.
+
+## Packaging Script
+
+Use the helper script when you want a repeatable packaging workflow without
+hand-editing CMake flags:
+
+```bash
+tools/package_release.sh runtime-portable
+ARCHIVE_MODE=archive tools/package_release.sh runtime-portable
+EXTRA_MIGRAPHX_LIBRARY_DIRS="/vendor/lib;/custom/lib" tools/package_release.sh compiler-portable
+INSTALL_PREFIX="$PWD/dist/install-root" tools/package_release.sh install-tree
+```
+
+Profiles:
+
+1. `runtime-portable`
+   - portable app bundle
+   - bundles the app runtime and linked libraries
+   - does not bundle the custom MiGraphX compiler toolchain
+
+2. `compiler-portable`
+   - portable app bundle plus custom MiGraphX compiler tooling
+   - uses `AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS` when set
+   - auto-stages the known ABI-matched compiler-side dependencies from `/var/cache/pacman/pkg` when available
+   - overlays the bundled MiGraphX runtime tree with the exact cached SONAME set required by the app when that cached package is available
+   - excludes the bundled MiGraphX/ROCm stack from the generic app dependency scan so the portable bundle does not accidentally fall back to host `/opt/rocm` libraries
+   - fails fast if the compiler-side dependency closure is incomplete
+   - only use this profile when the custom MiGraphX compiler prefix also ships
+     the exact ABI-matched side libraries it was linked against
+
+3. `install-tree`
+   - standard installed layout under `INSTALL_PREFIX`
+   - useful for system packaging or integration into a larger installer
+
+## Verification
+
+Portable bundle creation now verifies runtime dependency closure after staging:
+
+- installed executables are checked with `ldd`
+- bundled MiGraphX drivers are checked with `ldd` when compiler tools are present
+- bundled MiGraphX shared libraries are checked with `ldd`, not just the app binaries
+- portable runtime bundling now seeds MiGraphX runtime sonames explicitly instead of depending only on generic dependency discovery
+
+The launchers now keep the bundled MiGraphX compiler toolchain isolated from the app runtime. The app resolves its own shared libraries from `lib/ave/runtime`, while `AVE_BUNDLED_MIGRAPHX_PREFIX` is exported only so model compilation flows can find the bundled driver/toolchain when requested.
+
+Portable bundles intentionally ship the user-space dependency closure, but they cannot bundle the host kernel-side AMD stack. A target machine still needs a working `amdgpu`/KFD environment and GPU device access for ROCm/MiGraphX execution.
+
+If the custom MiGraphX prefix is incomplete, packaging fails with the unresolved sonames instead of producing a broken archive.
+
+## Portable Profiles
+
+1. Full compile-enabled portable bundle
+   - Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=ON` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON`.
+   - Requires a custom MiGraphX prefix whose compiler binaries and ONNX/TF/Python sidecars have a closed shared-library dependency set.
+   - If some compiler-side libraries live outside that prefix, point `AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS` at the directories containing the exact required sonames.
+   - In practice this usually includes versioned Abseil, Protobuf, and `utf8_validity` libraries that match the custom MiGraphX compiler build exactly. If those sonames are not present, packaging stops instead of emitting a broken archive.
+
+2. Runtime-only portable bundle
+   - Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=OFF` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=OFF`, or use `tools/package_release.sh runtime-portable`.
+   - Bundles the app-linked MiGraphX runtime needed to load/evaluate existing `.mxr` artifacts.
+   - This is the safest portable profile when you want the app to extract anywhere and run without depending on host ROCm package updates.
+   - This is the ready-now shipping profile when you want a self-contained archive that users can extract anywhere and run immediately.

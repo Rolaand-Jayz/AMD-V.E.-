@@ -4,6 +4,7 @@
 
 #include "ave/backend_manager.hpp"
 #include "ave/cli.hpp"
+#include "ave/telemetry.hpp"
 #include "ave/video_processor.hpp"
 
 namespace {
@@ -31,10 +32,22 @@ int main(int argc, char** argv) {
     if (cli.listBackends) {
         ave::BackendManager manager;
         const auto backends = manager.probeBackends();
+        const auto diagnostics = manager.runtimeDiagnostics();
+        const auto telemetryProbe = ave::probeAmdTelemetrySupport();
         std::cout << "AMD backend probe:" << std::endl;
         for (const auto& backend : backends) {
             std::cout << "- " << backend.name << ": " << (backend.available ? "available" : "unavailable")
                       << " (" << backend.detail << ")" << std::endl;
+        }
+        std::cout << "\nAMD runtime diagnostics:" << std::endl;
+        std::cout << diagnostics.detailedText() << std::endl;
+        std::cout << "\nAMD telemetry:" << std::endl;
+        std::cout << telemetryProbe.summary() << std::endl;
+        std::string telemetryError;
+        if (const auto telemetry = ave::collectAmdTelemetry(telemetryError); telemetry.has_value()) {
+            std::cout << telemetry->summary() << std::endl;
+        } else if (!telemetryError.empty()) {
+            std::cout << telemetryError << std::endl;
         }
         return 0;
     }

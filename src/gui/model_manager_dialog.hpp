@@ -39,6 +39,7 @@ class ModelManagerDialog final : public QDialog {
     void onSelectionChanged();
     void onDownloadClicked();
     void onConvertClicked();
+    void onPrewarmClicked();
     void onCancelClicked();
     void onOpenFolderClicked();
     void onRefreshClicked();
@@ -77,6 +78,7 @@ class ModelManagerDialog final : public QDialog {
 
     QPushButton* downloadBtn_  = nullptr;
     QPushButton* convertBtn_   = nullptr;
+    QPushButton* prewarmBtn_   = nullptr;
     QPushButton* cancelBtn_    = nullptr;
     QPushButton* openFolderBtn_= nullptr;
     QPushButton* refreshBtn_   = nullptr;

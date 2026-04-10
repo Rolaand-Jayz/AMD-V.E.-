@@ -1,47 +1,15 @@
 #include "ave/scene_detector.hpp"
 
 #include <algorithm>
-#include <array>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <iomanip>
 #include <optional>
 #include <sstream>
 #include <string>
 
+#include "ave/process_observer.hpp"
+
 namespace ave {
 namespace {
-
-std::optional<std::string> runCapture(const std::string& cmd, int& exitCode) {
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (pipe == nullptr) {
-        exitCode = -1;
-        return std::nullopt;
-    }
-    std::string output;
-    std::array<char, 1024> buf{};
-    while (true) {
-        const std::size_t n = std::fread(buf.data(), 1, buf.size(), pipe);
-        if (n == 0) { break; }
-        output.append(buf.data(), n);
-    }
-    exitCode = pclose(pipe);
-    return output;
-}
-
-std::string quoteArg(const std::string& v) {
-    // POSIX single-quote quoting — safe against ALL shell metacharacters.
-    // Single quotes cannot appear inside single-quoted strings, so we use
-    // the end-quote / escaped-literal / reopen-quote idiom.
-    std::string out = "'";
-    for (char ch : v) {
-        if (ch == '\'') { out += "'\\''"; }
-        else { out.push_back(ch); }
-    }
-    out.push_back('\'');
-    return out;
-}
 
 // Parse ffprobe output: each matching line looks like
 //   lavfi.scene_score=0.420300
@@ -110,16 +78,16 @@ bool SceneDetector::detect(const std::string&           inputPath,
     std::ostringstream filterStr;
     filterStr << "select=gte(scene\\," << std::fixed << std::setprecision(4) << options.threshold
               << "),metadata=print";
-    cmd << quoteArg(filterStr.str());
+    cmd << process_observer::quoteShellArg(filterStr.str());
 
     if (options.maxDurationSeconds > 0.0) {
         cmd << " -t " << std::fixed << std::setprecision(3) << options.maxDurationSeconds;
     }
 
-    cmd << " " << quoteArg(inputPath);
+    cmd << " " << process_observer::quoteShellArg(inputPath);
 
     int exitCode = 0;
-    const auto output = runCapture(cmd.str(), exitCode);
+    const auto output = process_observer::captureCommandStdout(cmd.str(), exitCode);
 
     if (!output.has_value()) {
         error = "Failed to run ffprobe for scene detection.";

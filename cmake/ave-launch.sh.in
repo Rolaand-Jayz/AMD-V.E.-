@@ -15,12 +15,41 @@ resolve_path() {
 
 app_bin="$(resolve_path "@AVE_INSTALL_APP_BINARY_PATH@")"
 bundled_migraphx="$(resolve_path "@AVE_INSTALL_MIGRAPHX_PATH@")"
+bundled_runtime="$(resolve_path "@AVE_INSTALL_RUNTIME_PATH@")"
+bundled_qt_plugins="$(resolve_path "@AVE_INSTALL_QT_PLUGIN_PATH@")"
 bundled_models="$(resolve_path "@AVE_INSTALL_MODELS_PATH@")"
+bundled_migraphx_lib="${bundled_migraphx}/lib"
+bundled_migraphx_nested_lib="${bundled_migraphx}/lib/migraphx/lib"
+
+prepend_path() {
+    local var_name="$1"
+    local entry="$2"
+    if [[ ! -e "${entry}" ]]; then
+        return
+    fi
+    local current="${!var_name:-}"
+    if [[ -n "${current}" ]]; then
+        export "${var_name}=${entry}:${current}"
+    else
+        export "${var_name}=${entry}"
+    fi
+}
+
+if [[ -d "${bundled_runtime}" ]]; then
+    prepend_path LD_LIBRARY_PATH "${bundled_runtime}"
+fi
 
 if [[ -d "${bundled_migraphx}" ]]; then
+    prepend_path LD_LIBRARY_PATH "${bundled_migraphx_lib}"
+    prepend_path LD_LIBRARY_PATH "${bundled_migraphx_nested_lib}"
     export AVE_BUNDLED_MIGRAPHX_PREFIX="${bundled_migraphx}"
-    export PATH="${bundled_migraphx}/bin:${PATH}"
-    export LD_LIBRARY_PATH="${bundled_migraphx}/lib:${bundled_migraphx}/lib/migraphx/lib:/opt/rocm/lib:/opt/rocm/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+if [[ -d "${bundled_qt_plugins}" ]]; then
+    prepend_path QT_PLUGIN_PATH "${bundled_qt_plugins}"
+    if [[ -d "${bundled_qt_plugins}/platforms" ]]; then
+        export QT_QPA_PLATFORM_PLUGIN_PATH="${bundled_qt_plugins}/platforms"
+    fi
 fi
 
 if [[ -d "${bundled_models}" ]]; then

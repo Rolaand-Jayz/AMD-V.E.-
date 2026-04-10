@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -23,8 +24,11 @@
 #include "ave/frame_io.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/model_manager.hpp"
+#include "ave/process_observer.hpp"
+#include "ave/rgb_video_loop.hpp"
 #include "ave/stage.hpp"
 #include "ave/types.hpp"
+#include "ave/video_probe.hpp"
 
 #ifdef AVE_HAVE_NCNN
 #  include <layer.h>
@@ -35,42 +39,76 @@
 namespace ave {
 namespace {
 
-bool fileExistsN(const std::string& p) {
-    std::error_code ec;
-    return std::filesystem::exists(p, ec);
-}
-
-bool commandInPathN(const std::string& cmd) {
-    const char* pathEnv = std::getenv("PATH");
-    if (!pathEnv) { return false; }
-    std::string path(pathEnv);
-    std::size_t start = 0;
-    while (start <= path.size()) {
-        std::size_t end = path.find(':', start);
-        if (end == std::string::npos) { end = path.size(); }
-        const std::string dir = path.substr(start, end - start);
-        if (!dir.empty() && fileExistsN((std::filesystem::path(dir) / cmd).string())) {
-            return true;
-        }
-        if (end == path.size()) { break; }
-        start = end + 1;
-    }
-    return false;
-}
-
 bool hasVulkanSignal() {
-    if (commandInPathN("vulkaninfo")) { return true; }
+    if (process_observer::commandInPath("vulkaninfo")) { return true; }
     for (const auto& lib : {"/usr/lib/libvulkan.so", "/usr/lib64/libvulkan.so",
                              "/usr/lib/libvulkan.so.1", "/usr/lib64/libvulkan.so.1"}) {
-        if (fileExistsN(lib)) { return true; }
+        if (process_observer::fileExists(lib)) { return true; }
     }
     return false;
 }
 
+std::optional<int> readNonNegativeEnvIntN(const char* name) {
+    if (name == nullptr) {
+        return std::nullopt;
+    }
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    const long value = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || value < 0L) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+std::optional<int> preferredNcnnGpuIndexFromEnv() {
+    if (const auto explicitNcnn = readNonNegativeEnvIntN("AVE_NCNN_GPU_INDEX"); explicitNcnn.has_value()) {
+        return explicitNcnn;
+    }
+    return readNonNegativeEnvIntN("AVE_GPU_INDEX");
+}
+
+#ifdef AVE_HAVE_NCNN
+std::mutex& ncnnGpuInstanceMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+int& ncnnGpuInstanceRefCount() {
+    static int refCount = 0;
+    return refCount;
+}
+
+void retainNcnnGpuInstance() {
+    std::lock_guard<std::mutex> lk(ncnnGpuInstanceMutex());
+    int& refCount = ncnnGpuInstanceRefCount();
+    if (refCount == 0) {
+        ncnn::create_gpu_instance();
+    }
+    ++refCount;
+}
+
+void releaseNcnnGpuInstance() {
+    std::lock_guard<std::mutex> lk(ncnnGpuInstanceMutex());
+    int& refCount = ncnnGpuInstanceRefCount();
+    if (refCount <= 0) {
+        return;
+    }
+    --refCount;
+    if (refCount == 0) {
+        ncnn::destroy_gpu_instance();
+    }
+}
+#endif
+
 std::string defaultModelIdFor(StageKind kind) {
-    const auto entries = catalogEntriesForStage(kind);
-    for (const auto* e : entries) { if (e->isDefault) { return e->id; } }
-    if (!entries.empty()) { return entries.front()->id; }
+    if (const auto* preferred = preferredBackendModelForStage(kind, BackendType::NcnnVulkan);
+        preferred != nullptr) {
+        return preferred->id;
+    }
     return {};
 }
 
@@ -169,7 +207,15 @@ struct NcnnVulkanBackend::Impl {
 // ─────────────────────────────────────────────────────────────────
 
 NcnnVulkanBackend::NcnnVulkanBackend()  : impl_(std::make_unique<Impl>()) {}
-NcnnVulkanBackend::~NcnnVulkanBackend() = default;
+NcnnVulkanBackend::~NcnnVulkanBackend() {
+#ifdef AVE_HAVE_NCNN
+    if (impl_) {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        impl_->nets.clear();
+        impl_->initialised = false;
+    }
+#endif
+}
 
 BackendType NcnnVulkanBackend::type()  const { return BackendType::NcnnVulkan; }
 std::string NcnnVulkanBackend::name()  const { return "NCNN (Vulkan)"; }
@@ -193,9 +239,22 @@ bool NcnnVulkanBackend::initialize(std::string& error) {
     if (!isAvailable(reason)) { error = "NCNN Vulkan init: " + reason; return false; }
 
 #ifdef AVE_HAVE_NCNN
-    ncnn::create_gpu_instance();
+    retainNcnnGpuInstance();
     const int gpuCount = ncnn::get_gpu_count();
-    if (gpuCount == 0) { error = "NCNN: no Vulkan GPU devices found."; return false; }
+    if (gpuCount == 0) {
+        releaseNcnnGpuInstance();
+        error = "NCNN: no Vulkan GPU devices found.";
+        return false;
+    }
+    if (const auto preferredGpu = preferredNcnnGpuIndexFromEnv(); preferredGpu.has_value()) {
+        if (*preferredGpu >= gpuCount) {
+            releaseNcnnGpuInstance();
+            error = "NCNN: requested GPU index " + std::to_string(*preferredGpu)
+                  + " is out of range for " + std::to_string(gpuCount) + " detected device(s).";
+            return false;
+        }
+        impl_->gpuIdx = *preferredGpu;
+    }
     if (impl_->gpuIdx >= gpuCount) { impl_->gpuIdx = 0; }
 #endif
 
@@ -257,56 +316,6 @@ StageResult NcnnVulkanBackend::runStage(const EnhancementStage& stage, std::stri
 
 namespace {
 
-struct VideoInfo {
-    int width  = 0;
-    int height = 0;
-    double fps = 25.0;
-    int totalFrames = 0;
-};
-
-VideoInfo probeVideoNcnn(const std::string& path) {
-    VideoInfo info;
-    // Get dimensions and fps
-    {
-        std::string cmd = "ffprobe -v error -select_streams v:0"
-                          " -show_entries stream=width,height,r_frame_rate,nb_frames"
-                          " -of csv=p=0 \"" + path + "\"";
-        FILE* fp = popen(cmd.c_str(), "r");
-        if (fp) {
-            char buf[256] = {};
-            if (fgets(buf, sizeof(buf), fp)) {
-                // format: width,height,fps_num/fps_den,nb_frames
-                int w = 0, h = 0, fpsNum = 0, fpsDen = 1;
-                char nbFramesBuf[64] = {};
-                if (sscanf(buf, "%d,%d,%d/%d,%63s", &w, &h, &fpsNum, &fpsDen, nbFramesBuf) >= 4) {
-                    info.width  = w;
-                    info.height = h;
-                    info.fps    = (fpsDen > 0) ? (static_cast<double>(fpsNum) / fpsDen) : 25.0;
-                    if (nbFramesBuf[0] && nbFramesBuf[0] != 'N') {
-                        info.totalFrames = std::atoi(nbFramesBuf);
-                    }
-                }
-            }
-            pclose(fp);
-        }
-    }
-    // Fallback for frame count
-    if (info.totalFrames <= 0 && info.width > 0) {
-        std::string cmd = "ffprobe -v error -count_frames -select_streams v:0"
-                          " -show_entries stream=nb_read_frames"
-                          " -of csv=p=0 \"" + path + "\"";
-        FILE* fp = popen(cmd.c_str(), "r");
-        if (fp) {
-            char buf[64] = {};
-            if (fgets(buf, sizeof(buf), fp)) {
-                info.totalFrames = std::atoi(buf);
-            }
-            pclose(fp);
-        }
-    }
-    return info;
-}
-
 }  // namespace
 
 StageResult NcnnVulkanBackend::processVideoFile(
@@ -344,20 +353,27 @@ StageResult NcnnVulkanBackend::processVideoFile(
     }
 
     // ── 2. Probe input video ────────────────────────────────────
-    const VideoInfo vi = probeVideoNcnn(inputVideo);
-    if (vi.width <= 0 || vi.height <= 0) {
-        error = "ffprobe failed to detect video dimensions for: " + inputVideo;
+    const auto probe = probeVideoStream(inputVideo, error);
+    if (!probe.has_value()) {
         return StageResult::Error;
     }
+    const int inputWidth = static_cast<int>(probe->width);
+    const int inputHeight = static_cast<int>(probe->height);
+    const double inputFps = probe->effectiveFrameRate(25.0);
+    const int totalFrames = static_cast<int>(probe->estimatedFrameCount());
 
     // Determine model input/output size.
     // NCNN super-resolution models: input = source, output = source * scale
-    int modelScale = 1;
+    int modelScale = 0;
     {
-        auto scaleIt = stage.params.find("scale");
-        if (scaleIt != stage.params.end()) {
-            if (const auto* iv = std::get_if<std::int64_t>(&scaleIt->second)) {
-                modelScale = static_cast<int>(*iv);
+        std::int64_t scaleValue = 0;
+        if (tryGetInt(stage, StageKind::Upscale, "scale", scaleValue)) {
+            modelScale = static_cast<int>(scaleValue);
+        }
+        if (modelScale < 1) {
+            if (const ModelEntry* entry = catalogEntryById(modelId);
+                entry != nullptr && entry->scale > 0) {
+                modelScale = entry->scale;
             }
         }
         if (modelScale < 1) modelScale = 1;
@@ -365,130 +381,87 @@ StageResult NcnnVulkanBackend::processVideoFile(
 
     int outW = 0, outH = 0;
     {
-        auto wIt = stage.params.find("width");
-        auto hIt = stage.params.find("height");
-        if (wIt != stage.params.end() && hIt != stage.params.end()) {
-            if (const auto* wv = std::get_if<std::int64_t>(&wIt->second)) outW = static_cast<int>(*wv);
-            if (const auto* hv = std::get_if<std::int64_t>(&hIt->second)) outH = static_cast<int>(*hv);
+        std::int64_t widthValue = 0;
+        std::int64_t heightValue = 0;
+        if (tryGetInt(stage, StageKind::Upscale, "width", widthValue) &&
+            tryGetInt(stage, StageKind::Upscale, "height", heightValue)) {
+            outW = static_cast<int>(widthValue);
+            outH = static_cast<int>(heightValue);
         }
     }
-    if (outW <= 0) outW = vi.width * modelScale;
-    if (outH <= 0) outH = vi.height * modelScale;
+    if (outW <= 0) outW = inputWidth * modelScale;
+    if (outH <= 0) outH = inputHeight * modelScale;
 
-    const std::size_t inFrameBytes  = static_cast<std::size_t>(vi.width) *
-                                      static_cast<std::size_t>(vi.height) * 3;
     const std::size_t outFrameBytes = static_cast<std::size_t>(outW) *
                                       static_cast<std::size_t>(outH) * 3;
 
-    std::cout << "[ncnn] processVideoFile: " << vi.width << "x" << vi.height
+    std::cout << "[ncnn] processVideoFile: " << inputWidth << "x" << inputHeight
               << " → " << outW << "x" << outH
-              << " fps=" << vi.fps
-              << " frames=" << vi.totalFrames << std::endl;
+              << " fps=" << inputFps
+              << " frames=" << totalFrames << std::endl;
 
-    frame_io::VulkanVideoReader reader;
-    if (!reader.open(inputVideo, error)) {
-        return StageResult::Error;
-    }
+    RgbVideoLoopOptions loopOptions;
+    loopOptions.inputVideo = inputVideo;
+    loopOptions.outputVideo = outputVideo;
+    loopOptions.inputWidth = inputWidth;
+    loopOptions.inputHeight = inputHeight;
+    loopOptions.outputWidth = outW;
+    loopOptions.outputHeight = outH;
+    loopOptions.fps = inputFps;
+    loopOptions.fallbackFps = 25.0;
+    loopOptions.totalFrames = totalFrames;
+    loopOptions.backendTag = "ncnn";
+    loopOptions.progressLabel = "NCNN";
+    loopOptions.noFramesError = "No frames decoded from input video.";
+    loopOptions.preferredSourceMode = frame_io::RgbVideoSourceMode::VulkanTransfer;
+    loopOptions.allowSourceFallback = true;
+    loopOptions.processOptions = opts;
 
-    frame_io::VulkanVideoWriter writer;
-    AVRational fps = reader.frameRate();
-    if (fps.num <= 0 || fps.den <= 0) {
-        fps = AVRational{static_cast<int>(std::round(vi.fps > 0.0 ? vi.fps : 25.0)), 1};
-    }
-    if (!writer.open(outputVideo, outW, outH, fps, error)) {
-        reader.close();
-        return StageResult::Error;
-    }
+    const auto loopResult = runRgbVideoLoop(
+        loopOptions,
+        [&](const std::vector<std::uint8_t>& inBuf,
+            std::vector<std::uint8_t>& outputRgb,
+            const int /*frameIdx*/,
+            std::string& loopError) {
+            ncnn::Mat inMat = ncnn::Mat::from_pixels(
+                inBuf.data(), ncnn::Mat::PIXEL_RGB, inputWidth, inputHeight);
 
-    const int maxFrames = opts.previewDurationSec > 0.0
-        ? static_cast<int>(opts.previewDurationSec * (vi.fps > 0.0 ? vi.fps : 25.0) + 0.5)
-        : 0;
+            const float normVals[3] = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
+            inMat.substract_mean_normalize(nullptr, normVals);
 
-    // ── 5. Per-frame inference loop ─────────────────────────────
-    std::vector<uint8_t> inBuf(inFrameBytes);
-    std::vector<uint8_t> outBuf(outFrameBytes);
-    int frameIdx = 0;
-    bool ok = true;
-    bool cancelled = false;
-
-    while (true) {
-        if (maxFrames > 0 && frameIdx >= maxFrames) {
-            break;
-        }
-
-        // ── Cancel / Pause check ────────────────────────────────
-        if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
-            std::cout << "[ncnn] Cancelled at frame " << frameIdx << std::endl;
-            cancelled = true;
-            break;
-        }
-        while (opts.pauseFlag && opts.pauseFlag->load(std::memory_order_relaxed)) {
-            if (opts.cancelFlag && opts.cancelFlag->load(std::memory_order_relaxed)) {
-                cancelled = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (cancelled) break;
-
-        AVFrame* inputFrame = nullptr;
-        if (!reader.readFrame(inputFrame, error)) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-        if (inputFrame == nullptr) {
-            break;
-        }
-        if (!frame_io::avFrameToRgb24(inputFrame, vi.width, vi.height, inBuf, error)) {
-            writer.close();
-            reader.close();
-            return StageResult::Error;
-        }
-
-        // Create NCNN input mat from RGB24 (HWC pixel order, 3 channels)
-        // ncnn::Mat::from_pixels expects pixel data in HWC format
-        ncnn::Mat inMat = ncnn::Mat::from_pixels(
-            inBuf.data(), ncnn::Mat::PIXEL_RGB, vi.width, vi.height);
-
-        // Normalize to [0,1] range (most SR models expect this)
-        const float norm_vals[3] = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
-        inMat.substract_mean_normalize(nullptr, norm_vals);
-
-        // Run inference
-        ncnn::Extractor ex = nn->net.create_extractor();
-
-        // Use standard input/output blob names
-        // Most NCNN models use "data"/"input" for input and "output" for output
-        int inputRet = ex.input("data", inMat);
-        if (inputRet != 0) {
-            // Try alternate input name
-            inputRet = ex.input("input", inMat);
+            ncnn::Extractor ex = nn->net.create_extractor();
+            int inputRet = ex.input("data", inMat);
             if (inputRet != 0) {
-                error = "NCNN: failed to set input tensor (tried 'data' and 'input')";
-                ok = false;
-                break;
+                inputRet = ex.input("input", inMat);
+                if (inputRet != 0) {
+                    loopError = "NCNN: failed to set input tensor (tried 'data' and 'input')";
+                    return false;
+                }
             }
-        }
 
-        ncnn::Mat outMat;
-        int outputRet = ex.extract("output", outMat);
-        if (outputRet != 0) {
-            error = "NCNN: failed to extract output tensor (blob 'output')";
-            ok = false;
-            break;
-        }
+            ncnn::Mat outMat;
+            const int outputRet = ex.extract("output", outMat);
+            if (outputRet != 0) {
+                loopError = "NCNN: failed to extract output tensor (blob 'output')";
+                return false;
+            }
 
-        // De-normalize: multiply by 255 and clamp to [0, 255]
-        // outMat is CHW format, convert to HWC RGB24
-        const int outCh = outMat.c;
-        const int outMH = outMat.h;
-        const int outMW = outMat.w;
+            const int outCh = outMat.c;
+            const int outMH = outMat.h;
+            const int outMW = outMat.w;
+            if (outMW != outW || outMH != outH) {
+                loopError = "NCNN output dimensions do not match the configured frame size: expected "
+                          + std::to_string(outW) + "x" + std::to_string(outH)
+                          + ", got " + std::to_string(outMW) + "x" + std::to_string(outMH);
+                return false;
+            }
+            if (outCh < 3 || outMH <= 0 || outMW <= 0) {
+                loopError = "NCNN output has unexpected shape: c=" + std::to_string(outCh)
+                          + " h=" + std::to_string(outMH) + " w=" + std::to_string(outMW);
+                return false;
+            }
 
-        if (outCh >= 3 && outMH > 0 && outMW > 0) {
-            // Use ncnn::Mat::to_pixels to convert back to RGB24
             ncnn::Mat denormMat = outMat.clone();
-            // Scale back to [0, 255]
             for (int c = 0; c < 3; ++c) {
                 float* ptr = denormMat.channel(c);
                 for (int i = 0; i < outMH * outMW; ++i) {
@@ -498,72 +471,28 @@ StageResult NcnnVulkanBackend::processVideoFile(
                     ptr[i] = val;
                 }
             }
-            denormMat.to_pixels(outBuf.data(), ncnn::Mat::PIXEL_RGB);
-        } else {
-            error = "NCNN output has unexpected shape: c=" + std::to_string(outCh)
-                  + " h=" + std::to_string(outMH) + " w=" + std::to_string(outMW);
-            ok = false;
-            break;
-        }
 
-        AVFrame* outputFrame = frame_io::rgb24ToAvFrame(outBuf.data(), outW, outH, error);
-        if (outputFrame == nullptr) {
-            ok = false;
-            break;
-        }
-        const bool writeOk = writer.writeFrame(outputFrame, error);
-        av_frame_free(&outputFrame);
-        if (!writeOk) {
-            ok = false;
-            break;
-        }
-
-        ++frameIdx;
-
-        // Emit live frame preview
-        const int pvInterval = opts.previewFrameInterval > 0 ? opts.previewFrameInterval : 15;
-        if (opts.framePreviewCb && (frameIdx % pvInterval == 1 || pvInterval == 1)) {
-            opts.framePreviewCb(outBuf.data(), outW, outH);
-        }
-
-        // Report progress
-        if (progressCb) {
-            float progress = 0.0f;
-            if (vi.totalFrames > 0) {
-                progress = static_cast<float>(frameIdx) /
-                           static_cast<float>(vi.totalFrames);
-                if (progress > 1.0f) progress = 1.0f;
-            } else {
-                // Logarithmic fallback for unknown-length streams
-                progress = 1.0f - 1.0f / (1.0f + static_cast<float>(frameIdx) * 0.01f);
+            if (outputRgb.size() != outFrameBytes) {
+                outputRgb.resize(outFrameBytes);
             }
-            const std::string frameMsg = "NCNN: frame " + std::to_string(frameIdx)
-                + (vi.totalFrames > 0 ? "/" + std::to_string(vi.totalFrames) : "");
-            progressCb(progress, frameMsg);
-        }
+            denormMat.to_pixels(outputRgb.data(), ncnn::Mat::PIXEL_RGB);
+            return true;
+        },
+        progressCb,
+        error);
+
+    if (loopResult.stageResult != StageResult::Processed) {
+        return loopResult.stageResult;
     }
 
-    // ── 6. Cleanup ──────────────────────────────────────────────
-    writer.close();
-    reader.close();
-
-    if (cancelled) {
-        error = "Processing cancelled by user at frame " + std::to_string(frameIdx);
-        return StageResult::Cancelled;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        impl_->nets.clear();
     }
 
-    if (!ok) {
-        return StageResult::Error;
-    }
-
-    if (frameIdx == 0) {
-        error = "No frames decoded from input video.";
-        return StageResult::Error;
-    }
-
-    std::cout << "[ncnn] processVideoFile: processed " << frameIdx << " frames → "
+    std::cout << "[ncnn] processVideoFile: processed " << loopResult.frameCount << " frames → "
               << outputVideo << std::endl;
-    return StageResult::Processed;
+    return loopResult.stageResult;
 #endif  // AVE_HAVE_NCNN
 }
 

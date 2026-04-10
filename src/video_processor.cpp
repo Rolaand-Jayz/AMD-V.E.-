@@ -1,5 +1,6 @@
 #include "ave/video_processor.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -9,11 +10,20 @@
 #include "ave/backends/vapoursynth_backend.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/stage.hpp"
+#include "ave/telemetry.hpp"
 #include "ave/types.hpp"
 
 namespace ave {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+struct StageTimingEntry {
+    std::string stageName;
+    std::string outcome;
+    double milliseconds = 0.0;
+};
 
 bool pathHasMxrExtension(const std::string& path) {
     if (path.size() < 4) {
@@ -26,6 +36,41 @@ bool pathHasMxrExtension(const std::string& path) {
 bool backendUsesScriptPipeline(const BackendType type) {
     return type == BackendType::VapourSynth ||
            type == BackendType::GlslShader;
+}
+
+std::string joinCapabilitiesCsv(const std::vector<StageKind>& capabilities) {
+    std::string out;
+    for (std::size_t i = 0; i < capabilities.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        out += toString(capabilities[i]);
+    }
+    return out;
+}
+
+std::string serializeControlBindings(
+    const std::unordered_map<std::string, std::string>& bindings) {
+    std::string out;
+    bool first = true;
+    for (const auto& [inputName, binding] : bindings) {
+        if (inputName.empty() || binding.empty()) {
+            continue;
+        }
+        if (!first) {
+            out += ";";
+        }
+        first = false;
+        out += inputName;
+        out += "=";
+        out += binding;
+    }
+    return out;
+}
+
+double elapsedMilliseconds(const Clock::time_point start,
+                           const Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 }  // namespace
@@ -55,6 +100,9 @@ EnhancementStage VideoProcessor::resolveModelPath(
                 explicitModelId = std::get<std::string>(modelIt->second);
             }
             if (explicitModelId.empty()) {
+                explicitModelId = inferModelIdFromPath(explicitPath);
+            }
+            if (explicitModelId.empty()) {
                 const auto entries = catalogEntriesForStage(stage.kind);
                 for (const auto* e : entries) {
                     if (e->isDefault) { explicitModelId = e->id; break; }
@@ -74,20 +122,38 @@ EnhancementStage VideoProcessor::resolveModelPath(
         }
     }
 
-    // Determine the model ID: explicit param → catalog default.
-    std::string modelId;
     auto it = stage.params.find("model");
+    const bool explicitModelRequested =
+        it != stage.params.end() && std::holds_alternative<std::string>(it->second)
+        && !std::get<std::string>(it->second).empty();
+
+    // Determine the model ID: explicit param → backend-preferred default.
+    std::string modelId;
     if (it != stage.params.end() && std::holds_alternative<std::string>(it->second)) {
         modelId = std::get<std::string>(it->second);
     }
     if (modelId.empty()) {
-        // Fall back to the default model for this stage kind.
-        const auto entries = catalogEntriesForStage(stage.kind);
-        for (const auto* e : entries) {
-            if (e->isDefault) { modelId = e->id; break; }
+        if (activeBackend.has_value()) {
+            if (const auto* preferred = preferredBackendModelForStage(stage.kind, *activeBackend);
+                preferred != nullptr) {
+                modelId = preferred->id;
+            } else if (*activeBackend == BackendType::NcnnVulkan) {
+                std::cout << "[model] " << toString(stage.kind)
+                          << " — no NCNN-compatible catalog model; stage will use FFmpeg fallback."
+                          << std::endl;
+                return out;
+            }
         }
-        if (modelId.empty() && !entries.empty()) {
-            modelId = entries.front()->id;
+        if (modelId.empty()) {
+            // Fall back to the generic stage default when the backend has no
+            // stage-specific model preference.
+            const auto entries = catalogEntriesForStage(stage.kind);
+            for (const auto* e : entries) {
+                if (e->isDefault) { modelId = e->id; break; }
+            }
+            if (modelId.empty() && !entries.empty()) {
+                modelId = entries.front()->id;
+            }
         }
     }
     if (modelId.empty()) return out;
@@ -98,6 +164,17 @@ EnhancementStage VideoProcessor::resolveModelPath(
     const auto managed = modelManager_.findModel(modelId);
     if (!managed.has_value()) {
         return out;
+    }
+
+    out.params["model_family_id"] = modelFamilyId(managed->entry);
+    out.params["model_family_name"] = modelFamilyName(managed->entry);
+    out.params["model_capabilities"] = joinCapabilitiesCsv(modelCapabilities(managed->entry));
+    out.params["model_supports_fused_execution"] = managed->entry.supportsFusedExecution;
+    out.params["model_supports_selective_capabilities"] =
+        managed->entry.supportsSelectiveCapabilities;
+    if (!managed->entry.controlInputBindings.empty()) {
+        out.params["model_control_bindings"] =
+            serializeControlBindings(managed->entry.controlInputBindings);
     }
 
     const bool migraphxActive =
@@ -121,30 +198,44 @@ EnhancementStage VideoProcessor::resolveModelPath(
     if (selectedPath.has_value() && !selectedPath->empty() && *selectedPath != "(builtin)") {
         out.params["model_path"] = *selectedPath;
         out.params["model_path_explicit"] = false;
-        std::cout << "[model] " << toString(stage.kind)
-                  << " using model: " << *selectedPath << std::endl;
+        std::cout << "[model] " << toString(stage.kind);
+        if (migraphxActive && pathHasMxrExtension(*selectedPath)) {
+            std::cout << " found cached compiled artifact candidate: " << *selectedPath
+                      << " (MiGraphX will validate/select the exact runtime artifact).";
+        } else {
+            std::cout << " using model: " << *selectedPath;
+        }
+        std::cout << std::endl;
     } else if (migraphxActive &&
                !managed->downloadedPath.empty() &&
                managed->downloadedPath != "(builtin)") {
         std::cout << "[model] " << toString(stage.kind)
                   << " — model '" << modelId
-                  << "' is available on disk but not yet compiled to .mxr;"
-                  << " MiGraphX will resolve/compile the inference artifact."
+                  << "' is available on disk;"
+                  << " MiGraphX will validate/select the required cached artifact or compile one if needed."
                   << std::endl;
-    } else {
+    } else if (!explicitModelRequested) {
         std::cout << "[model] " << toString(stage.kind)
                   << " — model '" << modelId
                   << "' not on disk, will fall back to FFmpeg filter" << std::endl;
+    } else {
+        std::cout << "[model] " << toString(stage.kind)
+                  << " — explicit model '" << modelId
+                  << "' not available on disk" << std::endl;
     }
     return out;
 }
 
 // ─── process ─────────────────────────────────────────────────────
 bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
+    const auto totalStart = Clock::now();
+
     // Ensure model state is up to date
     modelManager_.refresh();
 
+    const auto planningStart = Clock::now();
     const std::vector<EnhancementStage> ordered = planner_.plan(job.requestedStages);
+    const auto planningEnd = Clock::now();
 
     // ── Log the planned pipeline ──────────────────────────────────
     std::ostringstream planSS;
@@ -157,6 +248,15 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
         std::cout << "  (no enhancement stages \u2014 pass-through encode only)\n";
 
     if (job.progressCb) job.progressCb(0, 0, planSS.str());
+
+    const auto telemetryProbe = probeAmdTelemetrySupport();
+    std::cout << "[telemetry] " << telemetryProbe.summary() << std::endl;
+    std::string telemetryError;
+    if (const auto telemetry = collectAmdTelemetry(telemetryError); telemetry.has_value()) {
+        std::cout << "[telemetry] initial: " << telemetry->summary() << std::endl;
+    } else if (!telemetryError.empty()) {
+        std::cout << "[telemetry] sample unavailable: " << telemetryError << std::endl;
+    }
 
     if (job.dryRun) return true;
 
@@ -181,6 +281,7 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     // Only create and initialise the backend if there are stages that
     // could actually benefit from it.
     std::unique_ptr<IAcceleratorBackend> backend;
+    const auto backendSetupStart = Clock::now();
     if (backendEligibleCount > 0) {
         std::string backendSummary;
         backend = backendManager_.createBackend(job.requestedBackend, backendSummary);
@@ -223,6 +324,7 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
             }
         }
     }
+    const auto backendSetupEnd = Clock::now();
 
     // The backend pre-load pass is fast (model validation only);
     // real AI work happens inside ffmpeg_.encode() as one continuous
@@ -268,6 +370,7 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     resolvedOrdered.reserve(ordered.size());
     const std::optional<BackendType> activeBackend =
         backend ? std::optional<BackendType>(backend->type()) : std::nullopt;
+    const auto modelResolveStart = Clock::now();
     for (const auto& s : ordered) {
         EnhancementStage rs = resolveModelPath(s, activeBackend);
         if (rs.kind == StageKind::Interpolate && !sceneCuts.empty()) {
@@ -275,11 +378,13 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
         }
         resolvedOrdered.push_back(std::move(rs));
     }
+    const auto modelResolveEnd = Clock::now();
 
     // ── Per-stage backend pass ─────────────────────────────────────
     int completedBackend = 0;
     int aiProcessedCount = 0;
     int deferredCount    = 0;
+    std::vector<StageTimingEntry> preloadTimings;
     const bool scriptBackendActive = backend &&
         backendUsesScriptPipeline(backend->type());
 
@@ -313,13 +418,17 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
                 std::to_string(backendEligibleCount) + ": " + stageName +
                 " via " + backend->name());
 
+            const auto stageStart = Clock::now();
             std::string backendError;
             const StageResult result = backend->runStage(stage, backendError);
+            const auto stageEnd = Clock::now();
+            StageTimingEntry timing{stageName, "deferred", elapsedMilliseconds(stageStart, stageEnd)};
 
             switch (result) {
                 case StageResult::Processed:
                     stage.backendProcessed = true;
                     ++aiProcessedCount;
+                    timing.outcome = "processed";
                     std::cout << "[pipeline] " << stageName
                               << " → AI inference complete (" << backend->name() << ")"
                               << std::endl;
@@ -327,12 +436,15 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
 
                 case StageResult::Deferred:
                     ++deferredCount;
+                    timing.outcome = "deferred";
                     std::cout << "[pipeline] " << stageName
                               << " → deferred to FFmpeg filter chain"
                               << std::endl;
                     break;
 
                 case StageResult::Error: {
+                    timing.outcome = "error";
+                    preloadTimings.push_back(timing);
                     std::ostringstream os;
                     os << "Backend stage " << stageName << " failed: " << backendError;
                     reportProgress(overallBefore, 0, os.str());
@@ -341,11 +453,14 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
                 }
 
                 case StageResult::Cancelled:
+                    timing.outcome = "cancelled";
+                    preloadTimings.push_back(timing);
                     error = "Processing cancelled by user.";
                     reportProgress(overallBefore, 0, error);
                     return false;
             }
 
+            preloadTimings.push_back(timing);
             ++completedBackend;
             const int overallAfter = backendEligibleCount > 0
                 ? (completedBackend * kPreloadPct) / backendEligibleCount
@@ -380,10 +495,36 @@ bool VideoProcessor::process(const VideoJob& job, std::string& error) const {
     }
 
     std::string ffmpegError;
+    const auto encodeStart = Clock::now();
     if (!ffmpeg_.encode(encodeJob, resolvedOrdered, backend.get(), ffmpegError)) {
         reportProgress(encodeBase, 0, "Encode failed: " + ffmpegError);
         error = ffmpegError;
         return false;
+    }
+    const auto encodeEnd = Clock::now();
+
+    std::cout << "[pipeline-timing] planning_ms="
+              << elapsedMilliseconds(planningStart, planningEnd)
+              << " backend_setup_ms=" << elapsedMilliseconds(backendSetupStart, backendSetupEnd)
+              << " model_resolution_ms=" << elapsedMilliseconds(modelResolveStart, modelResolveEnd)
+              << " encode_ms=" << elapsedMilliseconds(encodeStart, encodeEnd)
+              << " total_ms=" << elapsedMilliseconds(totalStart, Clock::now())
+              << std::endl;
+    for (const auto& entry : preloadTimings) {
+        std::cout << "[pipeline-timing] preload_stage=" << entry.stageName
+                  << " outcome=" << entry.outcome
+                  << " ms=" << entry.milliseconds
+                  << std::endl;
+    }
+
+    telemetryError.clear();
+    if (const auto telemetry = collectAmdTelemetry(telemetryError); telemetry.has_value()) {
+        std::cout << "[telemetry] final: " << telemetry->summary() << std::endl;
+        if (const std::string hint = telemetry->pressureHint(); !hint.empty()) {
+            std::cout << "[telemetry] hint: " << hint << std::endl;
+        }
+    } else if (!telemetryError.empty()) {
+        std::cout << "[telemetry] final sample unavailable: " << telemetryError << std::endl;
     }
 
     if (job.progressCb) job.progressCb(100, 100,

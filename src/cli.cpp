@@ -15,62 +15,9 @@
 namespace ave {
 namespace {
 
-std::string trim(const std::string& input) {
-    std::size_t begin = 0;
-    while (begin < input.size() && std::isspace(static_cast<unsigned char>(input[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
-}
-
 std::string toLower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return value;
-}
-
-std::vector<std::string> split(const std::string& value, char delimiter) {
-    std::vector<std::string> parts;
-    std::size_t start = 0;
-    while (start <= value.size()) {
-        std::size_t end = value.find(delimiter, start);
-        if (end == std::string::npos) {
-            end = value.size();
-        }
-        parts.push_back(value.substr(start, end - start));
-        if (end == value.size()) {
-            break;
-        }
-        start = end + 1;
-    }
-    return parts;
-}
-
-ParameterValue parseValue(const std::string& value) {
-    const std::string lowered = toLower(trim(value));
-    if (lowered == "true") {
-        return true;
-    }
-    if (lowered == "false") {
-        return false;
-    }
-
-    char* intEnd = nullptr;
-    const long long intParsed = std::strtoll(lowered.c_str(), &intEnd, 10);
-    if (intEnd != lowered.c_str() && *intEnd == '\0') {
-        return static_cast<std::int64_t>(intParsed);
-    }
-
-    char* floatEnd = nullptr;
-    const double floatParsed = std::strtod(lowered.c_str(), &floatEnd);
-    if (floatEnd != lowered.c_str() && *floatEnd == '\0') {
-        return floatParsed;
-    }
-
-    return trim(value);
 }
 
 std::optional<BackendType> parseBackend(const std::string& value) {
@@ -94,48 +41,6 @@ std::optional<BackendType> parseBackend(const std::string& value) {
         return BackendType::GlslShader;
     }
     return std::nullopt;
-}
-
-std::optional<EnhancementStage> parseStageSpec(const std::string& spec, std::string& error) {
-    const std::size_t colon = spec.find(':');
-    const std::string kindToken = colon == std::string::npos ? spec : spec.substr(0, colon);
-    const std::optional<StageKind> kind = stageKindFromString(trim(kindToken));
-    if (!kind.has_value()) {
-        error = "Unknown stage kind: " + kindToken;
-        return std::nullopt;
-    }
-
-    EnhancementStage stage;
-    stage.kind = *kind;
-
-    if (colon == std::string::npos) {
-        return stage;
-    }
-
-    const std::string paramString = spec.substr(colon + 1);
-    if (paramString.empty()) {
-        return stage;
-    }
-
-    const std::vector<std::string> assignments = split(paramString, ',');
-    for (const std::string& assignment : assignments) {
-        const std::size_t eq = assignment.find('=');
-        if (eq == std::string::npos) {
-            error = "Malformed stage parameter in: " + assignment;
-            return std::nullopt;
-        }
-
-        const std::string key = trim(assignment.substr(0, eq));
-        const std::string rawValue = assignment.substr(eq + 1);
-        if (key.empty()) {
-            error = "Empty stage parameter key in: " + assignment;
-            return std::nullopt;
-        }
-
-        stage.params[key] = parseValue(rawValue);
-    }
-
-    return stage;
 }
 
 bool requireValue(int argc, char** argv, int& i, std::string& outValue, const std::string& flag, CliResult& result) {
@@ -173,10 +78,13 @@ void printUsage(const std::string& executableName) {
               << "  --stage remove_artifacts:strength=0.7\n"
               << "  --stage upscale:width=3840,height=2160\n"
               << "  --stage sharpen:amount=0.5\n"
+              << "  --stage denoise:vpy_script_path=/path/custom_pipeline.vpy --backend vapoursynth\n"
+              << "  --stage stereo_3d:model=depth-anything-v2-small-fp16,format=full_sbs,divergence=2.0\n"
               << "  --stage interpolate:fps=60\n"
               << "\n"
               << "Ordering guarantees:\n"
               << "  restore/deartifact/cleanup before upscale+sharpen\n"
+              << "  stereo_3d runs after sharpening and before interpolation\n"
               << "  interpolation is always last before encode\n";
 }
 

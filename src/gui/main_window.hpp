@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -11,6 +12,8 @@
 #include "ave/app_settings.hpp"
 #include "ave/backend_manager.hpp"
 #include "ave/job.hpp"
+#include "ave/job_queue.hpp"
+#include "ave/job_recovery.hpp"
 #include "ave/model_manager.hpp"
 #include "ave/planner.hpp"
 
@@ -25,11 +28,13 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
+class QPixmap;
 class QProgressBar;
 class QPushButton;
 class QSlider;
 class QSpinBox;
 class QStackedWidget;
+class QTimer;
 class ToggleSwitch;
 
 // ─────────────────────────────────────────────────────────────────
@@ -69,6 +74,7 @@ class MainWindow final : public QMainWindow {
     QWidget* buildStrengthPanel(QWidget* parent);   // generic strength
     QWidget* buildUpscalePanel(QWidget* parent);
     QWidget* buildSharpenPanel(QWidget* parent);
+    QWidget* buildStereo3dPanel(QWidget* parent);
     QWidget* buildInterpolatePanel(QWidget* parent);
     QWidget* buildColorFixPanel(QWidget* parent);
     QWidget* buildEmptyPanel(QWidget* parent);
@@ -97,6 +103,10 @@ class MainWindow final : public QMainWindow {
     // ── Job ──────────────────────────────────────────────────────
     void runJob();
     void runPreview();
+    void addCurrentJobToQueue();
+    void removeSelectedQueuedJob();
+    void clearFinishedQueuedJobs();
+    void runQueuedJobs();
     void probeBackends();
     void openModelManager();
     void compileSelectedModel();
@@ -109,14 +119,39 @@ class MainWindow final : public QMainWindow {
 
     // ── Utilities ────────────────────────────────────────────────
     void appendLog(const QString& line);
+    void applyProgressUpdate(int overallPct, int taskPct, const QString& msg);
     void applySettingsToUi(bool restoreRememberedPaths);
     void persistUiStateToSettings();
+    void updateProcessedPreviewTitle(const QString& runtimeName);
+    void setPreviewPixmap(QLabel* label, const QPixmap& pixmap);
+    void refreshPreviewPlaceholders();
+    void refreshOriginalPreviewFrame();
+    void requestTelemetryRefresh();
+    void applyTelemetryStatus(const QString& summary, const QString& logLine = QString());
+    void promptForRecoveredJob();
+    void applyRecoveredJob(const ave::RecoveredJobState& state);
+    void startRecoveryTracking(const ave::VideoJob& job);
+    void clearRecoveryTracking();
+    void loadQueuedJobs();
+    void persistQueuedJobs();
+    void refreshQueuedJobsView();
+    void refreshQueueControls();
+    std::optional<std::size_t> nextRunnableQueuedJobIndex() const;
+    void executeFullJob(ave::VideoJob job, std::optional<std::size_t> queueIndex = std::nullopt);
+    void startQueuedJob(std::size_t index);
+    void finishQueuedJob(std::size_t index,
+                         const ave::VideoJob& job,
+                         bool ok,
+                         bool wasCancelled,
+                         const QString& error);
     QString suggestedOutputPathForInput(const QString& inputPath,
                                         const QString& suffixOverride = QString()) const;
     void applySuggestedOutputPath(const QString& inputPath, bool force);
     void setManagedOutputPath(const QString& path, bool autoManaged);
     void setRunning(bool running);
     std::optional<ave::VideoJob> buildJob(QString& error) const;
+    bool hasQueuedOutputConflict(const QString& outputPath,
+                                 std::optional<std::size_t> ignoreIndex = std::nullopt) const;
     void storeSelectedFamilyCapabilityDraft();
     std::optional<ave::StageKind> selectedFamilyCapabilityKind() const;
     std::optional<std::string> selectedFamilyCapabilityModelId() const;
@@ -130,6 +165,8 @@ class MainWindow final : public QMainWindow {
 
     // ── Settings ─────────────────────────────────────────────────
     ave::AppSettings appSettings_;
+    ave::JobQueueStore jobQueueStore_;
+    ave::JobRecoveryStore jobRecoveryStore_;
 
     // ── Model manager ────────────────────────────────────────────
     ave::ModelManager modelManager_;
@@ -167,6 +204,26 @@ class MainWindow final : public QMainWindow {
     QSlider*  sharpenSlider_ = nullptr;
     QLabel*   sharpenLabel_  = nullptr;
 
+    // Stereo 3D panel widgets
+    QComboBox* stereoFormatCombo_ = nullptr;
+    QComboBox* stereoSyntheticViewCombo_ = nullptr;
+    QComboBox* stereoMapperTypeCombo_ = nullptr;
+    QComboBox* stereoPadModeCombo_ = nullptr;
+    QComboBox* stereoMethodCombo_ = nullptr;
+    QDoubleSpinBox* stereoDivergenceSpin_ = nullptr;
+    QDoubleSpinBox* stereoConvergenceSpin_ = nullptr;
+    QDoubleSpinBox* stereoForegroundScaleSpin_ = nullptr;
+    QDoubleSpinBox* stereoIpdOffsetSpin_ = nullptr;
+    QDoubleSpinBox* stereoPadSpin_ = nullptr;
+    QDoubleSpinBox* stereoEmaDecaySpin_ = nullptr;
+    QSpinBox* stereoDepthResolutionSpin_ = nullptr;
+    QSpinBox* stereoEdgeDilateXSpin_ = nullptr;
+    QSpinBox* stereoEdgeDilateYSpin_ = nullptr;
+    ToggleSwitch* stereoLimitResolutionToggle_ = nullptr;
+    ToggleSwitch* stereoMetricDepthToggle_ = nullptr;
+    ToggleSwitch* stereoDepthAaToggle_ = nullptr;
+    ToggleSwitch* stereoEmaNormalizeToggle_ = nullptr;
+
     // Interpolate panel widgets
     QSpinBox*     interpolateFpsSpin_   = nullptr;
     ToggleSwitch* sceneDetectToggle_    = nullptr;
@@ -200,12 +257,18 @@ class MainWindow final : public QMainWindow {
     QProgressBar* taskProgressBar_ = nullptr;  ///< Current task progress (0–100)
     QLabel*       progressLabel_   = nullptr;  ///< Status text
     QString       lastProgressMsg_;            ///< Used to detect log-worthy message changes
+    QListWidget*  queuedJobsView_ = nullptr;
+    QLabel*       queueSummaryLabel_ = nullptr;
 
     // ── Action buttons ────────────────────────────────────────────
     QPushButton* runButton_         = nullptr;
     QPushButton* previewButton_     = nullptr;   ///< 10-sec preview run
     QPushButton* pauseButton_       = nullptr;   ///< Pause/resume processing
     QPushButton* cancelButton_      = nullptr;   ///< Cancel processing
+    QPushButton* addQueueButton_    = nullptr;
+    QPushButton* runQueueButton_    = nullptr;
+    QPushButton* removeQueueButton_ = nullptr;
+    QPushButton* clearFinishedQueueButton_ = nullptr;
     QPushButton* addStageButton_    = nullptr;
     QPushButton* compileModelButton_ = nullptr;
     QPushButton* removeStageButton_ = nullptr;
@@ -215,7 +278,12 @@ class MainWindow final : public QMainWindow {
 
     // ── Preview ───────────────────────────────────────────────────
     QSpinBox*  previewDurationSpin_ = nullptr;   ///< Preview clip length (seconds)
-    QLabel*    framePreviewLabel_   = nullptr;    ///< Live frame display
+    QLabel*    originalPreviewTitleLabel_ = nullptr;
+    QLabel*    processedPreviewTitleLabel_ = nullptr;
+    QLabel*    originalFramePreviewLabel_ = nullptr;
+    QLabel*    framePreviewLabel_   = nullptr;    ///< Live processed frame display
+    QLabel*    telemetryStatusLabel_ = nullptr;
+    QTimer*    telemetryTimer_ = nullptr;
 
     // ── Utilities bar ─────────────────────────────────────────────
     QComboBox* quickTemplateCombo_  = nullptr;
@@ -227,12 +295,18 @@ class MainWindow final : public QMainWindow {
 
     // ── State ─────────────────────────────────────────────────────
     std::vector<ave::EnhancementStage> stages_;
+    std::vector<ave::QueuedJobRecord> queuedJobs_;
     std::vector<ave::ManagedModel> currentFamilyModels_;
     std::map<ave::StageKind, ave::EnhancementStage> familyDraftStages_;
     std::optional<ave::StageKind> activeFamilyCapability_;
+    std::optional<std::size_t> activeQueueIndex_;
     bool updatingFilterPresetUi_ = false;
+    bool queueRunActive_ = false;
     ave::PipelinePlanner planner_;
     std::atomic<bool> isRunning_{false};
     std::atomic<bool> cancelFlag_{false};
     std::atomic<bool> pauseFlag_{false};
+    std::atomic<std::uint64_t> previewRequestSerial_{0};
+    std::atomic<bool> telemetryRequestInFlight_{false};
+    QString lastTelemetryLogLine_;
 };

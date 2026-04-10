@@ -1,0 +1,114 @@
+function(_ave_resolve_install_path out_var relative_or_absolute)
+    if(IS_ABSOLUTE "${relative_or_absolute}")
+        set(${out_var} "$ENV{DESTDIR}${relative_or_absolute}" PARENT_SCOPE)
+    else()
+        set(${out_var} "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${relative_or_absolute}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_ave_install_shared_library_chain destination dep)
+    if(NOT EXISTS "${dep}")
+        return()
+    endif()
+
+    get_filename_component(_ave_dep_dir "${dep}" DIRECTORY)
+    get_filename_component(_ave_dep_name "${dep}" NAME)
+    file(REAL_PATH "${dep}" _ave_dep_real)
+
+    set(_ave_candidates "${dep}")
+    if(_ave_dep_name MATCHES "^(.+\\.so)(\\..*)?$")
+        set(_ave_dep_stem "${CMAKE_MATCH_1}")
+        file(GLOB _ave_globbed_candidates
+            LIST_DIRECTORIES false
+            "${_ave_dep_dir}/${_ave_dep_stem}*")
+        foreach(_ave_candidate IN LISTS _ave_globbed_candidates)
+            file(REAL_PATH "${_ave_candidate}" _ave_candidate_real)
+            if(_ave_candidate_real STREQUAL _ave_dep_real)
+                list(APPEND _ave_candidates "${_ave_candidate}")
+            endif()
+        endforeach()
+    endif()
+    list(REMOVE_DUPLICATES _ave_candidates)
+
+    file(INSTALL
+        DESTINATION "${destination}"
+        TYPE SHARED_LIBRARY
+        FOLLOW_SYMLINK_CHAIN
+        FILES ${_ave_candidates})
+endfunction()
+
+_ave_resolve_install_path(_ave_qt_plugin_out "@CMAKE_INSTALL_LIBDIR@/ave/qt-plugins")
+_ave_resolve_install_path(_ave_runtime_out "@CMAKE_INSTALL_LIBDIR@/ave/runtime")
+
+file(MAKE_DIRECTORY "${_ave_qt_plugin_out}")
+file(MAKE_DIRECTORY "${_ave_runtime_out}")
+
+set(_ave_qt_plugin_root "@AVE_QT_PLUGINS_DIR@")
+if(NOT EXISTS "${_ave_qt_plugin_root}")
+    message(WARNING "Qt plugin root '${_ave_qt_plugin_root}' does not exist; skipping Qt plugin bundle.")
+    return()
+endif()
+
+set(_ave_qt_plugin_subdirs "@AVE_QT_PLUGIN_SUBDIRS@")
+list(FILTER _ave_qt_plugin_subdirs EXCLUDE REGEX "^$")
+set(_ave_qt_plugin_excluded_globs "@AVE_QT_PLUGIN_EXCLUDED_GLOBS@")
+list(FILTER _ave_qt_plugin_excluded_globs EXCLUDE REGEX "^$")
+
+if(_ave_qt_plugin_subdirs)
+    foreach(_ave_subdir IN LISTS _ave_qt_plugin_subdirs)
+        set(_ave_entry "${_ave_qt_plugin_root}/${_ave_subdir}")
+        if(IS_DIRECTORY "${_ave_entry}")
+            file(INSTALL DESTINATION "${_ave_qt_plugin_out}" TYPE DIRECTORY FILES "${_ave_entry}")
+        endif()
+    endforeach()
+else()
+    file(GLOB _ave_qt_plugin_entries LIST_DIRECTORIES true "${_ave_qt_plugin_root}/*")
+    foreach(_ave_entry IN LISTS _ave_qt_plugin_entries)
+        if(IS_DIRECTORY "${_ave_entry}")
+            file(INSTALL DESTINATION "${_ave_qt_plugin_out}" TYPE DIRECTORY FILES "${_ave_entry}")
+        endif()
+    endforeach()
+endif()
+
+foreach(_ave_glob IN LISTS _ave_qt_plugin_excluded_globs)
+    file(GLOB _ave_pruned_plugins LIST_DIRECTORIES false "${_ave_qt_plugin_out}/${_ave_glob}")
+    if(_ave_pruned_plugins)
+        file(REMOVE ${_ave_pruned_plugins})
+    endif()
+endforeach()
+
+file(GLOB_RECURSE _ave_installed_qt_plugins
+    LIST_DIRECTORIES false
+    "${_ave_qt_plugin_out}/*.so"
+    "${_ave_qt_plugin_out}/*.so.*")
+
+if(_ave_installed_qt_plugins)
+    file(GET_RUNTIME_DEPENDENCIES
+        LIBRARIES ${_ave_installed_qt_plugins}
+        RESOLVED_DEPENDENCIES_VAR _ave_resolved_qt_plugin_deps
+        UNRESOLVED_DEPENDENCIES_VAR _ave_unresolved_qt_plugin_deps
+        POST_EXCLUDE_REGEXES
+            ".*/ld-linux[^/]*\\.so(\\.[0-9]+)*$"
+            ".*/libc\\.so(\\.[0-9]+)*$"
+            ".*/libm\\.so(\\.[0-9]+)*$"
+            ".*/libpthread\\.so(\\.[0-9]+)*$"
+            ".*/librt\\.so(\\.[0-9]+)*$"
+            ".*/libdl\\.so(\\.[0-9]+)*$"
+            ".*/libutil\\.so(\\.[0-9]+)*$"
+            ".*/libresolv\\.so(\\.[0-9]+)*$"
+            ".*/libnss_.*\\.so(\\.[0-9]+)*$"
+            ".*/libanl\\.so(\\.[0-9]+)*$")
+
+    foreach(_ave_dep IN LISTS _ave_resolved_qt_plugin_deps)
+        if(EXISTS "${_ave_dep}")
+            _ave_install_shared_library_chain("${_ave_runtime_out}" "${_ave_dep}")
+        endif()
+    endforeach()
+
+    if(_ave_unresolved_qt_plugin_deps)
+        list(JOIN _ave_unresolved_qt_plugin_deps ", " _ave_qt_unresolved_text)
+        message(WARNING "Unresolved runtime dependencies while bundling Qt plugins: ${_ave_qt_unresolved_text}")
+    endif()
+endif()
+
+message(STATUS "Bundled Qt plugins into ${_ave_qt_plugin_out}")

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "ave/backend.hpp"
 #include "ave/types.hpp"
 
 namespace ave {
@@ -21,6 +24,11 @@ enum class ModelPrecision {
     Fp32,
     Fp16,
     Int8   // MiGraphX driver-level PTQ: --int8 flag quantizes from fp32 at compile time
+};
+
+enum class MiGraphXOnnxTransform {
+    None,
+    ResizeCubicToLinear,
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -45,7 +53,10 @@ struct ModelEntry {
                bool isDefault_,
                int minVramMib_,
                std::string archiveSubPath_ = {},
-               std::string archiveSubPathAux_ = {})
+               std::string archiveSubPathAux_ = {},
+               int migraphxCompileWidth_ = 0,
+               int migraphxCompileHeight_ = 0,
+               MiGraphXOnnxTransform migraphxOnnxTransform_ = MiGraphXOnnxTransform::None)
         : id(std::move(id_)),
           displayName(std::move(displayName_)),
           stage(stage_),
@@ -61,7 +72,10 @@ struct ModelEntry {
           isDefault(isDefault_),
           minVramMib(minVramMib_),
           archiveSubPath(std::move(archiveSubPath_)),
-          archiveSubPathAux(std::move(archiveSubPathAux_)) {}
+          archiveSubPathAux(std::move(archiveSubPathAux_)),
+          migraphxCompileWidth(migraphxCompileWidth_),
+          migraphxCompileHeight(migraphxCompileHeight_),
+          migraphxOnnxTransform(migraphxOnnxTransform_) {}
 
     // Unique token used as the "model" parameter in EnhancementStage
     std::string id;
@@ -71,6 +85,31 @@ struct ModelEntry {
 
     // Which enhancement stage this model serves
     StageKind stage;
+
+    // Optional family metadata. When empty, helpers derive a stable
+    // single-model family from the model id/display name.
+    std::string familyId;
+    std::string familyName;
+
+    // Capabilities this model can satisfy in one model invocation. When
+    // empty, the model is treated as serving only `stage`.
+    std::vector<StageKind> capabilities;
+
+    // True when the model can satisfy multiple capabilities in a single
+    // model pass. If false, the pipeline must treat each requested stage
+    // independently even if they share a family name.
+    bool supportsFusedExecution = false;
+
+    // True when the model can selectively enable only a requested subset
+    // of its capabilities. False means a fused run is only valid when the
+    // requested set matches the model's full capability set.
+    bool supportsSelectiveCapabilities = false;
+
+    // Optional explicit mapping for scalar auxiliary model inputs used by
+    // fused/selective custom models. Keys are input tensor names and values
+    // are binding expressions such as `denoise.enabled`,
+    // `stereo_3d.divergence`, `upscale.width`, or `literal:1`.
+    std::unordered_map<std::string, std::string> controlInputBindings;
 
     // Source file format
     ModelFormat sourceFormat = ModelFormat::Onnx;
@@ -109,6 +148,16 @@ struct ModelEntry {
     // these two files, and removes the archive afterwards.
     std::string archiveSubPath;    // e.g. "models/realesr-animevideov3-x4.param"
     std::string archiveSubPathAux; // e.g. "models/realesr-animevideov3-x4.bin"
+
+    // Optional fixed compile shape for MiGraphX artifacts. When set, explicit
+    // conversion and runtime auto-compile ignore requested dimensions and use
+    // this model-native size instead.
+    int migraphxCompileWidth = 0;
+    int migraphxCompileHeight = 0;
+
+    // Optional ONNX rewrite step required before MiGraphX can parse or compile
+    // the downloaded model correctly.
+    MiGraphXOnnxTransform migraphxOnnxTransform = MiGraphXOnnxTransform::None;
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -124,5 +173,21 @@ std::vector<const ModelEntry*> catalogEntriesForStage(StageKind stage);
 
 // Lookup a single entry by id, returns nullptr if not found.
 const ModelEntry* catalogEntryById(const std::string& id);
+
+// Best-effort lookup of a catalog id from a downloaded/compiled model path.
+// This understands compiled MiGraphX artifact suffixes such as
+// `_192x192_b8_fp16.mxr` and `_fp16.mxr`.
+std::string inferModelIdFromPath(const std::string& path);
+
+// Family/capability helpers used by the UI and runtime.
+std::string modelFamilyId(const ModelEntry& entry);
+std::string modelFamilyName(const ModelEntry& entry);
+std::vector<StageKind> modelCapabilities(const ModelEntry& entry);
+bool modelSupportsCapability(const ModelEntry& entry, StageKind capability);
+bool modelCanFuseRequestedCapabilities(const ModelEntry& entry,
+                                       const std::vector<StageKind>& requested);
+bool modelLooksAnimationFocused(const ModelEntry& entry);
+bool modelSupportsBackend(const ModelEntry& entry, BackendType backend);
+const ModelEntry* preferredBackendModelForStage(StageKind stage, BackendType backend);
 
 }  // namespace ave

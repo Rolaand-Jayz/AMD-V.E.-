@@ -1,0 +1,185 @@
+if(POLICY CMP0207)
+    cmake_policy(SET CMP0207 NEW)
+endif()
+
+function(_ave_resolve_install_path out_var relative_or_absolute)
+    if(IS_ABSOLUTE "${relative_or_absolute}")
+        set(${out_var} "$ENV{DESTDIR}${relative_or_absolute}" PARENT_SCOPE)
+    else()
+        set(${out_var} "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${relative_or_absolute}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_ave_is_under_prefix path prefix out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+    if("${prefix}" STREQUAL "")
+        return()
+    endif()
+    file(REAL_PATH "${path}" _ave_real_path)
+    file(REAL_PATH "${prefix}" _ave_real_prefix)
+    string(LENGTH "${_ave_real_prefix}" _ave_prefix_length)
+    if(_ave_prefix_length EQUAL 0)
+        return()
+    endif()
+    string(SUBSTRING "${_ave_real_path}" 0 ${_ave_prefix_length} _ave_candidate_prefix)
+    if(_ave_candidate_prefix STREQUAL _ave_real_prefix)
+        set(${out_var} TRUE PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_ave_install_shared_library_chain destination dep)
+    if(NOT EXISTS "${dep}")
+        return()
+    endif()
+
+    get_filename_component(_ave_dep_dir "${dep}" DIRECTORY)
+    get_filename_component(_ave_dep_name "${dep}" NAME)
+    file(REAL_PATH "${dep}" _ave_dep_real)
+
+    set(_ave_candidates "${dep}")
+    if(_ave_dep_name MATCHES "^(.+\\.so)(\\..*)?$")
+        set(_ave_dep_stem "${CMAKE_MATCH_1}")
+        file(GLOB _ave_globbed_candidates
+            LIST_DIRECTORIES false
+            "${_ave_dep_dir}/${_ave_dep_stem}*")
+        foreach(_ave_candidate IN LISTS _ave_globbed_candidates)
+            file(REAL_PATH "${_ave_candidate}" _ave_candidate_real)
+            if(_ave_candidate_real STREQUAL _ave_dep_real)
+                list(APPEND _ave_candidates "${_ave_candidate}")
+            endif()
+        endforeach()
+    endif()
+    list(REMOVE_DUPLICATES _ave_candidates)
+
+    file(INSTALL
+        DESTINATION "${destination}"
+        TYPE SHARED_LIBRARY
+        FOLLOW_SYMLINK_CHAIN
+        FILES ${_ave_candidates})
+endfunction()
+
+find_program(_ave_patchelf_executable patchelf)
+
+function(_ave_rewrite_migraphx_rpath path is_binary)
+    if(NOT _ave_patchelf_executable)
+        return()
+    endif()
+    if(NOT EXISTS "${path}" OR IS_SYMLINK "${path}")
+        return()
+    endif()
+
+    if(is_binary)
+        set(_ave_new_rpath "$ORIGIN/../lib:$ORIGIN/../lib/migraphx/lib")
+    else()
+        set(_ave_new_rpath "$ORIGIN")
+    endif()
+
+    execute_process(
+        COMMAND "${_ave_patchelf_executable}" --set-rpath "${_ave_new_rpath}" "${path}"
+        RESULT_VARIABLE _ave_patchelf_result
+        OUTPUT_QUIET
+        ERROR_VARIABLE _ave_patchelf_error)
+    if(NOT _ave_patchelf_result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to rewrite RPATH for bundled MiGraphX artifact '${path}': ${_ave_patchelf_error}")
+    endif()
+endfunction()
+
+_ave_resolve_install_path(_ave_migraphx_root "@CMAKE_INSTALL_LIBDIR@/ave/migraphx")
+set(_ave_migraphx_lib_root "${_ave_migraphx_root}/lib")
+set(_ave_migraphx_nested_lib_root "${_ave_migraphx_lib_root}/migraphx/lib")
+set(_ave_migraphx_bin_root "${_ave_migraphx_root}/bin")
+set(_ave_dependency_search_dirs
+    "${_ave_migraphx_lib_root}"
+    "${_ave_migraphx_nested_lib_root}"
+    "@AVE_BUNDLED_MIGRAPHX_PREFIX@/lib"
+    "@AVE_BUNDLED_MIGRAPHX_PREFIX@/lib64"
+    "@AVE_BUNDLED_MIGRAPHX_PREFIX@/lib/migraphx/lib"
+    @AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS@)
+list(REMOVE_DUPLICATES _ave_dependency_search_dirs)
+
+if(NOT EXISTS "${_ave_migraphx_root}")
+    message(WARNING "Bundled MiGraphX root '${_ave_migraphx_root}' does not exist; skipping dependency closure.")
+    return()
+endif()
+
+file(MAKE_DIRECTORY "${_ave_migraphx_lib_root}")
+
+file(GLOB _ave_migraphx_primary_libs
+    LIST_DIRECTORIES false
+    "${_ave_migraphx_lib_root}/libmigraphx*.so*"
+    "${_ave_migraphx_nested_lib_root}/libmigraphx*.so*")
+file(GLOB _ave_migraphx_binaries
+    LIST_DIRECTORIES false
+    "${_ave_migraphx_bin_root}/migraphx-driver"
+    "${_ave_migraphx_bin_root}/migraphx-hiprtc-driver")
+
+if(_ave_migraphx_primary_libs OR _ave_migraphx_binaries)
+    file(GET_RUNTIME_DEPENDENCIES
+        LIBRARIES ${_ave_migraphx_primary_libs}
+        EXECUTABLES ${_ave_migraphx_binaries}
+        DIRECTORIES ${_ave_dependency_search_dirs}
+        RESOLVED_DEPENDENCIES_VAR _ave_resolved_migraphx_deps
+        UNRESOLVED_DEPENDENCIES_VAR _ave_unresolved_migraphx_deps
+        POST_EXCLUDE_REGEXES
+            ".*/ld-linux[^/]*\\.so(\\.[0-9]+)*$"
+            ".*/libc\\.so(\\.[0-9]+)*$"
+            ".*/libm\\.so(\\.[0-9]+)*$"
+            ".*/libpthread\\.so(\\.[0-9]+)*$"
+            ".*/librt\\.so(\\.[0-9]+)*$"
+            ".*/libdl\\.so(\\.[0-9]+)*$"
+            ".*/libutil\\.so(\\.[0-9]+)*$"
+            ".*/libresolv\\.so(\\.[0-9]+)*$"
+            ".*/libnss_.*\\.so(\\.[0-9]+)*$"
+            ".*/libanl\\.so(\\.[0-9]+)*$")
+else()
+    message(WARNING "No bundled MiGraphX libraries were installed under ${_ave_migraphx_root}; skipping dependency closure.")
+    return()
+endif()
+
+file(GLOB _ave_installed_migraphx_libs
+    LIST_DIRECTORIES false
+    "${_ave_migraphx_lib_root}/*.so*"
+    "${_ave_migraphx_nested_lib_root}/*.so*")
+foreach(_ave_installed_migraphx_lib IN LISTS _ave_installed_migraphx_libs)
+    _ave_rewrite_migraphx_rpath("${_ave_installed_migraphx_lib}" FALSE)
+endforeach()
+
+foreach(_ave_migraphx_binary IN LISTS _ave_migraphx_binaries)
+    if(EXISTS "${_ave_migraphx_binary}")
+        _ave_rewrite_migraphx_rpath("${_ave_migraphx_binary}" TRUE)
+    endif()
+endforeach()
+
+set(_ave_copied_migraphx_deps 0)
+foreach(_ave_dep IN LISTS _ave_resolved_migraphx_deps)
+    if(NOT EXISTS "${_ave_dep}")
+        continue()
+    endif()
+
+    _ave_is_under_prefix("${_ave_dep}" "${_ave_migraphx_root}" _ave_skip_dep)
+    if(_ave_skip_dep)
+        continue()
+    endif()
+
+    _ave_install_shared_library_chain("${_ave_migraphx_lib_root}" "${_ave_dep}")
+    math(EXPR _ave_copied_migraphx_deps "${_ave_copied_migraphx_deps} + 1")
+endforeach()
+
+if(_ave_unresolved_migraphx_deps)
+    list(REMOVE_DUPLICATES _ave_unresolved_migraphx_deps)
+    list(JOIN _ave_unresolved_migraphx_deps ", " _ave_unresolved_text)
+    list(JOIN _ave_dependency_search_dirs ", " _ave_search_dirs_text)
+    set(_ave_error_message
+        "Bundled MiGraphX runtime is incomplete. Unresolved dependencies: ${_ave_unresolved_text}. "
+        "Searched directories: ${_ave_search_dirs_text}. "
+        "The custom runtime at '@AVE_BUNDLED_MIGRAPHX_PREFIX@' must ship those shared libraries, or matching versions must be present in AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS, to produce a portable install.")
+    if("@AVE_STRICT_BUNDLED_MIGRAPHX@" STREQUAL "ON")
+        message(FATAL_ERROR "${_ave_error_message}")
+    else()
+        message(WARNING "${_ave_error_message}")
+    endif()
+endif()
+
+message(STATUS
+    "Bundled ${_ave_copied_migraphx_deps} MiGraphX runtime shared libraries into ${_ave_migraphx_lib_root}")

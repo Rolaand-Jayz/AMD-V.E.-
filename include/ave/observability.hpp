@@ -121,11 +121,13 @@ void logTensorContractViolation(const std::string& location,
 // a cached artifact.  Returns false (and sets reason) on any mismatch
 // so the caller recompiles and writes a fresh manifest.
 struct ArtifactManifestFields {
+    std::string manifestSchemaVersion;  // explicit cache schema / invalidation version
     std::string migraphxVersion;  // from migraphx::version() or rocm version_info
     std::string rocmVersion;      // content of /opt/rocm/.info/version
     std::string gpuGfxTarget;     // gfxNNNN from rocminfo or HIP device props
     std::string onnxFileSizeStr;  // std::to_string(file size in bytes)
     std::string onnxMtimeStr;     // std::to_string(mtime as epoch seconds)
+    std::string sourceFingerprint;  // stable size+content fingerprint of the source ONNX
     std::string offloadCopy;      // "0" or "1"
     std::string precision;        // "fp32" or "fp16"
     std::string compileProfile;   // compile/runtime tuning profile label
@@ -140,6 +142,10 @@ struct ArtifactManifestFields {
     std::string visibleDevices;           // effective HIP/ROCR visible device binding
     std::string runtimeFingerprint;       // deterministic tuning-context fingerprint
 };
+
+// Returns a deterministic size+content fingerprint for the source model file.
+// Missing or unreadable files return a stable sentinel string.
+std::string buildArtifactSourceFingerprint(const std::string& sourcePath);
 
 // Write a manifest file.  Overwrites any existing manifest.
 bool writeArtifactManifest(const std::string&            manifestPath,

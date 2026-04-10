@@ -19,8 +19,10 @@ int orderGroup(StageKind kind) {
             return 2;
         case StageKind::Sharpen:
             return 3;
-        case StageKind::Interpolate:
+        case StageKind::Stereo3D:
             return 4;
+        case StageKind::Interpolate:
+            return 5;
     }
     return 100;
 }

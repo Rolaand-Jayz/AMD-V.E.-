@@ -34,7 +34,7 @@ struct ManagedModel {
     ModelState      state           = ModelState::NotDownloaded;
     std::string     downloadedPath;    // path to ONNX / NCNN param file
     std::string     downloadedPathAux; // path to NCNN .bin file (if any)
-    std::string     convertedPath;     // path to .mxr (MiGraphX compiled)
+    std::string     convertedPath;     // best available .mxr candidate (MiGraphX compiled)
     float           downloadProgress  = 0.0f;
     std::string     errorMessage;
 };
@@ -56,6 +56,14 @@ using ModelStateCb    = std::function<void(const std::string& modelId,
 // ─────────────────────────────────────────────────────────────────
 class ModelManager {
   public:
+    struct MiGraphXCompileProfile {
+        std::string label;
+        int width = 0;
+        int height = 0;
+        int batch = 1;
+        bool fixedShape = false;
+    };
+
     ModelManager();
     ~ModelManager();
 
@@ -84,8 +92,8 @@ class ModelManager {
 
     // ── Path selection ───────────────────────────────────────────
 
-    // Returns the best inference-ready path for the given model:
-    //   converted > downloaded
+    // Returns the safest locally available path for the given model:
+    //   validated compiled artifact > downloaded source
     // Returns nullopt when nothing is available.
     std::optional<std::string> bestPathForModel(const std::string& modelId) const;
 
@@ -105,8 +113,9 @@ class ModelManager {
     // ── MiGraphX compilation ─────────────────────────────────────
 
     // Synchronously compile the downloaded ONNX to a MiGraphX .mxr
-    // program file.  Requires migraphx-driver on PATH or the MiGraphX
-    // C++ runtime headers/libs linked in.
+    // program file. Requires migraphx-driver on PATH or in the bundled
+    // MiGraphX toolchain. The app itself does not perform in-process ONNX
+    // parsing anymore; compilation is isolated behind the external tool.
     // Progress callback is called periodically (0.0–1.0).
     bool convertToMiGraphX(const std::string& modelId,
                            const ModelProgressCb& progressCb,
@@ -143,6 +152,20 @@ class ModelManager {
         std::optional<std::int64_t> inputHeight = std::nullopt,
         int compileBatch = 1,
         std::string* validationDetail = nullptr) const;
+
+    // Returns the standard exact-shape artifacts that should be prewarmed for
+    // this model. Dynamic models receive common delivery profiles (1080p, 4K).
+    // Fixed-shape models return their required compile shape.
+    std::vector<MiGraphXCompileProfile> standardCompileProfilesForModel(
+        const std::string& modelId) const;
+
+    // Prewarm common exact-shape MiGraphX artifacts while preserving the
+    // existing manifest validation and reuse logic.
+    bool prewarmStandardArtifacts(const std::string& modelId,
+                                  const ModelProgressCb& progressCb,
+                                  const ModelStateCb& stateCb,
+                                  std::string& error,
+                                  ModelPrecision compilePrecision = ModelPrecision::Fp16);
 
     // ── UI helpers ───────────────────────────────────────────────
 

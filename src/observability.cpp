@@ -4,6 +4,7 @@
 #include "ave/observability.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -11,7 +12,11 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+
+#include "ave/process_observer.hpp"
+#include "ave/runtime_diagnostics.hpp"
 
 #ifdef AVE_HAVE_MIGRAPHX
 #  include <migraphx/version.h>
@@ -25,40 +30,38 @@ namespace obs {
 
 namespace {
 
-std::string envOrDefault(const char* name, const char* fallback = "") {
-    const char* value = std::getenv(name);
-    if (value == nullptr || *value == '\0') {
-        return std::string(fallback);
-    }
-    return std::string(value);
-}
+constexpr std::uint64_t kFnv1a64Offset = 1469598103934665603ull;
+constexpr std::uint64_t kFnv1a64Prime = 1099511628211ull;
 
 // Run a shell command and capture its first line of stdout.
 std::string captureFirstLine(const std::string& cmd) {
-    FILE* p = popen(cmd.c_str(), "r");  // NOLINT(cert-env33-c)
-    if (p == nullptr) { return "?"; }
-    std::array<char, 256> buf{};
-    std::string out;
-    if (std::fgets(buf.data(), static_cast<int>(buf.size()), p) != nullptr) {
-        out = std::string(buf.data());
-        // strip trailing newline
-        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
-            out.pop_back();
+    int exitCode = 0;
+    const auto output = process_observer::captureCommandStdout(cmd, exitCode);
+    if (!output.has_value() || exitCode != 0) {
+        return "?";
+    }
+    std::istringstream input(*output);
+    for (std::string line; std::getline(input, line);) {
+        const std::string trimmed = process_observer::trimOutput(line);
+        if (!trimmed.empty()) {
+            return trimmed;
         }
     }
-    pclose(p);
-    return out.empty() ? "?" : out;
+    return "?";
 }
 
-// Read the first non-empty line of a file, return "?" if missing.
-std::string readFirstLine(const std::string& path) {
-    std::ifstream f(path);
-    if (!f.is_open()) { return "?"; }
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty()) { return line; }
+void appendFnv1a64(std::uint64_t& hash, const std::string_view bytes) {
+    for (const char rawCh : bytes) {
+        const auto ch = static_cast<unsigned char>(rawCh);
+        hash ^= static_cast<std::uint64_t>(ch);
+        hash *= kFnv1a64Prime;
     }
-    return "?";
+}
+
+std::string hexFingerprint(const std::uint64_t value) {
+    std::ostringstream out;
+    out << std::hex << value;
+    return out.str();
 }
 
 } // namespace
@@ -68,7 +71,7 @@ std::string readFirstLine(const std::string& path) {
 // ─────────────────────────────────────────────────────────────────
 void logVersionTuple() {
     // ROCm version
-    const std::string rocmVer = readFirstLine("/opt/rocm/.info/version");
+    const std::string rocmVer = detectRocmVersion();
 
     // MiGraphX version
 #ifdef AVE_HAVE_MIGRAPHX
@@ -91,20 +94,7 @@ void logVersionTuple() {
         captureFirstLine("ffmpeg -version 2>&1 | head -1");
 
     // GPU gfx target
-    std::string gfxTarget = "?";
-#ifdef AVE_HAVE_HIP
-    int device = 0;
-    hipDeviceProp_t props{};
-    if (hipGetDevice(&device) == hipSuccess &&
-        hipGetDeviceProperties(&props, device) == hipSuccess &&
-        props.gcnArchName[0] != '\0') {
-        gfxTarget = props.gcnArchName;
-    }
-#endif
-    if (gfxTarget == "?") {
-        gfxTarget = captureFirstLine("rocminfo 2>/dev/null"
-                                     " | grep -m1 'amdgcn-amd-amdhsa--gfx' | awk -F'--' '{print $2}'");
-    }
+    const std::string gfxTarget = detectAmdGpuArch();
 
     // Kernel version
     const std::string kernel = captureFirstLine("uname -r");
@@ -209,6 +199,43 @@ void logTensorContractViolation(const std::string& location,
 //   key=value\n
 // All fields from ArtifactManifestFields, one per line, in order.
 
+std::string buildArtifactSourceFingerprint(const std::string& sourcePath) {
+    const std::filesystem::path path(sourcePath);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        return "missing";
+    }
+
+    const auto fileSize = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return "unreadable";
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return "unreadable";
+    }
+
+    std::uint64_t hash = kFnv1a64Offset;
+    std::array<char, 64 * 1024> buffer{};
+    while (in.good()) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto bytesRead = static_cast<std::size_t>(in.gcount());
+        if (bytesRead == 0u) {
+            break;
+        }
+        appendFnv1a64(hash, std::string_view(buffer.data(), bytesRead));
+    }
+
+    if (in.bad()) {
+        return "unreadable";
+    }
+
+    std::ostringstream out;
+    out << fileSize << ":" << hexFingerprint(hash);
+    return out.str();
+}
+
 bool writeArtifactManifest(const std::string&            manifestPath,
                            const ArtifactManifestFields& f,
                            std::string&                  error) {
@@ -217,11 +244,13 @@ bool writeArtifactManifest(const std::string&            manifestPath,
         error = "Cannot write manifest: " + manifestPath;
         return false;
     }
-    out << "migraphx_version=" << f.migraphxVersion << '\n'
+    out << "manifest_schema=" << f.manifestSchemaVersion << '\n'
+        << "migraphx_version=" << f.migraphxVersion << '\n'
         << "rocm_version="     << f.rocmVersion     << '\n'
         << "gpu_gfx_target="   << f.gpuGfxTarget    << '\n'
         << "onnx_file_size="   << f.onnxFileSizeStr  << '\n'
         << "onnx_mtime="       << f.onnxMtimeStr     << '\n'
+        << "source_fingerprint=" << f.sourceFingerprint << '\n'
         << "offload_copy="     << f.offloadCopy      << '\n'
         << "precision="        << f.precision        << '\n'
         << "compile_profile="  << f.compileProfile   << '\n'
@@ -271,11 +300,13 @@ bool validateArtifactManifest(const std::string&            manifestPath,
         return true;
     };
 
-    return check("migraphx_version", expected.migraphxVersion)
+    return check("manifest_schema", expected.manifestSchemaVersion)
+        && check("migraphx_version", expected.migraphxVersion)
         && check("rocm_version",     expected.rocmVersion)
         && check("gpu_gfx_target",   expected.gpuGfxTarget)
         && check("onnx_file_size",   expected.onnxFileSizeStr)
         && check("onnx_mtime",       expected.onnxMtimeStr)
+        && check("source_fingerprint", expected.sourceFingerprint)
         && check("offload_copy",     expected.offloadCopy)
         && check("precision",        expected.precision)
         && check("compile_profile",  expected.compileProfile)

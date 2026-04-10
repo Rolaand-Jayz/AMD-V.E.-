@@ -11,6 +11,8 @@
 #include <vector>
 
 #include <QApplication>
+#include <QAbstractItemView>
+#include <QByteArray>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -20,6 +22,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -45,6 +48,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTabWidget>
+#include <QTimer>
 #include <QStringList>
 #include <QTextCursor>
 #include <QUrl>
@@ -52,8 +56,10 @@
 #include <QWidget>
 
 #include "ave/backend.hpp"
+#include "ave/frame_io.hpp"
 #include "ave/model_catalog.hpp"
 #include "ave/stage.hpp"
+#include "ave/telemetry.hpp"
 #include "ave/types.hpp"
 #include "ave/video_processor.hpp"
 #include "model_manager_dialog.hpp"
@@ -78,6 +84,7 @@ QString stageTitle(ave::StageKind kind) {
         case ave::StageKind::ColorFix:           return "Color Fix";
         case ave::StageKind::Upscale:            return "Upscale";
         case ave::StageKind::Sharpen:            return "Sharpen";
+        case ave::StageKind::Stereo3D:           return "2D to 3D";
         case ave::StageKind::Interpolate:        return "Interpolate";
     }
     return "Unknown";
@@ -110,11 +117,6 @@ constexpr int kRoleNeedsCompile = Qt::UserRole + 2;
 constexpr int kRoleStatusMessage = Qt::UserRole + 3;
 constexpr int kRoleStageKind = Qt::UserRole + 4;
 
-struct ModelFamilyInfo {
-    const char* id;
-    const char* name;
-};
-
 struct FilterPresetDefinition {
     const char* id;
     const char* name;
@@ -124,62 +126,11 @@ struct FilterPresetDefinition {
     std::vector<ave::ActiveFilter> filters;
 };
 
-ModelFamilyInfo modelFamilyInfoForId(const std::string& modelId) {
-    static const std::unordered_map<std::string, ModelFamilyInfo> map = {
-        {"nomos2-otf-x4", {"nomos2-otf", "Nomos2 OTF ESRGAN"}},
-        {"realesrgan-x4-restore", {"realesrgan-x4", "Real-ESRGAN x4"}},
-        {"realesrgan-x4-general", {"realesrgan-x4", "Real-ESRGAN x4"}},
-        {"realesrgan-x4plus-pth", {"realesrgan-x4plus-pth", "Real-ESRGAN x4+ (PyTorch)"}},
-        {"realesrgan-x4-axera", {"realesrgan-x4-axera", "Real-ESRGAN x4 (AXERA export)"}},
-        {"openproteus-compact-x2", {"openproteus-compact-x2", "OpenProteus Compact x2"}},
-        {"realesrgan-x4plus-ncnn", {"realesrgan-x4plus-ncnn", "Real-ESRGAN x4+ NCNN"}},
-        {"realesrgan-x4plus-anime-ncnn", {"realesrgan-x4plus-anime-ncnn", "Real-ESRGAN x4+ Anime NCNN"}},
-        {"realesr-animevideov3-x2-ncnn", {"realesr-animevideov3-x2-ncnn", "Real-ESRGAN AnimeVideo v3 x2 NCNN"}},
-        {"realesr-animevideov3-x3-ncnn", {"realesr-animevideov3-x3-ncnn", "Real-ESRGAN AnimeVideo v3 x3 NCNN"}},
-        {"realesr-animevideov3-x4-ncnn", {"realesr-animevideov3-x4-ncnn", "Real-ESRGAN AnimeVideo v3 x4 NCNN"}},
-        {"realesrnet-x2plus", {"realesrnet-x2plus", "Real-ESRNet x2+"}},
-        {"nmkd-siax-x4", {"nmkd-siax-x4", "NMKD Siax 200k"}},
-        {"ultrasharp-x4", {"ultrasharp-x4", "UltraSharp x4"}},
-        {"wtp-uds-esrgan-x4", {"wtp-uds-esrgan-x4", "WTP-UDS-ESRGAN x4"}},
-        {"nafnet-denoise", {"nafnet-restoration", "NAFNet Blind Restoration"}},
-        {"nafnet-deblur-gopro", {"nafnet-restoration", "NAFNet Blind Restoration"}},
-        {"nafnet-dehalo", {"nafnet-restoration", "NAFNet Blind Restoration"}},
-        {"clearreality-x4-denoise", {"clearreality-v1", "ClearReality V1"}},
-        {"clearreality-x4-fast", {"clearreality-v1", "ClearReality V1"}},
-        {"remacri-x4", {"remacri-x4", "Remacri x4"}},
-        {"ultrasharpv2-deblur", {"ultrasharpv2", "UltraSharp V2"}},
-        {"ultrasharpv2-x4", {"ultrasharpv2", "UltraSharp V2"}},
-        {"ultrasharpv2-lite-x4", {"ultrasharpv2-lite", "UltraSharp V2 Lite"}},
-        {"iqa-color-enhance", {"parametric-color-fix", "Parametric Color Fix"}},
-        {"swinir-color", {"swinir-x4", "SwinIR x4"}},
-        {"swinir-x4-general", {"swinir-x4", "SwinIR x4"}},
-        {"animesharp-x4", {"animesharp-x4", "AnimeSharp x4"}},
-        {"modernspanimation-x2", {"modernspanimation-v2", "ModernSpanimation v2 x2"}},
-        {"modernspanimation-x2-fp32", {"modernspanimation-v2-fp32", "ModernSpanimation v2 x2 fp32"}},
-        {"modernspanimation-x2-v1compact", {"modernspanimation-v1-compact", "ModernSpanimation v1 Compact x2"}},
-        {"animejananai-hd-compact-x2", {"animejanai-hd-v3", "AnimeJaNai HD V3 Compact x2"}},
-        {"realistic-rescaler-x4", {"realistic-rescaler-x4", "RealisticRescaler x4"}},
-        {"sharpen-cas", {"cas-sharpen", "Contrast-Adaptive Sharpening"}},
-        {"rife-v4-7", {"rife-v4-7", "RIFE v4.7"}},
-        {"rife-v4-8", {"rife-v4-8", "RIFE v4.8"}},
-        {"rife-v4-9", {"rife-v4-9", "RIFE v4.9"}},
-        {"interp-ffmpeg", {"interp-ffmpeg", "FFmpeg Interpolation"}}
-    };
-    const auto it = map.find(modelId);
-    if (it != map.end()) {
-        return it->second;
-    }
-    return {nullptr, nullptr};
-}
-
-QString modelFamilyId(const std::string& modelId) {
-    const auto info = modelFamilyInfoForId(modelId);
-    return info.id ? QString::fromUtf8(info.id) : QString::fromStdString(modelId);
-}
-
 QString modelFamilyName(const std::string& modelId, const std::string& fallback) {
-    const auto info = modelFamilyInfoForId(modelId);
-    return info.name ? QString::fromUtf8(info.name) : QString::fromStdString(fallback);
+    if (const auto* entry = ave::catalogEntryById(modelId); entry != nullptr) {
+        return QString::fromStdString(ave::modelFamilyName(*entry));
+    }
+    return QString::fromStdString(fallback);
 }
 
 QString joinStageTitles(const QStringList& stages) {
@@ -187,6 +138,36 @@ QString joinStageTitles(const QStringList& stages) {
         return QStringLiteral("No enhancements");
     }
     return stages.join(QStringLiteral(", "));
+}
+
+QString utcNowIsoString() {
+    return QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+}
+
+QString queueStatusDisplay(const ave::QueuedJobStatus status) {
+    switch (status) {
+        case ave::QueuedJobStatus::Pending:
+            return QStringLiteral("Pending");
+        case ave::QueuedJobStatus::Running:
+            return QStringLiteral("Running");
+        case ave::QueuedJobStatus::RetryableFailure:
+            return QStringLiteral("Retry");
+        case ave::QueuedJobStatus::Failed:
+            return QStringLiteral("Failed");
+        case ave::QueuedJobStatus::Succeeded:
+            return QStringLiteral("Done");
+        case ave::QueuedJobStatus::Cancelled:
+            return QStringLiteral("Cancelled");
+    }
+    return QStringLiteral("Unknown");
+}
+
+bool hasNonEmptyFileAtPath(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    const QFileInfo info(QString::fromStdString(path));
+    return info.exists() && info.isFile() && info.size() > 0;
 }
 
 bool hasMxrExtension(const std::string& path) {
@@ -329,6 +310,39 @@ QString backendDisplayName(ave::BackendType backend) {
     return QStringLiteral("Unknown");
 }
 
+QString inferredProgressRuntimeName(const QString& msg,
+                                    const ave::BackendType requestedBackend) {
+    const QString lower = msg.toLower();
+    if (lower.contains("vapoursynth") || lower.contains("vspipe")) {
+        return QStringLiteral("VapourSynth");
+    }
+    if (lower.contains("glsl") || lower.contains("libplacebo") || lower.contains("shader pipeline")) {
+        return QStringLiteral("GLSL Shader");
+    }
+    if (lower.contains("migraphx")) {
+        return QStringLiteral("MiGraphX");
+    }
+    if (lower.contains("vulkan compute")) {
+        return QStringLiteral("Vulkan Compute");
+    }
+    if (lower.contains("ncnn")) {
+        return QStringLiteral("NCNN Vulkan");
+    }
+    if (lower.contains("ffmpeg")) {
+        return QStringLiteral("FFmpeg");
+    }
+    return backendDisplayName(requestedBackend);
+}
+
+bool progressUsesBusyIndicator(const QString& msg) {
+    const QString lower = msg.toLower();
+    return lower.contains("applying glsl shaders") ||
+           lower.contains("running vapoursynth pipeline") ||
+           lower.contains("running vapoursynth streaming pipeline") ||
+           lower.contains("paused") ||
+           lower.contains("cancelling");
+}
+
 QString filterRuntimeName(ave::FilterRuntime runtime) {
     switch (runtime) {
         case ave::FilterRuntime::Glsl:        return QStringLiteral("GLSL");
@@ -436,6 +450,24 @@ ave::EnhancementStage makePresetStage(const ave::StageKind kind) {
             break;
         case ave::StageKind::Sharpen:
             stage.params["amount"] = 0.45;
+            break;
+        case ave::StageKind::Stereo3D:
+            stage.params["format"] = std::string("full_sbs");
+            stage.params["method"] = std::string("grid_sample");
+            stage.params["synthetic_view"] = std::string("both");
+            stage.params["divergence"] = 2.0;
+            stage.params["convergence"] = 0.5;
+            stage.params["foreground_scale"] = 0.0;
+            stage.params["mapper_type"] = std::string("auto");
+            stage.params["metric_depth"] = false;
+            stage.params["depth_aa"] = true;
+            stage.params["ipd_offset"] = 0.0;
+            stage.params["pad"] = 0.0;
+            stage.params["pad_mode"] = std::string("tblr");
+            stage.params["edge_dilation_x"] = std::int64_t{2};
+            stage.params["edge_dilation_y"] = std::int64_t{1};
+            stage.params["ema_normalize"] = false;
+            stage.params["ema_decay"] = 0.75;
             break;
         case ave::StageKind::Interpolate:
             stage.params["fps"] = std::int64_t{60};
@@ -607,9 +639,10 @@ int paramPageForKind(ave::StageKind k) {
         case ave::StageKind::ColorFix:  return 1; // colorfix sliders
         case ave::StageKind::Upscale:   return 2;
         case ave::StageKind::Sharpen:   return 3;
-        case ave::StageKind::Interpolate: return 4;
+        case ave::StageKind::Stereo3D:  return 4;
+        case ave::StageKind::Interpolate: return 5;
     }
-    return 5; // empty
+    return 6; // empty
 }
 
 } // namespace
@@ -625,6 +658,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     appSettings_.load();
     buildUi();
+    telemetryTimer_ = new QTimer(this);
+    telemetryTimer_->setInterval(2000);
+    connect(telemetryTimer_, &QTimer::timeout, this, &MainWindow::requestTelemetryRefresh);
     applySettingsToUi(true);
     wireActions();
     updateFilterPresetDescription();
@@ -637,10 +673,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     refreshPlannedStages();
     refreshActiveFilters();
     refreshCommandPreview();
+    refreshPreviewPlaceholders();
+    loadQueuedJobs();
+    promptForRecoveredJob();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     persistUiStateToSettings();
+    persistQueuedJobs();
     QMainWindow::closeEvent(event);
 }
 
@@ -754,6 +794,172 @@ QWidget* MainWindow::buildSharpenPanel(QWidget* parent) {
         storeSelectedFamilyCapabilityDraft();
         refreshCommandPreview();
     });
+    return w;
+}
+
+QWidget* MainWindow::buildStereo3dPanel(QWidget* parent) {
+    auto* w = new QWidget(parent);
+    auto* lay = new QGridLayout(w);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setHorizontalSpacing(8);
+    lay->setVerticalSpacing(6);
+
+    auto connectChange = [this]() {
+        storeSelectedFamilyCapabilityDraft();
+        refreshCommandPreview();
+    };
+
+    lay->addWidget(new QLabel("Format:", w), 0, 0);
+    stereoFormatCombo_ = new QComboBox(w);
+    stereoFormatCombo_->addItem("Full SBS", "full_sbs");
+    stereoFormatCombo_->addItem("Half SBS", "half_sbs");
+    stereoFormatCombo_->addItem("Full Top/Bottom", "full_tb");
+    stereoFormatCombo_->addItem("Half Top/Bottom", "half_tb");
+    stereoFormatCombo_->addItem("Cross-eyed SBS", "cross_eyed");
+    stereoFormatCombo_->addItem("Anaglyph", "anaglyph");
+    lay->addWidget(stereoFormatCombo_, 0, 1);
+
+    lay->addWidget(new QLabel("Synthetic view:", w), 0, 2);
+    stereoSyntheticViewCombo_ = new QComboBox(w);
+    stereoSyntheticViewCombo_->addItem("Both eyes", "both");
+    stereoSyntheticViewCombo_->addItem("Right only", "right");
+    stereoSyntheticViewCombo_->addItem("Left only", "left");
+    lay->addWidget(stereoSyntheticViewCombo_, 0, 3);
+
+    lay->addWidget(new QLabel("Warp method:", w), 0, 4);
+    stereoMethodCombo_ = new QComboBox(w);
+    stereoMethodCombo_->addItem("Grid sample", "grid_sample");
+    stereoMethodCombo_->addItem("Backward warp", "backward");
+    lay->addWidget(stereoMethodCombo_, 0, 5);
+
+    lay->addWidget(new QLabel("Divergence:", w), 1, 0);
+    stereoDivergenceSpin_ = new QDoubleSpinBox(w);
+    stereoDivergenceSpin_->setRange(0.0, 10.0);
+    stereoDivergenceSpin_->setDecimals(2);
+    stereoDivergenceSpin_->setSingleStep(0.1);
+    stereoDivergenceSpin_->setValue(2.0);
+    lay->addWidget(stereoDivergenceSpin_, 1, 1);
+
+    lay->addWidget(new QLabel("Convergence:", w), 1, 2);
+    stereoConvergenceSpin_ = new QDoubleSpinBox(w);
+    stereoConvergenceSpin_->setRange(-1.0, 2.0);
+    stereoConvergenceSpin_->setDecimals(2);
+    stereoConvergenceSpin_->setSingleStep(0.05);
+    stereoConvergenceSpin_->setValue(0.5);
+    lay->addWidget(stereoConvergenceSpin_, 1, 3);
+
+    lay->addWidget(new QLabel("Foreground scale:", w), 1, 4);
+    stereoForegroundScaleSpin_ = new QDoubleSpinBox(w);
+    stereoForegroundScaleSpin_->setRange(-3.0, 3.0);
+    stereoForegroundScaleSpin_->setDecimals(2);
+    stereoForegroundScaleSpin_->setSingleStep(0.25);
+    stereoForegroundScaleSpin_->setValue(0.0);
+    lay->addWidget(stereoForegroundScaleSpin_, 1, 5);
+
+    lay->addWidget(new QLabel("Mapper type:", w), 2, 0);
+    stereoMapperTypeCombo_ = new QComboBox(w);
+    stereoMapperTypeCombo_->addItem("Auto", "auto");
+    stereoMapperTypeCombo_->addItem("Mul", "mul");
+    stereoMapperTypeCombo_->addItem("Shift", "shift");
+    stereoMapperTypeCombo_->addItem("Div", "div");
+    lay->addWidget(stereoMapperTypeCombo_, 2, 1);
+
+    lay->addWidget(new QLabel("Metric depth:", w), 2, 2);
+    stereoMetricDepthToggle_ = new ToggleSwitch(w);
+    stereoMetricDepthToggle_->setChecked(false);
+    lay->addWidget(stereoMetricDepthToggle_, 2, 3);
+
+    lay->addWidget(new QLabel("Depth AA:", w), 2, 4);
+    stereoDepthAaToggle_ = new ToggleSwitch(w);
+    stereoDepthAaToggle_->setChecked(true);
+    lay->addWidget(stereoDepthAaToggle_, 2, 5);
+
+    lay->addWidget(new QLabel("IPD offset:", w), 3, 0);
+    stereoIpdOffsetSpin_ = new QDoubleSpinBox(w);
+    stereoIpdOffsetSpin_->setRange(-10.0, 10.0);
+    stereoIpdOffsetSpin_->setDecimals(2);
+    stereoIpdOffsetSpin_->setSingleStep(0.25);
+    stereoIpdOffsetSpin_->setValue(0.0);
+    stereoIpdOffsetSpin_->setSuffix("%");
+    lay->addWidget(stereoIpdOffsetSpin_, 3, 1);
+
+    lay->addWidget(new QLabel("Pad:", w), 3, 2);
+    stereoPadSpin_ = new QDoubleSpinBox(w);
+    stereoPadSpin_->setRange(0.0, 1.0);
+    stereoPadSpin_->setDecimals(2);
+    stereoPadSpin_->setSingleStep(0.02);
+    stereoPadSpin_->setValue(0.0);
+    lay->addWidget(stereoPadSpin_, 3, 3);
+
+    lay->addWidget(new QLabel("Pad mode:", w), 3, 4);
+    stereoPadModeCombo_ = new QComboBox(w);
+    stereoPadModeCombo_->addItem("Top/Bottom + Left/Right", "tblr");
+    stereoPadModeCombo_->addItem("Top/Bottom only", "tb");
+    stereoPadModeCombo_->addItem("Left/Right only", "lr");
+    stereoPadModeCombo_->addItem("Letterbox to 16:9", "16:9");
+    stereoPadModeCombo_->addItem("Top only", "top");
+    lay->addWidget(stereoPadModeCombo_, 3, 5);
+
+    lay->addWidget(new QLabel("Depth resolution:", w), 4, 0);
+    stereoDepthResolutionSpin_ = new QSpinBox(w);
+    stereoDepthResolutionSpin_->setRange(224, 4096);
+    stereoDepthResolutionSpin_->setSingleStep(14);
+    stereoDepthResolutionSpin_->setValue(384);
+    lay->addWidget(stereoDepthResolutionSpin_, 4, 1);
+
+    lay->addWidget(new QLabel("Limit to source:", w), 4, 2);
+    stereoLimitResolutionToggle_ = new ToggleSwitch(w);
+    stereoLimitResolutionToggle_->setChecked(false);
+    lay->addWidget(stereoLimitResolutionToggle_, 4, 3);
+
+    lay->addWidget(new QLabel("Edge dilation X:", w), 5, 0);
+    stereoEdgeDilateXSpin_ = new QSpinBox(w);
+    stereoEdgeDilateXSpin_->setRange(0, 16);
+    stereoEdgeDilateXSpin_->setValue(2);
+    lay->addWidget(stereoEdgeDilateXSpin_, 5, 1);
+
+    lay->addWidget(new QLabel("Edge dilation Y:", w), 5, 2);
+    stereoEdgeDilateYSpin_ = new QSpinBox(w);
+    stereoEdgeDilateYSpin_->setRange(0, 16);
+    stereoEdgeDilateYSpin_->setValue(1);
+    lay->addWidget(stereoEdgeDilateYSpin_, 5, 3);
+
+    lay->addWidget(new QLabel("EMA normalize:", w), 5, 4);
+    stereoEmaNormalizeToggle_ = new ToggleSwitch(w);
+    stereoEmaNormalizeToggle_->setChecked(false);
+    lay->addWidget(stereoEmaNormalizeToggle_, 5, 5);
+
+    lay->addWidget(new QLabel("EMA decay:", w), 6, 0);
+    stereoEmaDecaySpin_ = new QDoubleSpinBox(w);
+    stereoEmaDecaySpin_->setRange(0.0, 0.99);
+    stereoEmaDecaySpin_->setDecimals(2);
+    stereoEmaDecaySpin_->setSingleStep(0.05);
+    stereoEmaDecaySpin_->setValue(0.75);
+    lay->addWidget(stereoEmaDecaySpin_, 6, 1);
+
+    lay->setColumnStretch(1, 1);
+    lay->setColumnStretch(3, 1);
+    lay->setColumnStretch(5, 1);
+
+    connect(stereoFormatCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [connectChange](int) { connectChange(); });
+    connect(stereoSyntheticViewCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [connectChange](int) { connectChange(); });
+    connect(stereoMethodCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [connectChange](int) { connectChange(); });
+    connect(stereoMapperTypeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [connectChange](int) { connectChange(); });
+    connect(stereoPadModeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [connectChange](int) { connectChange(); });
+    connect(stereoDivergenceSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoConvergenceSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoForegroundScaleSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoIpdOffsetSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoPadSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoEmaDecaySpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [connectChange](double) { connectChange(); });
+    connect(stereoDepthResolutionSpin_, &QSpinBox::valueChanged, this, [connectChange](int) { connectChange(); });
+    connect(stereoEdgeDilateXSpin_, &QSpinBox::valueChanged, this, [connectChange](int) { connectChange(); });
+    connect(stereoEdgeDilateYSpin_, &QSpinBox::valueChanged, this, [connectChange](int) { connectChange(); });
+    connect(stereoLimitResolutionToggle_, &ToggleSwitch::toggled, this, [connectChange](bool) { connectChange(); });
+    connect(stereoMetricDepthToggle_, &ToggleSwitch::toggled, this, [connectChange](bool) { connectChange(); });
+    connect(stereoDepthAaToggle_, &ToggleSwitch::toggled, this, [connectChange](bool) { connectChange(); });
+    connect(stereoEmaNormalizeToggle_, &ToggleSwitch::toggled, this, [connectChange](bool) { connectChange(); });
+
     return w;
 }
 
@@ -1052,8 +1258,9 @@ void MainWindow::buildUi() {
     paramStack_->addWidget(buildColorFixPanel(editorGroup));    // 1: colorfix
     paramStack_->addWidget(buildUpscalePanel(editorGroup));     // 2: upscale
     paramStack_->addWidget(buildSharpenPanel(editorGroup));     // 3: sharpen
-    paramStack_->addWidget(buildInterpolatePanel(editorGroup)); // 4: interpolate
-    paramStack_->addWidget(buildEmptyPanel(editorGroup));       // 5: empty fallback
+    paramStack_->addWidget(buildStereo3dPanel(editorGroup));    // 4: stereo 3d
+    paramStack_->addWidget(buildInterpolatePanel(editorGroup)); // 5: interpolate
+    paramStack_->addWidget(buildEmptyPanel(editorGroup));       // 6: empty fallback
     editorLayout->addWidget(paramStack_);
 
     extraParamsEdit_ = new QLineEdit(editorGroup);
@@ -1258,19 +1465,52 @@ void MainWindow::buildUi() {
     actionRow->addWidget(previewDurationSpin_);
     reviewLayout->addLayout(actionRow);
 
+    auto* queueGroup = new QGroupBox("Batch Queue", reviewGroup);
+    auto* queueLayout = new QVBoxLayout(queueGroup);
+    queueLayout->setSpacing(6);
+    auto* queueHint = new QLabel(
+        "Queue multiple full jobs for sequential processing. Pending and retryable jobs are persisted across app restarts.",
+        queueGroup);
+    queueHint->setWordWrap(true);
+    queueHint->setStyleSheet("color: #666;");
+    queueLayout->addWidget(queueHint);
+
+    auto* queueButtonRow = new QHBoxLayout;
+    addQueueButton_ = new QPushButton("Add Current Job", queueGroup);
+    runQueueButton_ = new QPushButton("Run Queue", queueGroup);
+    removeQueueButton_ = new QPushButton("Remove Selected", queueGroup);
+    clearFinishedQueueButton_ = new QPushButton("Clear Finished", queueGroup);
+    queueButtonRow->addWidget(addQueueButton_);
+    queueButtonRow->addWidget(runQueueButton_);
+    queueButtonRow->addWidget(removeQueueButton_);
+    queueButtonRow->addWidget(clearFinishedQueueButton_);
+    queueButtonRow->addStretch();
+    queueLayout->addLayout(queueButtonRow);
+
+    queueSummaryLabel_ = new QLabel("Queue is empty.", queueGroup);
+    queueSummaryLabel_->setWordWrap(true);
+    queueSummaryLabel_->setStyleSheet("color: #2f3a4a;");
+    queueLayout->addWidget(queueSummaryLabel_);
+
+    queuedJobsView_ = new QListWidget(queueGroup);
+    queuedJobsView_->setSelectionMode(QAbstractItemView::SingleSelection);
+    queuedJobsView_->setMinimumHeight(120);
+    queueLayout->addWidget(queuedJobsView_);
+    reviewLayout->addWidget(queueGroup);
+
     progressBar_ = new QProgressBar(reviewGroup);
     progressBar_->setRange(0, 100);
-    progressBar_->setFormat("Overall: %p%");
+    progressBar_->setFormat("Overall pipeline: %p%");
     progressBar_->setVisible(false);
 
     taskProgressBar_ = new QProgressBar(reviewGroup);
     taskProgressBar_->setRange(0, 100);
-    taskProgressBar_->setFormat("Task: %p%");
+    taskProgressBar_->setFormat("Current task: %p%");
     taskProgressBar_->setVisible(false);
 
     progressLabel_ = new QLabel(reviewGroup);
     progressLabel_->setWordWrap(true);
-    progressLabel_->setStyleSheet("color: #555; font-style: italic;");
+    progressLabel_->setStyleSheet("color: #2f3a4a; font-weight: 600;");
     progressLabel_->setVisible(false);
 
     reviewLayout->addWidget(new QLabel("Overall progress", reviewGroup));
@@ -1282,6 +1522,13 @@ void MainWindow::buildUi() {
 
     connect(runButton_, &QPushButton::clicked, this, &MainWindow::runJob);
     connect(previewButton_, &QPushButton::clicked, this, &MainWindow::runPreview);
+    connect(addQueueButton_, &QPushButton::clicked, this, &MainWindow::addCurrentJobToQueue);
+    connect(runQueueButton_, &QPushButton::clicked, this, &MainWindow::runQueuedJobs);
+    connect(removeQueueButton_, &QPushButton::clicked, this, &MainWindow::removeSelectedQueuedJob);
+    connect(clearFinishedQueueButton_, &QPushButton::clicked, this, &MainWindow::clearFinishedQueuedJobs);
+    connect(queuedJobsView_, &QListWidget::currentRowChanged, this, [this](int) {
+        refreshQueueControls();
+    });
     connect(pauseButton_, &QPushButton::clicked, this, [this]() {
         const bool wasPaused = pauseFlag_.load();
         pauseFlag_.store(!wasPaused);
@@ -1316,14 +1563,46 @@ void MainWindow::buildUi() {
     // ── Step 4: frame preview ───────────────────────────────────
     auto* previewGroup  = new QGroupBox("4. Frame Preview", monitorSplit);
     auto* previewLayout = new QVBoxLayout(previewGroup);
+    auto configurePreviewLabel = [](QLabel* label, const QString& text) {
+        label->setAlignment(Qt::AlignCenter);
+        label->setMinimumSize(300, 180);
+        label->setMaximumHeight(360);
+        label->setStyleSheet(
+            "QLabel { background-color: #1a1a2e; color: #888; border: 1px solid #333; }");
+        label->setText(text);
+        label->setScaledContents(false);
+        label->setWordWrap(true);
+    };
+
+    auto* compareLayout = new QHBoxLayout;
+    compareLayout->setSpacing(10);
+
+    auto* originalLayout = new QVBoxLayout;
+    originalPreviewTitleLabel_ = new QLabel("Original", previewGroup);
+    originalFramePreviewLabel_ = new QLabel(previewGroup);
+    configurePreviewLabel(
+        originalFramePreviewLabel_,
+        "Choose an input video to compare against the processed output");
+    originalLayout->addWidget(originalPreviewTitleLabel_);
+    originalLayout->addWidget(originalFramePreviewLabel_, 1);
+    compareLayout->addLayout(originalLayout, 1);
+
+    auto* processedLayout = new QVBoxLayout;
+    processedPreviewTitleLabel_ = new QLabel("Processed", previewGroup);
     framePreviewLabel_ = new QLabel(previewGroup);
-    framePreviewLabel_->setAlignment(Qt::AlignCenter);
-    framePreviewLabel_->setMinimumSize(320, 180);
-    framePreviewLabel_->setMaximumHeight(360);
-    framePreviewLabel_->setStyleSheet("QLabel { background-color: #1a1a2e; color: #888; border: 1px solid #333; }");
-    framePreviewLabel_->setText("Frame preview will appear here during processing");
-    framePreviewLabel_->setScaledContents(false);
-    previewLayout->addWidget(framePreviewLabel_);
+    configurePreviewLabel(framePreviewLabel_,
+                          "Processed frame will appear here during processing");
+    processedLayout->addWidget(processedPreviewTitleLabel_);
+    processedLayout->addWidget(framePreviewLabel_, 1);
+    compareLayout->addLayout(processedLayout, 1);
+
+    previewLayout->addLayout(compareLayout);
+    telemetryStatusLabel_ = new QLabel(
+        "AMD telemetry idle. Start a run or preview to sample GPU metrics.",
+        previewGroup);
+    telemetryStatusLabel_->setWordWrap(true);
+    telemetryStatusLabel_->setStyleSheet("QLabel { color: #9aa6bf; }");
+    previewLayout->addWidget(telemetryStatusLabel_);
     monitorSplit->addWidget(previewGroup);
 
     // ── Step 5: session log ─────────────────────────────────────
@@ -1360,6 +1639,7 @@ void MainWindow::wireActions() {
         } else {
             applySuggestedOutputPath(text, false);
         }
+        refreshPreviewPlaceholders();
         ref();
     });
     connect(outputPathEdit_, &QLineEdit::textChanged, this, [this, ref](const QString& text) {
@@ -1465,13 +1745,13 @@ void MainWindow::refreshModelFamilies() {
             continue;
         }
 
-        const QString familyId = modelFamilyId(model.entry.id);
+        const QString familyId = QString::fromStdString(ave::modelFamilyId(model.entry));
         const std::string familyKey = familyId.toStdString();
         auto [it, inserted] = familyRows.emplace(familyKey, families.size());
         if (inserted) {
             families.push_back({
                 familyId,
-                modelFamilyName(model.entry.id, model.entry.displayName),
+                QString::fromStdString(ave::modelFamilyName(model.entry)),
                 {}
             });
         }
@@ -1500,9 +1780,11 @@ void MainWindow::refreshModelFamilies() {
         QStringList offeredStages;
         std::unordered_set<int> seenKinds;
         for (const auto& model : families[i].models) {
-            const int kindValue = static_cast<int>(model.entry.stage);
-            if (seenKinds.insert(kindValue).second) {
-                offeredStages << stageTitle(model.entry.stage);
+            for (const auto capability : ave::modelCapabilities(model.entry)) {
+                const int kindValue = static_cast<int>(capability);
+                if (seenKinds.insert(kindValue).second) {
+                    offeredStages << stageTitle(capability);
+                }
             }
         }
 
@@ -1524,67 +1806,81 @@ void MainWindow::refreshModelFamilies() {
     int row = 0;
     std::unordered_set<int> seenKinds;
     for (const auto& model : currentFamilyModels_) {
-        const int kindValue = static_cast<int>(model.entry.stage);
-        if (!seenKinds.insert(kindValue).second) {
-            continue;
-        }
-
         const bool ready = isReadyForBackend(model, backend);
         const bool needsCompile = needsMigraphxCompile(model, backend);
-        const QString status = ready
+        const QString baseStatus = ready
             ? QStringLiteral("Ready for the selected backend.")
             : (needsCompile
                 ? QStringLiteral("Compatible, but needs compilation before it can be added.")
                 : QStringLiteral("Not ready for the selected backend."));
 
-        auto previousDraftIt = previousDrafts.find(model.entry.stage);
-        if (previousDraftIt != previousDrafts.end()) {
-            const auto previousModelIt = previousDraftIt->second.params.find("model");
-            const auto previousModelId = previousModelIt != previousDraftIt->second.params.end()
-                ? std::get_if<std::string>(&previousModelIt->second)
-                : nullptr;
-            if (previousModelId != nullptr && *previousModelId == model.entry.id) {
-                familyDraftStages_[model.entry.stage] = previousDraftIt->second;
+        const auto capabilities = ave::modelCapabilities(model.entry);
+        QStringList capabilityTitles;
+        for (const auto capability : capabilities) {
+            capabilityTitles << stageTitle(capability);
+        }
+        const QString fusionNote = capabilities.size() > 1
+            ? QStringLiteral(" Single-pass family capabilities: %1.")
+                  .arg(joinStageTitles(capabilityTitles))
+            : QString();
+
+        for (const auto capability : capabilities) {
+            const int kindValue = static_cast<int>(capability);
+            if (!seenKinds.insert(kindValue).second) {
+                continue;
             }
-        }
-        if (familyDraftStages_.find(model.entry.stage) == familyDraftStages_.end()) {
-            familyDraftStages_[model.entry.stage] = defaultDraftStage(model.entry.stage, model.entry.id);
-        }
 
-        QString label = stageTitle(model.entry.stage);
-        if (ready) {
-            label += QStringLiteral("  Ready");
-        } else if (needsCompile) {
-            label += QStringLiteral("  Needs Compile");
-        } else {
-            label += QStringLiteral("  Unavailable");
-        }
-
-        auto* item = new QListWidgetItem(label, familyCapabilitiesView_);
-        item->setData(kRoleModelId, QString::fromStdString(model.entry.id));
-        item->setData(kRoleStageKind, kindValue);
-        item->setData(kRoleAddEnabled, ready);
-        item->setData(kRoleNeedsCompile, needsCompile);
-        item->setData(kRoleStatusMessage, status);
-        item->setToolTip(QString::fromStdString(model.entry.displayName) + "\n" + status);
-
-        Qt::ItemFlags flags = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-        if (ready) {
-            flags |= Qt::ItemIsUserCheckable;
-            item->setCheckState(Qt::Unchecked);
-            if (firstReadyRow < 0) {
-                firstReadyRow = row;
+            auto previousDraftIt = previousDrafts.find(capability);
+            if (previousDraftIt != previousDrafts.end()) {
+                const auto previousModelIt = previousDraftIt->second.params.find("model");
+                const auto previousModelId = previousModelIt != previousDraftIt->second.params.end()
+                    ? std::get_if<std::string>(&previousModelIt->second)
+                    : nullptr;
+                if (previousModelId != nullptr && *previousModelId == model.entry.id) {
+                    familyDraftStages_[capability] = previousDraftIt->second;
+                }
             }
-        }
-        item->setFlags(flags);
+            if (familyDraftStages_.find(capability) == familyDraftStages_.end()) {
+                familyDraftStages_[capability] = defaultDraftStage(capability, model.entry.id);
+            }
 
-        if (firstSelectableRow < 0) {
-            firstSelectableRow = row;
+            const QString status = baseStatus + fusionNote;
+
+            QString label = stageTitle(capability);
+            if (ready) {
+                label += QStringLiteral("  Ready");
+            } else if (needsCompile) {
+                label += QStringLiteral("  Needs Compile");
+            } else {
+                label += QStringLiteral("  Unavailable");
+            }
+
+            auto* item = new QListWidgetItem(label, familyCapabilitiesView_);
+            item->setData(kRoleModelId, QString::fromStdString(model.entry.id));
+            item->setData(kRoleStageKind, kindValue);
+            item->setData(kRoleAddEnabled, ready);
+            item->setData(kRoleNeedsCompile, needsCompile);
+            item->setData(kRoleStatusMessage, status);
+            item->setToolTip(QString::fromStdString(model.entry.displayName) + "\n" + status);
+
+            Qt::ItemFlags flags = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+            if (ready) {
+                flags |= Qt::ItemIsUserCheckable;
+                item->setCheckState(Qt::Unchecked);
+                if (firstReadyRow < 0) {
+                    firstReadyRow = row;
+                }
+            }
+            item->setFlags(flags);
+
+            if (firstSelectableRow < 0) {
+                firstSelectableRow = row;
+            }
+            if (requestedCapability.has_value() && *requestedCapability == capability) {
+                selectedCapabilityRow = row;
+            }
+            ++row;
         }
-        if (requestedCapability.has_value() && *requestedCapability == model.entry.stage) {
-            selectedCapabilityRow = row;
-        }
-        ++row;
     }
 
     int preferredCheckedRow = -1;
@@ -1620,7 +1916,7 @@ void MainWindow::refreshParamPanel() {
     const auto maybeKind = selectedFamilyCapabilityKind();
     if (!maybeKind.has_value()) {
         activeFamilyCapability_.reset();
-        paramStack_->setCurrentIndex(5);
+        paramStack_->setCurrentIndex(6);
         capabilityEditorLabel_->setText(modelFamilyCombo_ != nullptr && modelFamilyCombo_->isEnabled()
             ? QStringLiteral("Select an enhancement on the left to adjust its parameters.")
             : QStringLiteral("Open Model Manager or switch backends to make a compatible model family available."));
@@ -1633,7 +1929,7 @@ void MainWindow::refreshParamPanel() {
     const auto maybeModelId = selectedFamilyCapabilityModelId();
     if (!maybeModelId.has_value()) {
         activeFamilyCapability_.reset();
-        paramStack_->setCurrentIndex(5);
+        paramStack_->setCurrentIndex(6);
         capabilityEditorLabel_->setText(QStringLiteral("Select an enhancement on the left to adjust its parameters."));
         const QSignalBlocker extraBlocker(extraParamsEdit_);
         extraParamsEdit_->clear();
@@ -2217,6 +2513,26 @@ ave::EnhancementStage MainWindow::defaultDraftStage(const ave::StageKind kind,
         case ave::StageKind::Sharpen:
             stage.params["amount"] = 0.5;
             break;
+        case ave::StageKind::Stereo3D:
+            stage.params["format"] = std::string("full_sbs");
+            stage.params["method"] = std::string("grid_sample");
+            stage.params["synthetic_view"] = std::string("both");
+            stage.params["resolution"] = std::int64_t{384};
+            stage.params["limit_resolution"] = false;
+            stage.params["divergence"] = 2.0;
+            stage.params["convergence"] = 0.5;
+            stage.params["foreground_scale"] = 0.0;
+            stage.params["mapper_type"] = std::string("auto");
+            stage.params["metric_depth"] = false;
+            stage.params["depth_aa"] = true;
+            stage.params["ipd_offset"] = 0.0;
+            stage.params["pad"] = 0.0;
+            stage.params["pad_mode"] = std::string("tblr");
+            stage.params["edge_dilation_x"] = std::int64_t{2};
+            stage.params["edge_dilation_y"] = std::int64_t{1};
+            stage.params["ema_normalize"] = false;
+            stage.params["ema_decay"] = 0.75;
+            break;
         case ave::StageKind::Interpolate:
             stage.params["fps"] = std::int64_t{60};
             stage.params["scene_detect"] = true;
@@ -2245,6 +2561,25 @@ ave::EnhancementStage MainWindow::captureEditorStage(const ave::StageKind kind,
     } else if (page == 3) {
         stage.params["amount"] = sharpenSlider_->value() / 100.0;
     } else if (page == 4) {
+        stage.params["format"] = stereoFormatCombo_->currentData().toString().toStdString();
+        stage.params["method"] = stereoMethodCombo_->currentData().toString().toStdString();
+        stage.params["synthetic_view"] = stereoSyntheticViewCombo_->currentData().toString().toStdString();
+        stage.params["resolution"] = static_cast<std::int64_t>(stereoDepthResolutionSpin_->value());
+        stage.params["limit_resolution"] = stereoLimitResolutionToggle_->isChecked();
+        stage.params["divergence"] = stereoDivergenceSpin_->value();
+        stage.params["convergence"] = stereoConvergenceSpin_->value();
+        stage.params["foreground_scale"] = stereoForegroundScaleSpin_->value();
+        stage.params["mapper_type"] = stereoMapperTypeCombo_->currentData().toString().toStdString();
+        stage.params["metric_depth"] = stereoMetricDepthToggle_->isChecked();
+        stage.params["depth_aa"] = stereoDepthAaToggle_->isChecked();
+        stage.params["ipd_offset"] = stereoIpdOffsetSpin_->value();
+        stage.params["pad"] = stereoPadSpin_->value();
+        stage.params["pad_mode"] = stereoPadModeCombo_->currentData().toString().toStdString();
+        stage.params["edge_dilation_x"] = static_cast<std::int64_t>(stereoEdgeDilateXSpin_->value());
+        stage.params["edge_dilation_y"] = static_cast<std::int64_t>(stereoEdgeDilateYSpin_->value());
+        stage.params["ema_normalize"] = stereoEmaNormalizeToggle_->isChecked();
+        stage.params["ema_decay"] = stereoEmaDecaySpin_->value();
+    } else if (page == 5) {
         stage.params["fps"] = static_cast<std::int64_t>(interpolateFpsSpin_->value());
         stage.params["scene_detect"] = sceneDetectToggle_->isChecked();
     }
@@ -2306,6 +2641,16 @@ void MainWindow::loadStageDraftIntoEditor(const ave::EnhancementStage& stage) {
         }
         return fallback;
     };
+    auto stringParam = [&stage](const std::string& key, const std::string& fallback) {
+        const auto it = stage.params.find(key);
+        if (it == stage.params.end()) {
+            return fallback;
+        }
+        if (const auto* value = std::get_if<std::string>(&it->second)) {
+            return *value;
+        }
+        return fallback;
+    };
 
     {
         const QSignalBlocker blocker(strengthSlider_);
@@ -2348,6 +2693,52 @@ void MainWindow::loadStageDraftIntoEditor(const ave::EnhancementStage& stage) {
         sharpenLabel_->setText(sliderPct(sliderValue));
     }
     {
+        const QSignalBlocker formatBlocker(stereoFormatCombo_);
+        const QSignalBlocker viewBlocker(stereoSyntheticViewCombo_);
+        const QSignalBlocker methodBlocker(stereoMethodCombo_);
+        const QSignalBlocker mapperBlocker(stereoMapperTypeCombo_);
+        const QSignalBlocker padModeBlocker(stereoPadModeCombo_);
+        const QSignalBlocker divBlocker(stereoDivergenceSpin_);
+        const QSignalBlocker convBlocker(stereoConvergenceSpin_);
+        const QSignalBlocker fgBlocker(stereoForegroundScaleSpin_);
+        const QSignalBlocker ipdBlocker(stereoIpdOffsetSpin_);
+        const QSignalBlocker padBlocker(stereoPadSpin_);
+        const QSignalBlocker emaDecayBlocker(stereoEmaDecaySpin_);
+        const QSignalBlocker resolutionBlocker(stereoDepthResolutionSpin_);
+        const QSignalBlocker edgeXBlocker(stereoEdgeDilateXSpin_);
+        const QSignalBlocker edgeYBlocker(stereoEdgeDilateYSpin_);
+        const QSignalBlocker limitResolutionBlocker(stereoLimitResolutionToggle_);
+        const QSignalBlocker metricBlocker(stereoMetricDepthToggle_);
+        const QSignalBlocker aaBlocker(stereoDepthAaToggle_);
+        const QSignalBlocker emaBlocker(stereoEmaNormalizeToggle_);
+
+        auto setComboValue = [](QComboBox* combo, const QString& value) {
+            const int index = combo->findData(value);
+            if (index >= 0) {
+                combo->setCurrentIndex(index);
+            }
+        };
+
+        setComboValue(stereoFormatCombo_, QString::fromStdString(stringParam("format", "full_sbs")));
+        setComboValue(stereoSyntheticViewCombo_, QString::fromStdString(stringParam("synthetic_view", "both")));
+        setComboValue(stereoMethodCombo_, QString::fromStdString(stringParam("method", "grid_sample")));
+        setComboValue(stereoMapperTypeCombo_, QString::fromStdString(stringParam("mapper_type", "auto")));
+        setComboValue(stereoPadModeCombo_, QString::fromStdString(stringParam("pad_mode", "tblr")));
+        stereoDepthResolutionSpin_->setValue(std::clamp(static_cast<int>(intParam("resolution", 384)), 224, 4096));
+        stereoDivergenceSpin_->setValue(doubleParam("divergence", 2.0));
+        stereoConvergenceSpin_->setValue(doubleParam("convergence", 0.5));
+        stereoForegroundScaleSpin_->setValue(doubleParam("foreground_scale", 0.0));
+        stereoIpdOffsetSpin_->setValue(doubleParam("ipd_offset", 0.0));
+        stereoPadSpin_->setValue(doubleParam("pad", 0.0));
+        stereoEmaDecaySpin_->setValue(doubleParam("ema_decay", 0.75));
+        stereoEdgeDilateXSpin_->setValue(std::clamp(static_cast<int>(intParam("edge_dilation_x", 2)), 0, 16));
+        stereoEdgeDilateYSpin_->setValue(std::clamp(static_cast<int>(intParam("edge_dilation_y", 1)), 0, 16));
+        stereoLimitResolutionToggle_->setChecked(boolParam("limit_resolution", false));
+        stereoMetricDepthToggle_->setChecked(boolParam("metric_depth", false));
+        stereoDepthAaToggle_->setChecked(boolParam("depth_aa", true));
+        stereoEmaNormalizeToggle_->setChecked(boolParam("ema_normalize", false));
+    }
+    {
         const QSignalBlocker fpsBlocker(interpolateFpsSpin_);
         const QSignalBlocker sceneBlocker(sceneDetectToggle_);
         interpolateFpsSpin_->setValue(std::clamp(static_cast<int>(intParam("fps", 60)), 1, 240));
@@ -2376,6 +2767,26 @@ void MainWindow::loadStageDraftIntoEditor(const ave::EnhancementStage& stage) {
             break;
         case ave::StageKind::Sharpen:
             builtInKeys.insert("amount");
+            break;
+        case ave::StageKind::Stereo3D:
+            builtInKeys.insert("format");
+            builtInKeys.insert("method");
+            builtInKeys.insert("synthetic_view");
+            builtInKeys.insert("resolution");
+            builtInKeys.insert("limit_resolution");
+            builtInKeys.insert("divergence");
+            builtInKeys.insert("convergence");
+            builtInKeys.insert("foreground_scale");
+            builtInKeys.insert("mapper_type");
+            builtInKeys.insert("metric_depth");
+            builtInKeys.insert("depth_aa");
+            builtInKeys.insert("ipd_offset");
+            builtInKeys.insert("pad");
+            builtInKeys.insert("pad_mode");
+            builtInKeys.insert("edge_dilation_x");
+            builtInKeys.insert("edge_dilation_y");
+            builtInKeys.insert("ema_normalize");
+            builtInKeys.insert("ema_decay");
             break;
         case ave::StageKind::Interpolate:
             builtInKeys.insert("fps");
@@ -2487,6 +2898,149 @@ void MainWindow::clearStages() {
 // Job
 // ─────────────────────────────────────────────────────────────────
 
+bool MainWindow::hasQueuedOutputConflict(const QString& outputPath,
+                                         const std::optional<std::size_t> ignoreIndex) const {
+    const QString trimmed = outputPath.trimmed();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < queuedJobs_.size(); ++index) {
+        if (ignoreIndex.has_value() && *ignoreIndex == index) {
+            continue;
+        }
+        const auto& record = queuedJobs_[index];
+        if (record.status == ave::QueuedJobStatus::Succeeded) {
+            continue;
+        }
+        if (toQString(record.job.outputPath).trimmed() == trimmed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::addCurrentJobToQueue() {
+    if (isRunning_.load()) {
+        return;
+    }
+
+    QString error;
+    auto maybeJob = buildJob(error);
+    if (!maybeJob.has_value()) {
+        QMessageBox::warning(this, "Invalid Configuration", error);
+        return;
+    }
+    if (maybeJob->dryRun) {
+        QMessageBox::warning(
+            this,
+            "Queue Only Supports Full Jobs",
+            "Disable dry-run before adding a job to the batch queue.");
+        return;
+    }
+    if (hasQueuedOutputConflict(toQString(maybeJob->outputPath))) {
+        QMessageBox::warning(
+            this,
+            "Duplicate Queue Output",
+            "Another queued job already targets this output path. Remove the old entry or choose a different output file.");
+        return;
+    }
+
+    ave::QueuedJobRecord record;
+    record.id = ave::generateQueueJobId();
+    record.job = *maybeJob;
+    record.job.progressCb = {};
+    record.job.framePreviewCb = {};
+    record.job.cancelFlag = nullptr;
+    record.job.pauseFlag = nullptr;
+    record.job.previewMode = false;
+    record.status = ave::QueuedJobStatus::Pending;
+    record.retryable = false;
+    record.attemptCount = 0;
+    record.createdAtUtc = utcNowIsoString().toStdString();
+
+    queuedJobs_.push_back(record);
+    persistQueuedJobs();
+    refreshQueuedJobsView();
+    if (queuedJobsView_ != nullptr) {
+        queuedJobsView_->setCurrentRow(static_cast<int>(queuedJobs_.size() - 1));
+    }
+    appendLog(QStringLiteral("Queued job for output: %1").arg(toQString(record.job.outputPath)));
+}
+
+void MainWindow::removeSelectedQueuedJob() {
+    if (isRunning_.load() || queuedJobsView_ == nullptr) {
+        return;
+    }
+    const int row = queuedJobsView_->currentRow();
+    if (row < 0 || static_cast<std::size_t>(row) >= queuedJobs_.size()) {
+        return;
+    }
+
+    const QString output = toQString(queuedJobs_[static_cast<std::size_t>(row)].job.outputPath);
+    queuedJobs_.erase(queuedJobs_.begin() + static_cast<std::ptrdiff_t>(row));
+    persistQueuedJobs();
+    refreshQueuedJobsView();
+    appendLog(QStringLiteral("Removed queued job for output: %1").arg(output));
+}
+
+void MainWindow::clearFinishedQueuedJobs() {
+    if (isRunning_.load()) {
+        return;
+    }
+
+    const auto before = queuedJobs_.size();
+    queuedJobs_.erase(
+        std::remove_if(
+            queuedJobs_.begin(), queuedJobs_.end(),
+            [](const ave::QueuedJobRecord& record) {
+                return ave::isTerminalQueueStatus(record.status);
+            }),
+        queuedJobs_.end());
+    persistQueuedJobs();
+    refreshQueuedJobsView();
+
+    const auto removed = before - queuedJobs_.size();
+    if (removed > 0) {
+        appendLog(QStringLiteral("Cleared %1 finished queue job(s).").arg(static_cast<int>(removed)));
+    }
+}
+
+void MainWindow::runQueuedJobs() {
+    if (isRunning_.load()) {
+        return;
+    }
+    const auto next = nextRunnableQueuedJobIndex();
+    if (!next.has_value()) {
+        const bool hasBlockedRetry = std::any_of(
+            queuedJobs_.begin(), queuedJobs_.end(),
+            [](const ave::QueuedJobRecord& record) {
+                return record.status == ave::QueuedJobStatus::RetryableFailure &&
+                       hasNonEmptyFileAtPath(record.job.outputPath);
+            });
+        QMessageBox::information(
+            this,
+            "Queue Idle",
+            hasBlockedRetry
+                ? "Retryable queue entries are blocked by existing output files. Remove the partial outputs or change the output paths before retrying."
+                : "No pending or retryable jobs are available to run.");
+        return;
+    }
+
+    int runnableCount = 0;
+    for (const auto& record : queuedJobs_) {
+        const bool runnable = record.status == ave::QueuedJobStatus::Pending ||
+                              (record.status == ave::QueuedJobStatus::RetryableFailure &&
+                               !hasNonEmptyFileAtPath(record.job.outputPath));
+        if (runnable) {
+            ++runnableCount;
+        }
+    }
+    queueRunActive_ = true;
+    appendLog(QStringLiteral("Queue started with %1 runnable job(s).").arg(runnableCount));
+    startQueuedJob(*next);
+}
+
 std::optional<ave::VideoJob> MainWindow::buildJob(QString& error) const {
     ave::VideoJob job;
     job.inputPath       = inputPathEdit_->text().trimmed().toStdString();
@@ -2531,13 +3085,36 @@ void MainWindow::setRunning(bool running) {
     }
 
     progressBar_->setValue(0);
+    progressBar_->setRange(0, 100);
+    progressBar_->setFormat("Overall pipeline: %p%");
     progressBar_->setVisible(running);
     taskProgressBar_->setValue(0);
+    taskProgressBar_->setRange(0, 100);
+    taskProgressBar_->setFormat("Current task: %p%");
     taskProgressBar_->setVisible(running);
     progressLabel_->setVisible(running);
     if (!running) {
+        if (telemetryTimer_ != nullptr) {
+            telemetryTimer_->stop();
+        }
+        telemetryRequestInFlight_.store(false);
+        lastTelemetryLogLine_.clear();
         progressLabel_->clear();
         lastProgressMsg_.clear();
+        updateProcessedPreviewTitle(QString());
+        applyTelemetryStatus(QStringLiteral(
+            "AMD telemetry idle. Start a run or preview to sample GPU metrics."));
+    } else {
+        lastTelemetryLogLine_.clear();
+        const auto requestedBackend = backendCombo_
+            ? static_cast<ave::BackendType>(backendCombo_->currentData().toInt())
+            : ave::BackendType::Auto;
+        updateProcessedPreviewTitle(backendDisplayName(requestedBackend));
+        applyTelemetryStatus(QStringLiteral("Sampling AMD telemetry..."));
+        if (telemetryTimer_ != nullptr) {
+            telemetryTimer_->start();
+        }
+        requestTelemetryRefresh();
     }
     const bool sel = requestedStagesView_->currentRow() >= 0;
     removeStageButton_->setEnabled(!running && sel);
@@ -2545,6 +3122,40 @@ void MainWindow::setRunning(bool running) {
     moveDownButton_->setEnabled(!running && sel);
     clearStagesButton_->setEnabled(!running);
     refreshStageBuilderActions();
+    refreshQueueControls();
+}
+
+void MainWindow::applyProgressUpdate(const int overallPct,
+                                     const int taskPct,
+                                     const QString& msg) {
+    if (!progressBar_ || !taskProgressBar_ || !progressLabel_) {
+        return;
+    }
+
+    const auto requestedBackend = backendCombo_
+        ? static_cast<ave::BackendType>(backendCombo_->currentData().toInt())
+        : ave::BackendType::Auto;
+    const QString runtimeName = inferredProgressRuntimeName(msg, requestedBackend);
+    updateProcessedPreviewTitle(runtimeName);
+
+    progressBar_->setRange(0, 100);
+    progressBar_->setValue(std::clamp(overallPct, 0, 100));
+    progressBar_->setFormat(QStringLiteral("Overall · %1 · %p%").arg(runtimeName));
+
+    if (progressUsesBusyIndicator(msg)) {
+        taskProgressBar_->setRange(0, 0);
+        taskProgressBar_->setFormat(QStringLiteral("Task · %1 · working...").arg(runtimeName));
+    } else {
+        if (taskProgressBar_->minimum() != 0 || taskProgressBar_->maximum() != 100) {
+            taskProgressBar_->setRange(0, 100);
+        }
+        taskProgressBar_->setValue(std::clamp(taskPct, 0, 100));
+        taskProgressBar_->setFormat(QStringLiteral("Task · %1 · %p%").arg(runtimeName));
+    }
+
+    if (!msg.isEmpty()) {
+        progressLabel_->setText(QStringLiteral("Runtime: %1\n%2").arg(runtimeName, msg));
+    }
 }
 
 void MainWindow::appendLog(const QString& line) {
@@ -2619,6 +3230,663 @@ void MainWindow::persistUiStateToSettings() {
     appSettings_.save();
 }
 
+void MainWindow::updateProcessedPreviewTitle(const QString& runtimeName) {
+    if (processedPreviewTitleLabel_ == nullptr) {
+        return;
+    }
+    QString title = QStringLiteral("Processed");
+    const QString trimmed = runtimeName.trimmed();
+    if (!trimmed.isEmpty() && trimmed != QStringLiteral("Auto")) {
+        title += QStringLiteral(" (%1)").arg(trimmed);
+    }
+    processedPreviewTitleLabel_->setText(title);
+}
+
+void MainWindow::setPreviewPixmap(QLabel* label, const QPixmap& pixmap) {
+    if (label == nullptr) {
+        return;
+    }
+    label->setText(QString());
+    label->setPixmap(
+        pixmap.scaled(label->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void MainWindow::refreshPreviewPlaceholders() {
+    previewRequestSerial_.fetch_add(1);
+    if (originalPreviewTitleLabel_ != nullptr) {
+        originalPreviewTitleLabel_->setText(QStringLiteral("Original"));
+    }
+    updateProcessedPreviewTitle(QString());
+    if (originalFramePreviewLabel_ != nullptr) {
+        originalFramePreviewLabel_->setPixmap(QPixmap());
+        if (inputPathEdit_ != nullptr && !inputPathEdit_->text().trimmed().isEmpty()) {
+            originalFramePreviewLabel_->setText(
+                QStringLiteral("Original source frame will load when you start a run or preview"));
+        } else {
+            originalFramePreviewLabel_->setText(
+                QStringLiteral("Choose an input video to compare against the processed output"));
+        }
+    }
+    if (framePreviewLabel_ != nullptr) {
+        framePreviewLabel_->setPixmap(QPixmap());
+        framePreviewLabel_->setText(
+            QStringLiteral("Processed frame will appear here during processing"));
+    }
+}
+
+void MainWindow::refreshOriginalPreviewFrame() {
+    if (originalFramePreviewLabel_ == nullptr || inputPathEdit_ == nullptr) {
+        return;
+    }
+
+    const QString inputPath = inputPathEdit_->text().trimmed();
+    const std::uint64_t requestId = previewRequestSerial_.fetch_add(1) + 1;
+    if (inputPath.isEmpty()) {
+        refreshPreviewPlaceholders();
+        return;
+    }
+
+    originalFramePreviewLabel_->setPixmap(QPixmap());
+    originalFramePreviewLabel_->setText(QStringLiteral("Loading source frame..."));
+
+    QPointer<MainWindow> self(this);
+    const std::string path = inputPath.toStdString();
+    std::thread([self, path, requestId]() {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> rgb;
+        std::string error;
+        const bool ok = ave::frame_io::extractVideoFrameRgb24(
+            path, 0.0, width, height, rgb, error);
+
+        QByteArray data;
+        if (ok) {
+            data = QByteArray(reinterpret_cast<const char*>(rgb.data()),
+                              static_cast<int>(rgb.size()));
+        }
+        const QString qError = QString::fromStdString(error);
+        QMetaObject::invokeMethod(self, [self, requestId, ok, data, width, height, qError]() {
+            if (!self) {
+                return;
+            }
+            if (requestId != self->previewRequestSerial_.load()) {
+                return;
+            }
+            if (!ok) {
+                if (self->originalFramePreviewLabel_ != nullptr) {
+                    self->originalFramePreviewLabel_->setPixmap(QPixmap());
+                    self->originalFramePreviewLabel_->setText(
+                        QStringLiteral("Original preview unavailable"));
+                }
+                if (!qError.isEmpty()) {
+                    self->appendLog(
+                        QStringLiteral("Original preview unavailable: %1").arg(qError));
+                }
+                return;
+            }
+
+            QImage img(reinterpret_cast<const uchar*>(data.constData()),
+                       width, height, width * 3, QImage::Format_RGB888);
+            self->setPreviewPixmap(self->originalFramePreviewLabel_,
+                                   QPixmap::fromImage(img));
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::requestTelemetryRefresh() {
+    if (!isRunning_.load() || telemetryStatusLabel_ == nullptr) {
+        return;
+    }
+    if (telemetryRequestInFlight_.exchange(true)) {
+        return;
+    }
+
+    QPointer<MainWindow> self(this);
+    std::thread([self]() {
+        std::string error;
+        const auto snapshot = ave::collectAmdTelemetry(error);
+        const QString summary = snapshot.has_value()
+            ? toQString(snapshot->summary())
+            : (error.empty()
+                   ? QStringLiteral("AMD telemetry unavailable.")
+                   : QStringLiteral("AMD telemetry unavailable: %1").arg(toQString(error)));
+        QString logLine;
+        if (snapshot.has_value()) {
+            if (const std::string hint = snapshot->pressureHint(); !hint.empty()) {
+                logLine = QStringLiteral("AMD telemetry hint: %1").arg(toQString(hint));
+            }
+        } else if (!error.empty()) {
+            logLine = QStringLiteral("AMD telemetry unavailable: %1").arg(toQString(error));
+        }
+
+        QMetaObject::invokeMethod(self, [self, summary, logLine]() {
+            if (!self) {
+                return;
+            }
+            self->telemetryRequestInFlight_.store(false);
+            self->applyTelemetryStatus(summary, logLine);
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::applyTelemetryStatus(const QString& summary, const QString& logLine) {
+    if (telemetryStatusLabel_ != nullptr) {
+        telemetryStatusLabel_->setText(summary);
+    }
+    if (!logLine.isEmpty() && logLine != lastTelemetryLogLine_) {
+        lastTelemetryLogLine_ = logLine;
+        appendLog(logLine);
+    }
+}
+
+void MainWindow::promptForRecoveredJob() {
+    std::string error;
+    const auto recovered = jobRecoveryStore_.load(error);
+    if (!recovered.has_value()) {
+        if (!error.empty()) {
+            QMessageBox::warning(
+                this,
+                "Recovery Snapshot Ignored",
+                "Saved recovery snapshot could not be read:\n" + toQString(error));
+            clearRecoveryTracking();
+        }
+        return;
+    }
+
+    QString prompt = QStringLiteral(
+        "An interrupted processing job was found.\n\nOutput: %1\nStages: %2")
+        .arg(toQString(recovered->job.outputPath))
+        .arg(QString::number(static_cast<int>(recovered->job.requestedStages.size())));
+    if (!recovered->startedAtUtc.empty()) {
+        prompt += QStringLiteral("\nStarted: %1").arg(toQString(recovered->startedAtUtc));
+    }
+    prompt += QStringLiteral("\n\nRestore it to the UI so you can rerun it safely?");
+
+    const auto decision = QMessageBox::question(
+        this,
+        "Restore Interrupted Job",
+        prompt,
+        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+        QMessageBox::Yes);
+    if (decision == QMessageBox::Yes) {
+        applyRecoveredJob(*recovered);
+        clearRecoveryTracking();
+        appendLog(QStringLiteral("Restored interrupted job snapshot to the UI."));
+    } else if (decision == QMessageBox::No) {
+        clearRecoveryTracking();
+        appendLog(QStringLiteral("Discarded interrupted job snapshot."));
+    } else {
+        appendLog(QStringLiteral("Left interrupted job snapshot in place."));
+    }
+}
+
+void MainWindow::applyRecoveredJob(const ave::RecoveredJobState& state) {
+    inputPathEdit_->setText(toQString(state.job.inputPath));
+    setManagedOutputPath(toQString(state.job.outputPath), false);
+
+    const int backendIndex = backendCombo_->findData(
+        static_cast<int>(state.job.requestedBackend));
+    if (backendIndex >= 0) {
+        backendCombo_->setCurrentIndex(backendIndex);
+    }
+
+    codecCombo_->setCurrentText(toQString(state.job.encode.codec));
+    if (state.job.encode.profile.empty()) {
+        profileCombo_->setCurrentIndex(0);
+    } else {
+        profileCombo_->setCurrentText(toQString(state.job.encode.profile));
+    }
+    presetCombo_->setCurrentText(toQString(state.job.encode.preset));
+    crfSpin_->setValue(state.job.encode.crf);
+    dryRunToggle_->setChecked(state.job.dryRun);
+    previewDurationSpin_->setValue(std::clamp(
+        static_cast<int>(state.job.previewDurationSec + 0.5), 1, 300));
+
+    stages_ = state.job.requestedStages;
+
+    updatingFilterPresetUi_ = true;
+    filterBrowser_->setActiveFilters(state.job.catalogFilters);
+    updatingFilterPresetUi_ = false;
+    if (filterPresetCombo_ != nullptr) {
+        const QSignalBlocker blocker(filterPresetCombo_);
+        filterPresetCombo_->setCurrentIndex(0);
+    }
+    updateFilterPresetDescription();
+    refreshRequestedStages();
+    refreshPlannedStages();
+    refreshActiveFilters();
+    refreshFilterExecutionSummary();
+    refreshCommandPreview();
+    refreshPreviewPlaceholders();
+}
+
+void MainWindow::startRecoveryTracking(const ave::VideoJob& job) {
+    if (job.dryRun || job.inputPath.empty() || job.outputPath.empty()) {
+        return;
+    }
+
+    ave::RecoveredJobState state;
+    state.job = job;
+    state.job.progressCb = {};
+    state.job.framePreviewCb = {};
+    state.job.cancelFlag = nullptr;
+    state.job.pauseFlag = nullptr;
+    state.startedAtUtc =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toStdString();
+
+    std::string error;
+    if (!jobRecoveryStore_.save(state, error)) {
+        appendLog(
+            QStringLiteral("Recovery snapshot save failed: %1").arg(toQString(error)));
+        return;
+    }
+    appendLog(QStringLiteral("Recovery snapshot saved for output: %1")
+                  .arg(toQString(job.outputPath)));
+}
+
+void MainWindow::clearRecoveryTracking() {
+    std::string error;
+    if (!jobRecoveryStore_.clear(error) && !error.empty()) {
+        appendLog(QStringLiteral("Could not clear recovery snapshot: %1")
+                      .arg(toQString(error)));
+    }
+}
+
+void MainWindow::loadQueuedJobs() {
+    std::string error;
+    queuedJobs_ = jobQueueStore_.load(error);
+    refreshQueuedJobsView();
+    if (!error.empty()) {
+        appendLog(QStringLiteral("Queued job restore failed: %1").arg(toQString(error)));
+        QMessageBox::warning(
+            this,
+            "Queue Restore Failed",
+            "Saved job queue could not be restored:\n" + toQString(error));
+        return;
+    }
+    if (!queuedJobs_.empty()) {
+        int retryableCount = 0;
+        int pendingCount = 0;
+        for (const auto& record : queuedJobs_) {
+            if (record.status == ave::QueuedJobStatus::RetryableFailure) {
+                ++retryableCount;
+            } else if (record.status == ave::QueuedJobStatus::Pending) {
+                ++pendingCount;
+            }
+        }
+        appendLog(QStringLiteral("Restored %1 queued job(s) (%2 pending, %3 retryable).")
+                      .arg(static_cast<int>(queuedJobs_.size()))
+                      .arg(pendingCount)
+                      .arg(retryableCount));
+    }
+}
+
+void MainWindow::persistQueuedJobs() {
+    std::string error;
+    const bool ok = queuedJobs_.empty()
+        ? jobQueueStore_.clear(error)
+        : jobQueueStore_.save(queuedJobs_, error);
+    if (!ok && !error.empty()) {
+        appendLog(QStringLiteral("Queue state persistence failed: %1").arg(toQString(error)));
+    }
+}
+
+void MainWindow::refreshQueuedJobsView() {
+    QString selectedId;
+    if (queuedJobsView_ != nullptr && queuedJobsView_->currentRow() >= 0 &&
+        static_cast<std::size_t>(queuedJobsView_->currentRow()) < queuedJobs_.size()) {
+        selectedId = toQString(queuedJobs_[static_cast<std::size_t>(
+            queuedJobsView_->currentRow())].id);
+    }
+
+    if (queuedJobsView_ != nullptr) {
+        queuedJobsView_->clear();
+        int selectedRow = -1;
+        for (std::size_t index = 0; index < queuedJobs_.size(); ++index) {
+            const auto& record = queuedJobs_[index];
+            const QFileInfo inputInfo(toQString(record.job.inputPath));
+            const QFileInfo outputInfo(toQString(record.job.outputPath));
+            const QString inputLabel = inputInfo.fileName().isEmpty()
+                ? toQString(record.job.inputPath)
+                : inputInfo.fileName();
+            const QString outputLabel = outputInfo.fileName().isEmpty()
+                ? toQString(record.job.outputPath)
+                : outputInfo.fileName();
+            const QString line = QStringLiteral("[%1] %2 -> %3 | %4 | %5 stage(s) | attempt %6")
+                .arg(queueStatusDisplay(record.status),
+                     inputLabel,
+                     outputLabel,
+                     backendDisplayName(record.job.requestedBackend))
+                .arg(static_cast<int>(record.job.requestedStages.size()))
+                .arg(std::max(1, record.attemptCount));
+            auto* item = new QListWidgetItem(line, queuedJobsView_);
+            QString tooltip = QStringLiteral("Input: %1\nOutput: %2")
+                .arg(toQString(record.job.inputPath), toQString(record.job.outputPath));
+            if (!record.createdAtUtc.empty()) {
+                tooltip += QStringLiteral("\nQueued: %1").arg(toQString(record.createdAtUtc));
+            }
+            if (!record.startedAtUtc.empty()) {
+                tooltip += QStringLiteral("\nLast start: %1").arg(toQString(record.startedAtUtc));
+            }
+            if (!record.completedAtUtc.empty()) {
+                tooltip += QStringLiteral("\nLast completion: %1").arg(toQString(record.completedAtUtc));
+            }
+            if (!record.lastError.empty()) {
+                tooltip += QStringLiteral("\nError: %1").arg(toQString(record.lastError));
+            }
+            item->setToolTip(tooltip);
+            if (selectedId == toQString(record.id)) {
+                selectedRow = static_cast<int>(index);
+            }
+        }
+        if (selectedRow >= 0) {
+            queuedJobsView_->setCurrentRow(selectedRow);
+        }
+    }
+
+    if (queueSummaryLabel_ != nullptr) {
+        int pending = 0;
+        int running = 0;
+        int retryable = 0;
+        int terminal = 0;
+        for (const auto& record : queuedJobs_) {
+            switch (record.status) {
+                case ave::QueuedJobStatus::Pending:
+                    ++pending;
+                    break;
+                case ave::QueuedJobStatus::Running:
+                    ++running;
+                    break;
+                case ave::QueuedJobStatus::RetryableFailure:
+                    ++retryable;
+                    break;
+                case ave::QueuedJobStatus::Failed:
+                case ave::QueuedJobStatus::Succeeded:
+                case ave::QueuedJobStatus::Cancelled:
+                    ++terminal;
+                    break;
+            }
+        }
+        if (queuedJobs_.empty()) {
+            queueSummaryLabel_->setText(QStringLiteral("Queue is empty."));
+        } else {
+            queueSummaryLabel_->setText(
+                QStringLiteral("Queue: %1 total · %2 pending · %3 retryable · %4 running · %5 finished")
+                    .arg(static_cast<int>(queuedJobs_.size()))
+                    .arg(pending)
+                    .arg(retryable)
+                    .arg(running)
+                    .arg(terminal));
+        }
+    }
+
+    refreshQueueControls();
+}
+
+void MainWindow::refreshQueueControls() {
+    const bool running = isRunning_.load();
+    const bool hasSelection = queuedJobsView_ != nullptr && queuedJobsView_->currentRow() >= 0;
+    const bool hasRunnable = nextRunnableQueuedJobIndex().has_value();
+    const bool hasFinished = std::any_of(
+        queuedJobs_.begin(), queuedJobs_.end(),
+        [](const ave::QueuedJobRecord& record) {
+            return ave::isTerminalQueueStatus(record.status);
+        });
+
+    if (addQueueButton_ != nullptr) {
+        addQueueButton_->setEnabled(!running);
+    }
+    if (runQueueButton_ != nullptr) {
+        runQueueButton_->setEnabled(!running && hasRunnable);
+    }
+    if (removeQueueButton_ != nullptr) {
+        removeQueueButton_->setEnabled(!running && hasSelection);
+    }
+    if (clearFinishedQueueButton_ != nullptr) {
+        clearFinishedQueueButton_->setEnabled(!running && hasFinished);
+    }
+}
+
+std::optional<std::size_t> MainWindow::nextRunnableQueuedJobIndex() const {
+    for (std::size_t index = 0; index < queuedJobs_.size(); ++index) {
+        const auto& record = queuedJobs_[index];
+        if (record.status == ave::QueuedJobStatus::Pending) {
+            return index;
+        }
+        if (record.status == ave::QueuedJobStatus::RetryableFailure &&
+            !hasNonEmptyFileAtPath(record.job.outputPath)) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+void MainWindow::executeFullJob(ave::VideoJob job,
+                                const std::optional<std::size_t> queueIndex) {
+    setRunning(true);
+    job.cancelFlag = &cancelFlag_;
+    job.pauseFlag = &pauseFlag_;
+    QPointer<MainWindow> self(this);
+    refreshOriginalPreviewFrame();
+    if (framePreviewLabel_ != nullptr) {
+        framePreviewLabel_->setPixmap(QPixmap());
+        framePreviewLabel_->setText(QStringLiteral("Processing frame preview..."));
+    }
+    startRecoveryTracking(job);
+
+    job.progressCb = [self](const int overallPct, const int taskPct, const std::string& msg) {
+        const QString qmsg = QString::fromStdString(msg);
+        QMetaObject::invokeMethod(self, [self, overallPct, taskPct, qmsg]() {
+            if (!self) {
+                return;
+            }
+            self->applyProgressUpdate(overallPct, taskPct, qmsg);
+            if (!qmsg.isEmpty() && qmsg != self->lastProgressMsg_) {
+                self->lastProgressMsg_ = qmsg;
+                self->appendLog(qmsg);
+            }
+        }, Qt::QueuedConnection);
+    };
+
+    job.framePreviewCb = [self](const std::uint8_t* rgb, const int width, const int height) {
+        const int byteCount = width * height * 3;
+        QByteArray data(reinterpret_cast<const char*>(rgb), byteCount);
+        QMetaObject::invokeMethod(self, [self, data, width, height]() {
+            if (!self) {
+                return;
+            }
+            QImage img(reinterpret_cast<const uchar*>(data.constData()),
+                       width, height, width * 3, QImage::Format_RGB888);
+            self->setPreviewPixmap(self->framePreviewLabel_, QPixmap::fromImage(img));
+        }, Qt::QueuedConnection);
+    };
+
+    std::thread([self, job, queueIndex]() {
+        ave::VideoProcessor processor;
+        std::string error;
+        const bool ok = processor.process(job, error);
+        if (!self) {
+            return;
+        }
+        const bool wasCancelled = job.cancelFlag != nullptr && job.cancelFlag->load();
+        const QString qError = toQString(error);
+        QMetaObject::invokeMethod(self, [self, job, queueIndex, ok, wasCancelled, qError]() {
+            if (!self) {
+                return;
+            }
+            if (ok || wasCancelled) {
+                self->clearRecoveryTracking();
+            } else {
+                self->appendLog(QStringLiteral(
+                    "Recovery snapshot retained so the interrupted job can be restored."));
+            }
+
+            const QString resultLine = wasCancelled
+                ? QStringLiteral("Processing cancelled by user.")
+                : (ok ? QStringLiteral("Job completed successfully.")
+                      : QStringLiteral("Job failed: %1").arg(qError));
+            self->appendLog(resultLine);
+            self->setRunning(false);
+
+            if (queueIndex.has_value()) {
+                self->finishQueuedJob(*queueIndex, job, ok, wasCancelled, qError);
+            } else if (!ok && !wasCancelled) {
+                QMessageBox::critical(self, "Processing Failed", resultLine);
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::startQueuedJob(const std::size_t index) {
+    if (index >= queuedJobs_.size()) {
+        queueRunActive_ = false;
+        activeQueueIndex_.reset();
+        refreshQueueControls();
+        return;
+    }
+
+    auto& record = queuedJobs_[index];
+    if (record.job.dryRun || record.job.previewMode) {
+        record.status = ave::QueuedJobStatus::Failed;
+        record.retryable = false;
+        record.completedAtUtc = utcNowIsoString().toStdString();
+        record.lastError = "Queued entry is not a full processing job.";
+        queueRunActive_ = false;
+        activeQueueIndex_.reset();
+        persistQueuedJobs();
+        refreshQueuedJobsView();
+        appendLog(QStringLiteral("Queue stopped: %1").arg(toQString(record.lastError)));
+        QMessageBox::warning(this, "Queue Stopped", toQString(record.lastError));
+        return;
+    }
+    if (record.job.inputPath.empty() || record.job.outputPath.empty()) {
+        record.status = ave::QueuedJobStatus::Failed;
+        record.retryable = false;
+        record.completedAtUtc = utcNowIsoString().toStdString();
+        record.lastError = "Queued job is missing an input or output path.";
+        queueRunActive_ = false;
+        activeQueueIndex_.reset();
+        persistQueuedJobs();
+        refreshQueuedJobsView();
+        appendLog(QStringLiteral("Queue stopped: %1").arg(toQString(record.lastError)));
+        QMessageBox::warning(this, "Queue Stopped", toQString(record.lastError));
+        return;
+    }
+    if (record.status == ave::QueuedJobStatus::RetryableFailure &&
+        hasNonEmptyFileAtPath(record.job.outputPath)) {
+        record.status = ave::QueuedJobStatus::Failed;
+        record.retryable = false;
+        record.completedAtUtc = utcNowIsoString().toStdString();
+        record.lastError +=
+            " Partial output already exists. Remove the output file or change the output path before retrying.";
+        queueRunActive_ = false;
+        activeQueueIndex_.reset();
+        persistQueuedJobs();
+        refreshQueuedJobsView();
+        appendLog(QStringLiteral("Queue stopped to protect existing output: %1")
+                      .arg(toQString(record.job.outputPath)));
+        QMessageBox::warning(
+            this,
+            "Queue Stopped",
+            "Queued retry blocked because a partial output file already exists:\n" +
+                toQString(record.job.outputPath));
+        return;
+    }
+
+    activeQueueIndex_ = index;
+    record.status = ave::QueuedJobStatus::Running;
+    record.retryable = false;
+    record.attemptCount = std::max(record.attemptCount, 0) + 1;
+    record.startedAtUtc = utcNowIsoString().toStdString();
+    record.completedAtUtc.clear();
+    persistQueuedJobs();
+    refreshQueuedJobsView();
+
+    appendLog(QStringLiteral("Queue job %1/%2 started: %3")
+                  .arg(static_cast<int>(index + 1))
+                  .arg(static_cast<int>(queuedJobs_.size()))
+                  .arg(toQString(record.job.outputPath)));
+    executeFullJob(record.job, index);
+}
+
+void MainWindow::finishQueuedJob(const std::size_t index,
+                                 const ave::VideoJob& job,
+                                 const bool ok,
+                                 const bool wasCancelled,
+                                 const QString& error) {
+    if (index >= queuedJobs_.size()) {
+        queueRunActive_ = false;
+        activeQueueIndex_.reset();
+        refreshQueueControls();
+        return;
+    }
+
+    auto& record = queuedJobs_[index];
+    record.completedAtUtc = utcNowIsoString().toStdString();
+
+    if (ok) {
+        record.status = ave::QueuedJobStatus::Succeeded;
+        record.retryable = false;
+        record.lastError.clear();
+    } else if (wasCancelled) {
+        record.status = ave::QueuedJobStatus::Cancelled;
+        record.retryable = false;
+        record.lastError = "Cancelled by user.";
+        queueRunActive_ = false;
+    } else {
+        QString lastError = error.trimmed();
+        if (lastError.isEmpty()) {
+            lastError = QStringLiteral("Processing failed without an error message.");
+        }
+        const bool retryable = ave::isRetryableQueueFailure(lastError.toStdString());
+        if (retryable && hasNonEmptyFileAtPath(job.outputPath)) {
+            record.status = ave::QueuedJobStatus::Failed;
+            record.retryable = false;
+            record.lastError =
+                (lastError +
+                 QStringLiteral(
+                     " Partial output already exists. Remove the output file or change the output path before retrying."))
+                    .toStdString();
+        } else {
+            record.status = retryable
+                ? ave::QueuedJobStatus::RetryableFailure
+                : ave::QueuedJobStatus::Failed;
+            record.retryable = retryable;
+            record.lastError = lastError.toStdString();
+        }
+        queueRunActive_ = false;
+    }
+
+    activeQueueIndex_.reset();
+    persistQueuedJobs();
+    refreshQueuedJobsView();
+
+    if (ok && queueRunActive_) {
+        if (const auto next = nextRunnableQueuedJobIndex(); next.has_value()) {
+            startQueuedJob(*next);
+            return;
+        }
+        queueRunActive_ = false;
+        appendLog(QStringLiteral("Queue completed successfully."));
+        refreshQueueControls();
+        return;
+    }
+
+    if (wasCancelled) {
+        appendLog(QStringLiteral("Queue stopped after cancellation."));
+    } else if (!ok) {
+        appendLog(QStringLiteral("Queue stopped on failure for output: %1")
+                      .arg(toQString(job.outputPath)));
+        QMessageBox::critical(
+            this,
+            "Queued Job Failed",
+            QStringLiteral("Queue stopped on:\n%1\n\n%2")
+                .arg(toQString(job.outputPath),
+                     toQString(record.lastError)));
+    }
+    refreshQueueControls();
+}
+
 QString MainWindow::suggestedOutputPathForInput(const QString& inputPath,
                                                 const QString& suffixOverride) const {
     const QString trimmed = inputPath.trimmed();
@@ -2665,10 +3933,15 @@ void MainWindow::setManagedOutputPath(const QString& path, const bool autoManage
 }
 
 void MainWindow::runJob() {
-    if (isRunning_.load()) return;
+    if (isRunning_.load()) {
+        return;
+    }
     QString err;
     auto maybeJob = buildJob(err);
-    if (!maybeJob) { QMessageBox::warning(this, "Invalid Configuration", err); return; }
+    if (!maybeJob) {
+        QMessageBox::warning(this, "Invalid Configuration", err);
+        return;
+    }
 
     if (appSettings_.confirmBeforeRun) {
         const QString modeLabel = maybeJob->dryRun ? "dry-run plan" : "processing job";
@@ -2680,78 +3953,33 @@ void MainWindow::runJob() {
         }
     }
 
+    queueRunActive_ = false;
+    activeQueueIndex_.reset();
     appendLog("Job started.");
-    setRunning(true);
-
-    ave::VideoJob job = *maybeJob;
-    job.cancelFlag = &cancelFlag_;
-    job.pauseFlag  = &pauseFlag_;
-    QPointer<MainWindow> self(this);
-
-    // Wire up the progress callback to update both progress bars and the log.
-    job.progressCb = [self](int overallPct, int taskPct, const std::string& msg) {
-        const QString qmsg = QString::fromStdString(msg);
-        QMetaObject::invokeMethod(self, [self, overallPct, taskPct, qmsg]() {
-            if (!self) return;
-            self->progressBar_->setValue(overallPct);
-            self->taskProgressBar_->setValue(taskPct);
-            if (!qmsg.isEmpty()) {
-                self->progressLabel_->setText(qmsg);
-                // Log each new milestone message (suppress duplicate per-frame updates)
-                if (qmsg != self->lastProgressMsg_) {
-                    self->lastProgressMsg_ = qmsg;
-                    self->appendLog(qmsg);
-                }
-            }
-        }, Qt::QueuedConnection);
-    };
-
-    // Wire live frame preview callback for full runs too
-    job.framePreviewCb = [self](const std::uint8_t* rgb, int width, int height) {
-        const int byteCount = width * height * 3;
-        QByteArray data(reinterpret_cast<const char*>(rgb), byteCount);
-        QMetaObject::invokeMethod(self, [self, data, width, height]() {
-            if (!self) return;
-            QImage img(reinterpret_cast<const uchar*>(data.constData()),
-                       width, height, width * 3, QImage::Format_RGB888);
-            QPixmap pm = QPixmap::fromImage(img);
-            self->framePreviewLabel_->setPixmap(
-                pm.scaled(self->framePreviewLabel_->size(),
-                          Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        }, Qt::QueuedConnection);
-    };
-
-    std::thread([self, job]() {
-        ave::VideoProcessor processor;
-        std::string error;
-        const bool ok = processor.process(job, error);
-        if (!self) return;
-        const bool wasCancelled = job.cancelFlag && job.cancelFlag->load();
-        const QString resultLine = wasCancelled
-            ? "Processing cancelled by user."
-            : (ok ? "Job completed successfully."
-                  : "Job failed: " + toQString(error));
-        QMetaObject::invokeMethod(self, [self, ok, wasCancelled, resultLine]() {
-            if (!self) return;
-            self->appendLog(resultLine);
-            self->setRunning(false);
-            if (!ok && !wasCancelled)
-                QMessageBox::critical(self, "Processing Failed", resultLine);
-        }, Qt::QueuedConnection);
-    }).detach();
+    executeFullJob(*maybeJob);
 }
 
 void MainWindow::runPreview() {
-    if (isRunning_.load()) return;
+    if (isRunning_.load()) {
+        return;
+    }
     QString err;
     auto maybeJob = buildJob(err);
-    if (!maybeJob) { QMessageBox::warning(this, "Invalid Configuration", err); return; }
+    if (!maybeJob) {
+        QMessageBox::warning(this, "Invalid Configuration", err);
+        return;
+    }
 
+    queueRunActive_ = false;
+    activeQueueIndex_.reset();
     appendLog("Preview started (" + QString::number(previewDurationSpin_->value()) + " seconds).");
     setRunning(true);
 
-    // Reset preview display
-    framePreviewLabel_->setText("Processing preview\u2026");
+    refreshOriginalPreviewFrame();
+    if (framePreviewLabel_ != nullptr) {
+        framePreviewLabel_->setPixmap(QPixmap());
+        framePreviewLabel_->setText("Processing preview\u2026");
+    }
 
     ave::VideoJob job = *maybeJob;
     job.cancelFlag = &cancelFlag_;
@@ -2774,10 +4002,8 @@ void MainWindow::runPreview() {
         const QString qmsg = QString::fromStdString(msg);
         QMetaObject::invokeMethod(self, [self, overallPct, taskPct, qmsg]() {
             if (!self) return;
-            self->progressBar_->setValue(overallPct);
-            self->taskProgressBar_->setValue(taskPct);
+            self->applyProgressUpdate(overallPct, taskPct, qmsg);
             if (!qmsg.isEmpty()) {
-                self->progressLabel_->setText(qmsg);
                 if (qmsg != self->lastProgressMsg_) {
                     self->lastProgressMsg_ = qmsg;
                     self->appendLog(qmsg);
@@ -2795,10 +4021,8 @@ void MainWindow::runPreview() {
             if (!self) return;
             QImage img(reinterpret_cast<const uchar*>(data.constData()),
                        width, height, width * 3, QImage::Format_RGB888);
-            QPixmap pm = QPixmap::fromImage(img);
-            self->framePreviewLabel_->setPixmap(
-                pm.scaled(self->framePreviewLabel_->size(),
-                          Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            self->setPreviewPixmap(self->framePreviewLabel_,
+                                   QPixmap::fromImage(img));
         }, Qt::QueuedConnection);
     };
 
@@ -2829,11 +4053,28 @@ void MainWindow::runPreview() {
 void MainWindow::probeBackends() {
     ave::BackendManager manager;
     const auto infos = manager.probeBackends();
+    const auto diagnostics = manager.runtimeDiagnostics();
+    const auto telemetryProbe = ave::probeAmdTelemetrySupport();
     QStringList lines;
     for (const auto& info : infos)
         lines << (toQString(info.name) + ": " +
                   (info.available ? "available" : "unavailable") +
                   " (" + toQString(info.detail) + ")");
+    lines << QString();
+    lines << "AMD runtime diagnostics:";
+    lines << toQString(diagnostics.summary());
+    for (const auto& check : diagnostics.checks) {
+        lines << (toQString(check.title) + ": " + toQString(check.detail));
+    }
+    lines << QString();
+    lines << "AMD telemetry:";
+    lines << toQString(telemetryProbe.summary());
+    std::string telemetryError;
+    if (const auto snapshot = ave::collectAmdTelemetry(telemetryError); snapshot.has_value()) {
+        lines << toQString(snapshot->summary());
+    } else if (!telemetryError.empty()) {
+        lines << toQString(telemetryError);
+    }
     const QString summary = lines.join('\n');
     appendLog("Backend probe:\n" + summary);
     QMessageBox::information(this, "Backend Probe", summary);

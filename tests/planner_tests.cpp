@@ -38,10 +38,16 @@ int indexOf(const std::vector<EnhancementStage>& v, StageKind kind) {
 
 void testInterpolationLast() {
     PipelinePlanner planner;
-    const auto ordered = planner.plan({stage(StageKind::Interpolate), stage(StageKind::Sharpen), stage(StageKind::Upscale)});
+    const auto ordered = planner.plan({
+        stage(StageKind::Interpolate),
+        stage(StageKind::Stereo3D),
+        stage(StageKind::Sharpen),
+        stage(StageKind::Upscale)});
 
     check(!ordered.empty(), "planned pipeline should not be empty");
     check(ordered.back().kind == StageKind::Interpolate, "interpolate must execute last");
+    check(ordered[ordered.size() - 2].kind == StageKind::Stereo3D,
+          "stereo_3d must execute immediately before interpolate");
 }
 
 void testRestoreBeforeUpscaleAndSharpen() {
@@ -106,6 +112,126 @@ void testCatalogIncludesRequestedUpscaleModels() {
     check(ncnnUpscalerCount >= 5, "expected multiple NCNN upscale models in catalog");
 }
 
+void testBackendPreferredModelSelection() {
+    const auto* ncnnPreferred =
+        ave::preferredBackendModelForStage(StageKind::Upscale, ave::BackendType::NcnnVulkan);
+    check(ncnnPreferred != nullptr, "NCNN should expose a preferred upscale model");
+    check(ncnnPreferred->id == "realesrgan-x4plus-ncnn",
+          "NCNN should prefer the general non-animation upscale model");
+    check(ncnnPreferred->sourceFormat == ave::ModelFormat::NcnnBin,
+          "NCNN preferred model must be an NCNN model");
+    check(!ave::modelLooksAnimationFocused(*ncnnPreferred),
+          "NCNN preferred general model should not be animation-focused");
+
+    const auto* migraphxPreferred =
+        ave::preferredBackendModelForStage(StageKind::Upscale, ave::BackendType::MiGraphX);
+    check(migraphxPreferred != nullptr, "MiGraphX should expose a preferred upscale model");
+    check(migraphxPreferred->id == "realesrgan-x4-general",
+          "MiGraphX should retain the general ONNX upscale default");
+
+    const auto* ncnnDenoise =
+        ave::preferredBackendModelForStage(StageKind::Denoise, ave::BackendType::NcnnVulkan);
+    check(ncnnDenoise == nullptr,
+          "NCNN should not advertise a default denoise model when the catalog has no NCNN entry");
+}
+
+void testCatalogIncludesStereoDepthModels() {
+    bool sawDaV2Small = false;
+    bool sawDaV2Base = false;
+    bool sawDaV2Large = false;
+    bool sawDistillSmall = false;
+    bool sawDepthAnythingFp32Variant = false;
+
+    int stereoModelCount = 0;
+    for (const auto& entry : ave::builtinModelCatalog()) {
+        if (entry.stage != StageKind::Stereo3D) {
+            continue;
+        }
+        ++stereoModelCount;
+        check(entry.sourceFormat == ave::ModelFormat::Onnx,
+              "stereo_3d catalog entries should be ONNX");
+        check(!entry.downloadUrl.empty(),
+              "stereo_3d catalog entries must provide a download URL");
+        if (entry.id == "depth-anything-v2-small-fp16") {
+            sawDaV2Small = true;
+        } else if (entry.id == "depth-anything-v2-base-fp16") {
+            sawDaV2Base = true;
+        } else if (entry.id == "depth-anything-v2-large-fp16") {
+            sawDaV2Large = true;
+        } else if (entry.id == "distill-any-depth-small") {
+            sawDistillSmall = true;
+        } else if (entry.id.find("depth-anything-v2-") == 0 &&
+                   entry.id.find("-fp32") != std::string::npos) {
+            sawDepthAnythingFp32Variant = true;
+        }
+    }
+
+    check(sawDaV2Small, "Depth Anything V2 Small fp16 stereo model missing");
+    check(sawDaV2Base, "Depth Anything V2 Base fp16 stereo model missing");
+    check(sawDaV2Large, "Depth Anything V2 Large fp16 stereo model missing");
+    check(sawDistillSmall, "Distill Any Depth Small stereo model missing");
+    check(!sawDepthAnythingFp32Variant,
+          "Depth Anything fp32 stereo variants should not be exposed in the catalog");
+    check(stereoModelCount >= 6, "expected multiple stereo depth models in catalog");
+}
+
+void testModelFamilyCapabilities() {
+    const auto* clearReality = ave::catalogEntryById("clearreality-x4-denoise");
+    check(clearReality != nullptr, "clearreality catalog entry missing");
+    const auto clearRealityCaps = ave::modelCapabilities(*clearReality);
+    check(clearRealityCaps.size() >= 3, "clearreality family should expose multiple capabilities");
+    check(ave::modelCanFuseRequestedCapabilities(
+              *clearReality,
+              {StageKind::Denoise, StageKind::Deblur, StageKind::Upscale}),
+          "clearreality family should be fusible for its full declared capability set");
+    check(!ave::modelCanFuseRequestedCapabilities(
+               *clearReality,
+               {StageKind::Denoise, StageKind::Upscale}),
+          "non-selective families should not fuse partial capability subsets");
+
+    ave::ModelEntry customSelective = *clearReality;
+    customSelective.supportsSelectiveCapabilities = true;
+    check(ave::modelCanFuseRequestedCapabilities(
+              customSelective,
+              {StageKind::Denoise, StageKind::Upscale}),
+          "selective families should fuse partial capability subsets");
+}
+
+void testScopedStageParamHelpers() {
+    EnhancementStage fused;
+    fused.kind = StageKind::Upscale;
+    fused.params["width"] = std::int64_t{3840};
+    fused.params[ave::scopedStageParamKey(StageKind::Denoise, "strength")] = 0.85;
+    fused.params[ave::scopedStageParamKey(StageKind::ColorFix, "gamma")] = 1.1;
+    fused.params[ave::scopedStageParamKey(StageKind::Stereo3D, "depth_aa")] = std::string("true");
+    fused.params[ave::scopedStageParamKey(StageKind::Stereo3D, "format")] = std::string("full_sbs");
+
+    double strength = 0.0;
+    check(ave::tryGetDouble(fused, StageKind::Denoise, "strength", strength),
+          "scoped fused strength should be readable");
+    check(strength > 0.84 && strength < 0.86, "scoped fused strength value mismatch");
+
+    double width = 0.0;
+    check(ave::tryGetDouble(fused, StageKind::Upscale, "width", width),
+          "plain primary width should still be readable through scoped accessor");
+    check(width == 3840.0, "plain primary width mismatch");
+
+    bool depthAa = false;
+    check(ave::tryGetBool(fused, StageKind::Stereo3D, "depth_aa", depthAa),
+          "scoped fused bool should be readable");
+    check(depthAa, "scoped fused bool mismatch");
+
+    std::string format;
+    check(ave::tryGetString(fused, StageKind::Stereo3D, "format", format),
+          "scoped fused string should be readable");
+    check(format == "full_sbs", "scoped fused string mismatch");
+
+    std::string widthString;
+    check(ave::tryGetString(fused, StageKind::Upscale, "width", widthString),
+          "numeric values should stringify through scoped accessor");
+    check(widthString == "3840", "scoped fused numeric string mismatch");
+}
+
 }  // namespace
 
 int main() {
@@ -113,5 +239,9 @@ int main() {
     testRestoreBeforeUpscaleAndSharpen();
     testStableWithinCategory();
     testCatalogIncludesRequestedUpscaleModels();
+    testBackendPreferredModelSelection();
+    testCatalogIncludesStereoDepthModels();
+    testModelFamilyCapabilities();
+    testScopedStageParamHelpers();
     return 0;
 }

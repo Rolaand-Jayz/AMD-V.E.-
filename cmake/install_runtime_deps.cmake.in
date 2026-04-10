@@ -1,0 +1,184 @@
+if(POLICY CMP0207)
+    cmake_policy(SET CMP0207 NEW)
+endif()
+
+function(_ave_resolve_install_path out_var relative_or_absolute)
+    if(IS_ABSOLUTE "${relative_or_absolute}")
+        set(${out_var} "$ENV{DESTDIR}${relative_or_absolute}" PARENT_SCOPE)
+    else()
+        set(${out_var} "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${relative_or_absolute}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_ave_is_under_prefix path prefix out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+    if("${prefix}" STREQUAL "")
+        return()
+    endif()
+    file(REAL_PATH "${path}" _ave_real_path)
+    file(REAL_PATH "${prefix}" _ave_real_prefix)
+    string(LENGTH "${_ave_real_prefix}" _ave_prefix_length)
+    if(_ave_prefix_length EQUAL 0)
+        return()
+    endif()
+    string(SUBSTRING "${_ave_real_path}" 0 ${_ave_prefix_length} _ave_candidate_prefix)
+    if(_ave_candidate_prefix STREQUAL _ave_real_prefix)
+        set(${out_var} TRUE PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(_ave_install_shared_library_chain destination dep)
+    if(NOT EXISTS "${dep}")
+        return()
+    endif()
+
+    get_filename_component(_ave_dep_dir "${dep}" DIRECTORY)
+    get_filename_component(_ave_dep_name "${dep}" NAME)
+    file(REAL_PATH "${dep}" _ave_dep_real)
+
+    set(_ave_candidates "${dep}")
+    if(_ave_dep_name MATCHES "^(.+\\.so)(\\..*)?$")
+        set(_ave_dep_stem "${CMAKE_MATCH_1}")
+        file(GLOB _ave_globbed_candidates
+            LIST_DIRECTORIES false
+            "${_ave_dep_dir}/${_ave_dep_stem}*")
+        foreach(_ave_candidate IN LISTS _ave_globbed_candidates)
+            file(REAL_PATH "${_ave_candidate}" _ave_candidate_real)
+            if(_ave_candidate_real STREQUAL _ave_dep_real)
+                list(APPEND _ave_candidates "${_ave_candidate}")
+            endif()
+        endforeach()
+    endif()
+    list(REMOVE_DUPLICATES _ave_candidates)
+
+    file(INSTALL
+        DESTINATION "${destination}"
+        TYPE SHARED_LIBRARY
+        FOLLOW_SYMLINK_CHAIN
+        FILES ${_ave_candidates})
+endfunction()
+
+_ave_resolve_install_path(_ave_runtime_out "@CMAKE_INSTALL_LIBDIR@/ave/runtime")
+_ave_resolve_install_path(_ave_cli_executable "@CMAKE_INSTALL_LIBEXECDIR@/ave/ave")
+set(_ave_executables "${_ave_cli_executable}")
+set(_ave_runtime_seed_libs "@AVE_RUNTIME_BUNDLE_SEED_LIBS@")
+list(FILTER _ave_runtime_seed_libs EXCLUDE REGEX "^$")
+list(REMOVE_DUPLICATES _ave_runtime_seed_libs)
+
+if("@AVE_INSTALL_HAS_GUI_TARGET@" STREQUAL "TRUE")
+    _ave_resolve_install_path(_ave_gui_executable "@CMAKE_INSTALL_LIBEXECDIR@/ave/ave_gui")
+    list(APPEND _ave_executables "${_ave_gui_executable}")
+endif()
+
+file(MAKE_DIRECTORY "${_ave_runtime_out}")
+
+set(_ave_runtime_scan_seeds "")
+foreach(_ave_seed IN LISTS _ave_runtime_seed_libs)
+    if(NOT EXISTS "${_ave_seed}")
+        continue()
+    endif()
+
+    set(_ave_skip_seed FALSE)
+    if("@AVE_INSTALL_BUNDLED_MIGRAPHX@" STREQUAL "ON" AND NOT "@AVE_BUNDLED_MIGRAPHX_PREFIX@" STREQUAL "")
+        _ave_is_under_prefix("${_ave_seed}" "@AVE_BUNDLED_MIGRAPHX_PREFIX@" _ave_skip_seed)
+    endif()
+    if(NOT _ave_skip_seed)
+        list(APPEND _ave_runtime_scan_seeds "${_ave_seed}")
+    endif()
+endforeach()
+
+set(_ave_runtime_dependency_args
+    EXECUTABLES ${_ave_executables}
+    RESOLVED_DEPENDENCIES_VAR _ave_resolved_deps
+    UNRESOLVED_DEPENDENCIES_VAR _ave_unresolved_deps)
+if(_ave_runtime_scan_seeds)
+    list(APPEND _ave_runtime_dependency_args
+        LIBRARIES ${_ave_runtime_scan_seeds})
+endif()
+set(_ave_runtime_pre_exclude_regexes "")
+set(_ave_runtime_post_exclude_regexes
+    ".*/ld-linux[^/]*\\.so(\\.[0-9]+)*$"
+    ".*/libc\\.so(\\.[0-9]+)*$"
+    ".*/libm\\.so(\\.[0-9]+)*$"
+    ".*/libpthread\\.so(\\.[0-9]+)*$"
+    ".*/librt\\.so(\\.[0-9]+)*$"
+    ".*/libdl\\.so(\\.[0-9]+)*$"
+    ".*/libutil\\.so(\\.[0-9]+)*$"
+    ".*/libresolv\\.so(\\.[0-9]+)*$"
+    ".*/libnss_.*\\.so(\\.[0-9]+)*$"
+    ".*/libanl\\.so(\\.[0-9]+)*$")
+if("@AVE_INSTALL_BUNDLED_MIGRAPHX@" STREQUAL "ON")
+    list(APPEND _ave_runtime_pre_exclude_regexes
+        ".*/lib/ave/migraphx/.*")
+    list(APPEND _ave_runtime_post_exclude_regexes
+        ".*/lib/ave/migraphx/.*")
+    list(APPEND _ave_runtime_pre_exclude_regexes
+        ".*/libmigraphx[^/]*\\.so(\\.[0-9]+)*$"
+        ".*/libMIOpen\\.so(\\.[0-9]+)*$"
+        ".*/libhiprtc\\.so(\\.[0-9]+)*$"
+        ".*/librocblas\\.so(\\.[0-9]+)*$"
+        ".*/libamdhip64\\.so(\\.[0-9]+)*$"
+        ".*/libhipblaslt\\.so(\\.[0-9]+)*$"
+        ".*/libamd_comgr\\.so(\\.[0-9]+)*$"
+        ".*/libroctx64\\.so(\\.[0-9]+)*$"
+        ".*/librccl\\.so(\\.[0-9]+)*$"
+        ".*/libhsa-runtime64\\.so(\\.[0-9]+)*$"
+        ".*/opt/rocm/.*")
+    list(APPEND _ave_runtime_post_exclude_regexes
+        ".*/libmigraphx[^/]*\\.so(\\.[0-9]+)*$"
+        ".*/libMIOpen\\.so(\\.[0-9]+)*$"
+        ".*/libhiprtc\\.so(\\.[0-9]+)*$"
+        ".*/librocblas\\.so(\\.[0-9]+)*$"
+        ".*/libamdhip64\\.so(\\.[0-9]+)*$"
+        ".*/libhipblaslt\\.so(\\.[0-9]+)*$"
+        ".*/libamd_comgr\\.so(\\.[0-9]+)*$"
+        ".*/libroctx64\\.so(\\.[0-9]+)*$"
+        ".*/librccl\\.so(\\.[0-9]+)*$"
+        ".*/libhsa-runtime64\\.so(\\.[0-9]+)*$")
+endif()
+list(APPEND _ave_runtime_dependency_args
+    PRE_EXCLUDE_REGEXES ${_ave_runtime_pre_exclude_regexes}
+    POST_EXCLUDE_REGEXES ${_ave_runtime_post_exclude_regexes})
+
+file(GET_RUNTIME_DEPENDENCIES ${_ave_runtime_dependency_args})
+
+set(_ave_copied_runtime_deps 0)
+foreach(_ave_seed IN LISTS _ave_runtime_seed_libs)
+    if(NOT EXISTS "${_ave_seed}")
+        continue()
+    endif()
+
+    set(_ave_skip_dep FALSE)
+    if("@AVE_INSTALL_BUNDLED_MIGRAPHX@" STREQUAL "ON" AND NOT "@AVE_BUNDLED_MIGRAPHX_PREFIX@" STREQUAL "")
+        _ave_is_under_prefix("${_ave_seed}" "@AVE_BUNDLED_MIGRAPHX_PREFIX@" _ave_skip_dep)
+    endif()
+    if(_ave_skip_dep)
+        continue()
+    endif()
+
+    _ave_install_shared_library_chain("${_ave_runtime_out}" "${_ave_seed}")
+endforeach()
+
+foreach(_ave_dep IN LISTS _ave_resolved_deps)
+    if(NOT EXISTS "${_ave_dep}")
+        continue()
+    endif()
+
+    set(_ave_skip_dep FALSE)
+    if("@AVE_INSTALL_BUNDLED_MIGRAPHX@" STREQUAL "ON" AND NOT "@AVE_BUNDLED_MIGRAPHX_PREFIX@" STREQUAL "")
+        _ave_is_under_prefix("${_ave_dep}" "@AVE_BUNDLED_MIGRAPHX_PREFIX@" _ave_skip_dep)
+    endif()
+    if(_ave_skip_dep)
+        continue()
+    endif()
+
+    _ave_install_shared_library_chain("${_ave_runtime_out}" "${_ave_dep}")
+    math(EXPR _ave_copied_runtime_deps "${_ave_copied_runtime_deps} + 1")
+endforeach()
+
+if(_ave_unresolved_deps)
+    list(JOIN _ave_unresolved_deps ", " _ave_unresolved_text)
+    message(WARNING "Unresolved runtime dependencies while bundling the app: ${_ave_unresolved_text}")
+endif()
+
+message(STATUS "Bundled ${_ave_copied_runtime_deps} runtime shared libraries into ${_ave_runtime_out}")

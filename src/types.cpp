@@ -39,6 +39,8 @@ std::string toString(StageKind kind) {
             return "upscale";
         case StageKind::Sharpen:
             return "sharpen";
+        case StageKind::Stereo3D:
+            return "stereo_3d";
         case StageKind::Interpolate:
             return "interpolate";
     }
@@ -64,6 +66,12 @@ std::optional<StageKind> stageKindFromString(const std::string& value) {
         {"color_correction", StageKind::ColorFix},
         {"upscale", StageKind::Upscale},
         {"sharpen", StageKind::Sharpen},
+        {"stereo_3d", StageKind::Stereo3D},
+        {"stereo3d", StageKind::Stereo3D},
+        {"stereo", StageKind::Stereo3D},
+        {"sbs", StageKind::Stereo3D},
+        {"3d_sbs", StageKind::Stereo3D},
+        {"2d_to_3d", StageKind::Stereo3D},
         {"interpolate", StageKind::Interpolate},
         {"interpolation", StageKind::Interpolate},
         {"frame_interpolation", StageKind::Interpolate},

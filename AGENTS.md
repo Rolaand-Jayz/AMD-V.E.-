@@ -11,6 +11,13 @@ AMD-exclusive C++ video enhancement pipeline. No Python, no CUDA, no NVIDIA.
 - **Fallback backend**: NCNN Vulkan - Vulkan-accelerated inference
 - **Always available**: FFmpeg filter chain - no model required
 
+## No-stub policy
+
+- Stubs, placeholder behavior, fake completion paths, mock implementations presented as real, TODO-backed user flows, and `NotImplemented`-style stand-ins are forbidden in app code.
+- This same rule applies to repo guidance artifacts too: instructions, prompts, agents, skills, plans, and remediation docs must not normalize or recommend stub use as an acceptable path.
+- If a feature cannot be implemented end-to-end, state the blocker plainly instead of pretending the feature exists.
+- When auditing for stubs, document them accurately; do not silently convert the audit into speculative fixes unless the task is specifically remediation.
+
 ## Essential Commands
 
 ### Build
@@ -56,7 +63,7 @@ ctest --test-dir build --output-on-failure
 ## Build Targets
 
 | Target | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `ave` | CLI executable |
 | `ave_gui` | Qt6 GUI executable (optional, requires Qt6) |
 | `ave_core` | Core static library |
@@ -64,16 +71,16 @@ ctest --test-dir build --output-on-failure
 
 ## CMake Options
 
-| Option               | Default | Description                                                    |
-| -------------------- | ------- | -------------------------------------------------------------- |
-| `AVE_STRICT_WARNINGS`| ON      | Enable `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion` |
-| `AVE_BUILD_GUI`      | ON      | Build Qt6 GUI                                                  |
-| `AVE_HAVE_CURL`      | ON      | Enable libcurl for model downloads                             |
-| `AVE_HAVE_VULKAN`    | ON      | Enable Vulkan runtime (compute shaders, interop)               |
-| `AVE_HAVE_MIGRAPHX`  | OFF     | Enable MiGraphX ROCm runtime — **always pass ON**              |
-| `AVE_HAVE_HIP`       | OFF     | Enable HIP GPU headers (ROCm) — **always pass ON**             |
-| `AVE_HAVE_NCNN`      | OFF     | Enable NCNN Vulkan runtime — **always pass ON**                |
-| `AVE_HAVE_ROCTX`     | OFF     | Enable ROCTx markers for rocprof tracing                       |
+| Option | Default | Description |
+| --- | --- | --- |
+| `AVE_STRICT_WARNINGS` | ON | Enable `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion` |
+| `AVE_BUILD_GUI` | ON | Build Qt6 GUI |
+| `AVE_HAVE_CURL` | ON | Enable libcurl for model downloads |
+| `AVE_HAVE_VULKAN` | ON | Enable Vulkan runtime (compute shaders, interop) |
+| `AVE_HAVE_MIGRAPHX` | OFF | Enable MiGraphX ROCm runtime — **always pass ON** |
+| `AVE_HAVE_HIP` | OFF | Enable HIP GPU headers (ROCm) — **always pass ON** |
+| `AVE_HAVE_NCNN` | OFF | Enable NCNN Vulkan runtime — **always pass ON** |
+| `AVE_HAVE_ROCTX` | OFF | Enable ROCTx markers for rocprof tracing |
 
 > CMake defaults for MIGRAPHX, HIP, and NCNN are OFF in `CMakeLists.txt`, but
 > **agents must always explicitly set them ON** in the cmake configure command.
@@ -204,7 +211,7 @@ Backend code uses preprocessor guards:
 #ifdef AVE_HAVE_NCNN
     // Full implementation
 #else
-    // Stub/fallback implementation
+  // Explicitly report the feature as unavailable via a real error path
 #endif
 ```
 
@@ -278,7 +285,7 @@ Models stored in `~/.local/share/ave/models/`:
 | ------------- | ------------------------------------- |
 | `downloaded/` | Raw ONNX / PyTorch source files       |
 | `migraphx/`   | MiGraphX `.mxr` compiled programs     |
-| `optimised/`  | Hardware-optimised compiled programs   |
+| `optimised/`  | Hardware-optimised compiled programs  |
 
 ## Testing
 

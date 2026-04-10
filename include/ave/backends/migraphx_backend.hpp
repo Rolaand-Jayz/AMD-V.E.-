@@ -98,9 +98,10 @@ class MiGraphXBackend final : public IAcceleratorBackend {
     //   Error     — fatal failure.
     StageResult runStage(const EnhancementStage& stage, std::string& error) override;
 
-    // Process a directory of PNG frames through the loaded MiGraphX
-    // program.  Uses CPU staging (degraded mode) until VulkanRuntime
-    // integration is complete.
+    // Process a video through the loaded MiGraphX program. The shared frame
+    // source can now preserve Vulkan hardware frames until they reach the
+    // backend boundary, but tensor staging still falls back to host RGB
+    // conversion unless the future Vulkan/HIP interop path is enabled.
     StageResult processVideoFile(
         const EnhancementStage& stage,
         const std::string& inputVideo,

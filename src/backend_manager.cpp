@@ -10,6 +10,7 @@
 #include "ave/backends/vapoursynth_backend.hpp"
 #include "ave/backends/vulkan_compute_backend.hpp"
 #include "ave/interop_bridge.hpp"
+#include "ave/runtime_diagnostics.hpp"
 
 namespace ave {
 
@@ -54,8 +55,13 @@ std::vector<BackendInfo> BackendManager::probeBackends() const {
     return infos;
 }
 
+RuntimeDiagnosticsReport BackendManager::runtimeDiagnostics() const {
+    return collectRuntimeDiagnostics();
+}
+
 std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType requested,
                                                                     std::string& selectionSummary) const {
+    const RuntimeDiagnosticsReport diagnostics = runtimeDiagnostics();
     auto selectMigraphx = [&selectionSummary]() -> std::unique_ptr<IAcceleratorBackend> {
         selectionSummary = "Selected MiGraphX (ROCm).";
         InteropBridge bridge;
@@ -134,6 +140,9 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
             std::ostringstream os;
             os << "MiGraphX unavailable: " << migraphxReason
                << " Falling back to Vulkan Compute.";
+            if (!diagnostics.migraphxReady) {
+                os << " Runtime diagnostics: " << diagnostics.summary();
+            }
             selectionSummary = os.str();
             return std::make_unique<VulkanComputeBackend>();
         }
@@ -145,6 +154,9 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
             os << "MiGraphX unavailable: " << migraphxReason
                << " Vulkan Compute unavailable: " << vkReason
                << " Falling back to NCNN Vulkan.";
+            if (!diagnostics.migraphxReady) {
+                os << " Runtime diagnostics: " << diagnostics.summary();
+            }
             selectionSummary = os.str();
             return std::make_unique<NcnnVulkanBackend>();
         }
@@ -154,6 +166,9 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
            << "MiGraphX: " << migraphxReason << " | "
            << "Vulkan Compute: " << vkReason << " | "
            << "NCNN Vulkan: " << ncnnReason;
+        if (!diagnostics.checks.empty()) {
+            os << " | Runtime diagnostics: " << diagnostics.summary();
+        }
         selectionSummary = os.str();
         return nullptr;
     }
