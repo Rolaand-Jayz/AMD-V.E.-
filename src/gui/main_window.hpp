@@ -88,6 +88,7 @@ class MainWindow final : public QMainWindow {
     void refreshActiveFilters();
     void refreshFilterExecutionSummary();
     void refreshCommandPreview();
+    void refreshActionReadiness();
     void updateFilterPresetDescription();
     void alignManualFilterSelection();
     void applySelectedFilterPreset();

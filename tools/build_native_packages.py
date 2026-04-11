@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-from __future__ import annotations
-
 import argparse
 import datetime as dt
 import hashlib
@@ -10,24 +8,39 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+from typing import Dict, List, Optional, Tuple
 
 
 PROJECT_SLUG = "amd-video-enhancer"
+AUR_PKGNAME = "amd-video-enhancer-bin"
 INSTALL_PREFIX = pathlib.Path("/opt/amd-video-enhancer")
-EXPERIMENTAL_NOTICE = (
-    "Open alpha. Only tested on Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE. "
-    "All other distro packages are experimental."
+RELEASE_NOTICE = (
+    "Beta release. Primarily verified on Arch Linux on a Ryzen 7 7800X3D + Radeon RX 7900 GRE. "
+    "Other distro packages remain preview builds and should be validated on the target system."
 )
+DEFAULT_RELEASE_BASE_URL = "https://github.com/Rolaand-Jayz/AMD-V.E.-/releases/download/{tag}"
 
 
-def run(*command: str, cwd: pathlib.Path | None = None, env: dict[str, str] | None = None) -> None:
+def run(*command: str, cwd: Optional[pathlib.Path] = None, env: Optional[Dict[str, str]] = None) -> None:
     subprocess.run(command, check=True, cwd=cwd, env=env)
 
 
-def capture(*command: str, suppress_stderr: bool = False) -> str:
+def capture(
+    *command: str,
+    suppress_stderr: bool = False,
+    cwd: Optional[pathlib.Path] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
     stderr = subprocess.DEVNULL if suppress_stderr else None
-    return subprocess.check_output(command, text=True, stderr=stderr).strip()
+    return subprocess.check_output(
+        command,
+        universal_newlines=True,
+        stderr=stderr,
+        cwd=cwd,
+        env=env,
+    ).strip()
 
 
 def file_digest(path: pathlib.Path, algorithm: str) -> str:
@@ -36,6 +49,13 @@ def file_digest(path: pathlib.Path, algorithm: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_sha256_sidecar(path: pathlib.Path) -> pathlib.Path:
+    digest = file_digest(path, "sha256")
+    sidecar = path.with_name(path.name + ".sha256")
+    write_text(sidecar, f"{digest}  {path.name}\n")
+    return sidecar
 
 
 def git_version() -> str:
@@ -49,8 +69,19 @@ def git_version() -> str:
             short = capture("git", "rev-parse", "--short", "HEAD")
         except (FileNotFoundError, subprocess.CalledProcessError):
             short = os.environ.get("AVE_VERSION_FALLBACK_SHA", "nogit")
-        date = dt.datetime.now(dt.UTC).strftime("%Y%m%d")
-        return f"0.1.0-alpha.1.git{date}.{short}"
+        date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
+        return f"0.1.0-beta.1.git{date}.{short}"
+
+
+def create_tar_gz_from_directory_contents(source_dir: pathlib.Path, archive_path: pathlib.Path) -> None:
+    tar_executable = shutil.which("tar")
+    if tar_executable is not None:
+        run(tar_executable, "-C", str(source_dir), "-czf", str(archive_path), ".")
+        return
+
+    with tarfile.open(archive_path, "w:gz", dereference=False) as archive:
+        for entry in sorted(source_dir.iterdir(), key=lambda path: path.name):
+            archive.add(entry, arcname=entry.name, recursive=True)
 
 
 def ensure_payload_root(staged_root: pathlib.Path) -> pathlib.Path:
@@ -84,7 +115,7 @@ def deb_version(version: str) -> str:
     return version.replace("-alpha.", "~alpha").replace("-beta.", "~beta")
 
 
-def rpm_version_release(version: str) -> tuple[str, str]:
+def rpm_version_release(version: str) -> Tuple[str, str]:
     if "-alpha." in version:
         base, suffix = version.split("-alpha.", 1)
         return base, f"0.alpha.{suffix}.1"
@@ -96,6 +127,14 @@ def rpm_version_release(version: str) -> tuple[str, str]:
 
 def arch_pkgver(version: str) -> str:
     return version.replace("-", "")
+
+
+def release_tag_for(version: str) -> str:
+    return f"v{version}"
+
+
+def render_release_base_url(template: str, tag: str) -> str:
+    return template.format(tag=tag).rstrip("/")
 
 
 def write_text(path: pathlib.Path, content: str) -> None:
@@ -115,7 +154,7 @@ def write_launcher_script(path: pathlib.Path, command_name: str) -> None:
     path.chmod(0o755)
 
 
-def render_template(template_path: pathlib.Path, values: dict[str, str]) -> str:
+def render_template(template_path: pathlib.Path, values: Dict[str, str]) -> str:
     content = template_path.read_text(encoding="utf-8")
     for key, value in values.items():
         content = content.replace(f"@{key}@", value)
@@ -138,7 +177,7 @@ def create_deb(staged_root: pathlib.Path, output_dir: pathlib.Path, version: str
         })
         write_text(control_dir / "control", control)
 
-        md5_lines: list[str] = []
+        md5_lines = []  # type: List[str]
         for file_path in sorted(package_root.rglob("*")):
             if not file_path.is_file():
                 continue
@@ -156,7 +195,6 @@ def create_deb(staged_root: pathlib.Path, output_dir: pathlib.Path, version: str
             "--build",
             "--uniform-compression",
             "-Zzstd",
-            "-z10",
             str(package_root),
             str(artifact),
         )
@@ -178,7 +216,7 @@ def create_rpm(staged_root: pathlib.Path, output_dir: pathlib.Path, version: str
         filelist_name = f"{PROJECT_SLUG}-{distro_label}.files"
         filelist_path = topdir / "SOURCES" / filelist_name
 
-        file_lines: list[str] = []
+        file_lines = []  # type: List[str]
         for path in sorted(staged_root.rglob("*")):
             if path.is_dir():
                 continue
@@ -191,7 +229,7 @@ def create_rpm(staged_root: pathlib.Path, output_dir: pathlib.Path, version: str
             "RPM_VERSION": rpm_ver,
             "RPM_RELEASE": rpm_rel,
             "RPM_FILELIST_NAME": filelist_name,
-            "RPM_CHANGELOG_DATE": dt.datetime.now(dt.UTC).strftime("%a %b %d %Y"),
+            "RPM_CHANGELOG_DATE": dt.datetime.now(dt.timezone.utc).strftime("%a %b %d %Y"),
             "PACKAGE_MAINTAINER": maintainer,
         })
         spec_path = topdir / "SPECS" / "amd-video-enhancer.spec"
@@ -242,6 +280,59 @@ def create_arch(staged_root: pathlib.Path, output_dir: pathlib.Path, version: st
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def create_arch_aur_handoff(
+    staged_root: pathlib.Path,
+    output_dir: pathlib.Path,
+    version: str,
+    maintainer: str,
+    release_tag: str,
+    release_base_url: str,
+) -> List[pathlib.Path]:
+    if shutil.which("makepkg") is None:
+        raise RuntimeError("makepkg is required to generate AUR handoff metadata.")
+
+    payload_archive = output_dir / f"{PROJECT_SLUG}-{version}-archlinux-x86_64-rootfs.tar.gz"
+    if payload_archive.exists():
+        payload_archive.unlink()
+    create_tar_gz_from_directory_contents(staged_root, payload_archive)
+    payload_sha256 = file_digest(payload_archive, "sha256")
+
+    workdir = pathlib.Path(tempfile.mkdtemp(prefix="ave-aur-handoff."))
+    try:
+        template = pathlib.Path(__file__).resolve().parent.parent / "packaging" / "arch" / "PKGBUILD.aur-bin.in"
+        pkgbuild = render_template(template, {
+            "AUR_PKGNAME": AUR_PKGNAME,
+            "ARCH_PKGVER": arch_pkgver(version),
+            "ARCH_PKGREL": "1",
+            "PACKAGE_MAINTAINER": maintainer,
+            "UPSTREAM_VERSION": version,
+            "RELEASE_TAG": release_tag,
+            "PAYLOAD_ARCHIVE_NAME": payload_archive.name,
+            "PAYLOAD_URL": f"{release_base_url}/{payload_archive.name}",
+            "PAYLOAD_SHA256": payload_sha256,
+        })
+        write_text(workdir / "PKGBUILD", pkgbuild)
+        srcinfo = capture("makepkg", "--printsrcinfo", cwd=workdir)
+        write_text(workdir / ".SRCINFO", srcinfo + "\n")
+        write_text(
+            workdir / "AUR_SUBMIT_NOTES.txt",
+            (
+                f"Submit the contents of this bundle to the AUR as '{AUR_PKGNAME}'.\n"
+                f"The PKGBUILD expects the release asset '{payload_archive.name}' to be attached to tag '{release_tag}'.\n"
+                "This is a binary AUR handoff: it installs the app-private payload under /opt/amd-video-enhancer\n"
+                "and keeps the public entrypoints thin under /usr/bin.\n"
+            ),
+        )
+
+        aur_bundle = output_dir / f"{AUR_PKGNAME}-{arch_pkgver(version)}-aur.tar.gz"
+        if aur_bundle.exists():
+            aur_bundle.unlink()
+        create_tar_gz_from_directory_contents(workdir, aur_bundle)
+        return [payload_archive, aur_bundle]
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build native distro packages from a staged release root.")
     parser.add_argument("--staged-root", type=pathlib.Path, required=True)
@@ -252,21 +343,42 @@ def main() -> int:
         help="Comma-separated distro targets to emit.",
     )
     parser.add_argument("--version")
+    parser.add_argument("--release-tag")
+    parser.add_argument(
+        "--release-base-url",
+        default=DEFAULT_RELEASE_BASE_URL,
+        help="Release download URL template or absolute base URL used for generated AUR metadata. Use {tag} in the template if desired.",
+    )
     parser.add_argument("--maintainer", default="Rolaand-Jayz <opensource@rolaandjayz.invalid>")
     args = parser.parse_args()
     if args.version is None:
         args.version = git_version()
+    if args.release_tag is None:
+        args.release_tag = release_tag_for(args.version)
+    release_base_url = render_release_base_url(args.release_base_url, args.release_tag)
 
     staged_root = args.staged_root.resolve()
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     ensure_payload_root(staged_root)
 
-    artifacts: list[pathlib.Path] = []
+    artifacts = []  # type: List[pathlib.Path]
     targets = [entry.strip() for entry in args.targets.split(",") if entry.strip()]
     for target in targets:
         if target == "archlinux":
             artifacts.append(create_arch(staged_root, output_dir, args.version, args.maintainer))
+            continue
+        if target in ("archlinux-aur", "aur"):
+            artifacts.extend(
+                create_arch_aur_handoff(
+                    staged_root,
+                    output_dir,
+                    args.version,
+                    args.maintainer,
+                    args.release_tag,
+                    release_base_url,
+                )
+            )
             continue
         if target.startswith("ubuntu-") or target.startswith("debian-"):
             artifacts.append(create_deb(staged_root, output_dir, args.version, target, args.maintainer))
@@ -276,8 +388,12 @@ def main() -> int:
             continue
         raise RuntimeError(f"Unsupported target '{target}'.")
 
-    print(EXPERIMENTAL_NOTICE)
+    sidecars = []  # type: List[pathlib.Path]
     for artifact in artifacts:
+        sidecars.append(write_sha256_sidecar(artifact))
+
+    print(RELEASE_NOTICE)
+    for artifact in [*artifacts, *sidecars]:
         print(artifact)
     return 0
 

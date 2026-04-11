@@ -16,6 +16,8 @@ option(AVE_BUILD_GUI         "Build Qt desktop GUI"                  ON)
 option(AVE_HAVE_CURL         "Enable libcurl for model downloads"    ON)
 option(AVE_HAVE_MIGRAPHX     "Enable MiGraphX ROCm runtime"          OFF)
 option(AVE_HAVE_HIP          "Enable HIP GPU headers (ROCm)"         OFF)
+option(AVE_HAVE_ONNXRUNTIME_ROCM
+    "Enable ONNX Runtime ROCm/HIP fallback runtime"               ON)
 option(AVE_HAVE_NCNN         "Enable NCNN Vulkan runtime"            OFF)
 option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # ROCTx: zero-overhead stage markers for rocprof --roctx-trace integration.
@@ -133,6 +135,24 @@ if(AVE_HAVE_HIP)
 endif()
 
 # ─────────────────────────────────────────────────────────────────
+# Optional: ONNX Runtime ROCm/HIP fallback
+# ─────────────────────────────────────────────────────────────────
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime/onnxruntime_cxx_api.h
+        HINTS /usr/include /usr/local/include /opt/rocm/include)
+    find_library(ONNXRUNTIME_LIBRARY
+        NAMES onnxruntime
+        HINTS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/rocm/lib /opt/rocm/lib64)
+    if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+        message(WARNING "AVE_HAVE_ONNXRUNTIME_ROCM=ON but ONNX Runtime was not found; disabling.")
+        set(AVE_HAVE_ONNXRUNTIME_ROCM OFF)
+    else()
+        message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIBRARY}")
+    endif()
+endif()
+
+# ─────────────────────────────────────────────────────────────────
 # Optional: NCNN + Vulkan
 # ─────────────────────────────────────────────────────────────────
 if(AVE_HAVE_NCNN)
@@ -182,6 +202,9 @@ if(AVE_HAVE_MIGRAPHX)
 endif()
 if(AVE_HAVE_HIP)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_HIP)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    list(APPEND AVE_COMPILE_DEFS AVE_HAVE_ONNXRUNTIME_ROCM)
 endif()
 if(AVE_HAVE_NCNN)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_NCNN)
@@ -303,6 +326,7 @@ add_library(ave_core
     src/backends/glsl_shader_backend.cpp
     src/backends/migraphx_backend.cpp
     src/backends/ncnn_vulkan_backend.cpp
+    src/backends/rocm_hip_backend.cpp
     src/backends/vapoursynth_backend.cpp
     src/backends/vulkan_compute_backend.cpp
 )
@@ -327,6 +351,10 @@ if(AVE_HAVE_MIGRAPHX)
 endif()
 if(AVE_HAVE_HIP AND hip_FOUND)
     target_link_libraries(ave_core PUBLIC hip::host)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    target_include_directories(ave_core PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(ave_core PUBLIC ${ONNXRUNTIME_LIBRARY})
 endif()
 if(AVE_HAVE_NCNN AND ncnn_FOUND)
     target_link_libraries(ave_core PUBLIC ncnn)
@@ -487,6 +515,10 @@ target_include_directories(runtime_diagnostics_tests PRIVATE include)
 target_compile_definitions(runtime_diagnostics_tests PRIVATE ${AVE_COMPILE_DEFS})
 if(AVE_HAVE_HIP AND hip_FOUND)
     target_link_libraries(runtime_diagnostics_tests PRIVATE hip::host)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    target_include_directories(runtime_diagnostics_tests PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(runtime_diagnostics_tests PRIVATE ${ONNXRUNTIME_LIBRARY})
 endif()
 ave_add_warnings(runtime_diagnostics_tests)
 add_test(NAME runtime_diagnostics_tests COMMAND runtime_diagnostics_tests)
@@ -649,6 +681,24 @@ target_include_directories(interop_bridge_tests PRIVATE include)
 target_compile_definitions(interop_bridge_tests PRIVATE ${AVE_COMPILE_DEFS})
 ave_add_warnings(interop_bridge_tests)
 add_test(NAME interop_bridge_tests COMMAND interop_bridge_tests)
+
+set(AVE_INSTALL_DOC_DIR "${CMAKE_INSTALL_DATADIR}/doc/amd-video-enhancer")
+set(AVE_INSTALL_LICENSE_DIR "${CMAKE_INSTALL_DATADIR}/licenses/amd-video-enhancer")
+
+install(FILES
+    README.md
+    CHANGELOG.md
+    SECURITY.md
+    docs/BENCHMARKS.md
+    docs/PACKAGING.md
+    docs/RELEASING.md
+    DESTINATION ${AVE_INSTALL_DOC_DIR}
+)
+
+install(FILES
+    LICENSE
+    DESTINATION ${AVE_INSTALL_LICENSE_DIR}
+)
 
 install(TARGETS ave
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave

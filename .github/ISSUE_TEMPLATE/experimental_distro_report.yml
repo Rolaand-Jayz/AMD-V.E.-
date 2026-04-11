@@ -9,7 +9,7 @@ body:
       value: |
         ## Experimental distro report
 
-        **All non-Arch distro support is experimental in the current open alpha.**
+        **All non-Arch distro support is experimental in the current beta prerelease.**
 
         These reports are useful, but they need full environment detail.
   - type: input

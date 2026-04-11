@@ -35,8 +35,8 @@ namespace {
 
 // Check if ffmpeg was built with libplacebo support.
 bool ffmpegHasLibplacebo() {
-    const int rc = std::system(
-        "ffmpeg -hide_banner -filters 2>/dev/null | grep -q libplacebo");
+    const int rc = process_observer::normalizeShellExitCode(
+        std::system("ffmpeg -hide_banner -filters 2>/dev/null | grep -q libplacebo"));
     return rc == 0;
 }
 
@@ -408,7 +408,7 @@ StageResult GlslShaderBackend::processVideoFile(
 
         std::cout << "[glsl] Running mpv pipeline: "
                   << shaderPaths.size() << " shaders" << std::endl;
-        const int rc = std::system(cmd.str().c_str());
+        const int rc = process_observer::normalizeShellExitCode(std::system(cmd.str().c_str()));
         if (rc != 0) {
             error = "mpv shader processing exited with code " + std::to_string(rc);
             return StageResult::Error;

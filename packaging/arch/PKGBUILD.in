@@ -1,10 +1,10 @@
 pkgname=amd-video-enhancer
 pkgver=@ARCH_PKGVER@
 pkgrel=@ARCH_PKGREL@
-pkgdesc="Open-alpha AMD GPU video enhancement app with app-private bundled userspace dependencies"
+pkgdesc="Linux-first AMD GPU video enhancement app with app-private bundled userspace dependencies"
 arch=('x86_64')
 url='https://github.com/Rolaand-Jayz/AMD-V.E.-'
-license=('custom')
+license=('MIT')
 depends=('bash')
 optdepends=(
   'ffmpeg: fallback media tooling when using a source build instead of the bundled package payload'

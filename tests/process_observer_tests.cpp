@@ -90,6 +90,44 @@ void testCaptureCommandStdoutSupportsEnvOverrides() {
           "env-aware captureCommandStdout should apply environment overrides");
 }
 
+void testCommandExitCodesAreNormalized() {
+    std::vector<std::string> lines;
+    const int rc = ave::process_observer::runObservedCommand(
+        "printf 'gamma\\n'; exit 7",
+        [&](const std::string& line) {
+            lines.push_back(line);
+        });
+
+    check(rc == 7,
+          "runObservedCommand should normalize shell exit codes");
+    check(lines.size() == 1 && lines[0] == "gamma",
+          "runObservedCommand should preserve stdout when the command exits non-zero");
+
+    int exitCode = -1;
+    const auto output = ave::process_observer::captureCommandStdout(
+        "printf 'delta'; exit 9",
+        exitCode);
+    check(output.has_value(),
+          "captureCommandStdout should still capture output when the command exits non-zero");
+    check(exitCode == 9,
+          "captureCommandStdout should normalize shell exit codes");
+    check(*output == "delta",
+          "captureCommandStdout should preserve stdout for non-zero exits");
+}
+
+void testQuoteShellArgPreventsExpansion() {
+    const std::string tricky = "space $HOME `echo nope` 'quoted'";
+    int exitCode = -1;
+    const auto output = ave::process_observer::captureCommandStdout(
+        "printf '%s' " + ave::process_observer::quoteShellArg(tricky),
+        exitCode);
+
+    check(output.has_value(), "quoteShellArg test should capture output");
+    check(exitCode == 0, "quoteShellArg test command should succeed");
+    check(*output == tricky,
+          "quoteShellArg should preserve literal values without shell expansion");
+}
+
 void testCountVideoFramesHonorsPreviewLimit() {
     const auto inputPath = prepareTestClip();
     if (inputPath.empty()) {
@@ -108,6 +146,10 @@ void testCountVideoFramesHonorsPreviewLimit() {
 }
 
 void testResolveCommandPathAndSummarizeDiagnostics() {
+    const auto emptyPath = ave::process_observer::resolveCommandPath("");
+    check(!emptyPath.has_value(),
+          "resolveCommandPath should reject empty command names");
+
     const auto shPath = ave::process_observer::resolveCommandPath("sh");
     check(shPath.has_value(), "resolveCommandPath should find commands from PATH");
     check(!shPath->empty(), "resolved command path should not be empty");
@@ -123,6 +165,8 @@ int main() {
     testRunObservedCommandSplitsLines();
     testRunObservedCommandSupportsEnvOverrides();
     testCaptureCommandStdoutSupportsEnvOverrides();
+    testCommandExitCodesAreNormalized();
+    testQuoteShellArgPreventsExpansion();
     testCountVideoFramesHonorsPreviewLimit();
     testResolveCommandPathAndSummarizeDiagnostics();
     return 0;

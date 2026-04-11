@@ -2,7 +2,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <vector>
 
+#include "ave/model_catalog.hpp"
 #include "ave/model_manager.hpp"
 #include "ave/observability.hpp"
 
@@ -109,6 +111,14 @@ void testManifestValidationTracksSourceFingerprint() {
     check(ave::obs::validateArtifactManifest(manifestPath.string(), fields, mismatchReason),
           "matching manifest should validate");
 
+        auto overwritten = fields;
+        overwritten.precision = "fp32";
+        overwritten.runtimeFingerprint = "runtime-overwrite";
+        check(ave::obs::writeArtifactManifest(manifestPath.string(), overwritten, error),
+            "manifest overwrite should succeed");
+        check(ave::obs::validateArtifactManifest(manifestPath.string(), overwritten, mismatchReason),
+            "overwritten manifest should validate against the latest contents");
+
     auto mismatched = fields;
     mismatched.sourceFingerprint = "changed";
     check(!ave::obs::validateArtifactManifest(manifestPath.string(), mismatched, mismatchReason),
@@ -156,6 +166,19 @@ void testBestPathFallsBackWhenCompiledArtifactManifestIsMissing() {
     std::filesystem::remove_all(tempDir, ec);
 }
 
+void testAllModelsPreserveCatalogOrder() {
+    ave::ModelManager manager;
+    const auto allModels = manager.allModels();
+    const auto& catalog = ave::builtinModelCatalog();
+
+    check(allModels.size() == catalog.size(),
+          "allModels should return every built-in catalog entry");
+    for (std::size_t i = 0; i < catalog.size(); ++i) {
+        check(allModels[i].entry.id == catalog[i].id,
+              "allModels should preserve built-in catalog order");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -164,5 +187,6 @@ int main() {
     testPrewarmFailsCleanlyWithoutDownloadedModel();
     testManifestValidationTracksSourceFingerprint();
     testBestPathFallsBackWhenCompiledArtifactManifestIsMissing();
+    testAllModelsPreserveCatalogOrder();
     return 0;
 }

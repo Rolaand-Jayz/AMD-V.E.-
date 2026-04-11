@@ -79,7 +79,7 @@ bool runProbeScriptVS(const std::string& scriptName,
     const std::string probeCmd =
         "vspipe --outputindex 0 " + process_observer::quoteShellArg(probePath)
         + " - > /dev/null 2>&1";
-    const int rc = std::system(probeCmd.c_str());
+    const int rc = process_observer::normalizeShellExitCode(std::system(probeCmd.c_str()));
     std::error_code ec;
     std::filesystem::remove(probePath, ec);
     if (rc != 0) {
@@ -481,7 +481,7 @@ StageResult processVideoFileViaCustomScript(
         return StageResult::Error;
     }
     const std::int64_t totalFrames =
-        process_observer::countVideoFrames(inputVideo, opts.previewDurationSec);
+        process_observer::countVideoFrames(*info, opts.previewDurationSec);
     int previewFrames = 0;
     if (opts.previewDurationSec > 0.0) {
         previewFrames = std::max(
@@ -571,7 +571,7 @@ StageResult processVideoFileViaFrameSequence(
         return StageResult::Error;
     }
     const std::int64_t totalFrames =
-        process_observer::countVideoFrames(absoluteInputVideo, opts.previewDurationSec);
+        process_observer::countVideoFrames(*info, opts.previewDurationSec);
 
     // Create temp directories for frame I/O.
     const std::string tmpBase = "/tmp/ave_vs_" +
@@ -720,7 +720,7 @@ StageResult processVideoFileViaStreaming(
         return StageResult::Error;
     }
     const std::int64_t totalFrames =
-        process_observer::countVideoFrames(absoluteInputVideo, opts.previewDurationSec);
+        process_observer::countVideoFrames(*info, opts.previewDurationSec);
 
     int previewFrames = 0;
     if (opts.previewDurationSec > 0.0) {

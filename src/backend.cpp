@@ -8,6 +8,8 @@ std::string toString(BackendType type) {
             return "auto";
         case BackendType::MiGraphX:
             return "migraphx";
+        case BackendType::RocmHip:
+            return "rocm-hip";
         case BackendType::NcnnVulkan:
             return "ncnn-vulkan";
         case BackendType::VulkanCompute:

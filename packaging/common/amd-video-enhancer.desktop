@@ -2,7 +2,7 @@
 Type=Application
 Name=AMD Video Enhancer
 GenericName=AMD GPU Video Enhancement
-Comment=Open-alpha AMD GPU video enhancement app
+Comment=Beta-prerelease AMD GPU video enhancement app
 Exec=/usr/bin/ave_gui
 Terminal=false
 Categories=AudioVideo;Video;

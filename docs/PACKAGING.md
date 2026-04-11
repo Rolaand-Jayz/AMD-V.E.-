@@ -1,35 +1,40 @@
 # Packaging
 
-## Release Status
+## Release status
 
-## **OPEN ALPHA**
+Current packaging is published as a **GitHub beta prerelease**.
 
-## **ONLY TESTED ON ARCH LINUX ON RYZEN 7 7800X3D + RADEON RX 7900 GRE**
-
-## **ALL OTHER DISTRO PACKAGES ARE EXPERIMENTAL**
+- Primary verified stack: Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE
+- Other distro packages are preview builds that should be validated on the target system
+- Package payloads now include the project license, changelog, security policy, and release-operation docs
 
 The app now supports three packaging layers:
 
-1. Standard installed layout
-   - `bin/ave` and `bin/ave_gui` are launcher scripts.
-   - Real binaries live under `libexec/ave/`.
-   - Bundled runtime libraries live under `lib/ave/runtime/`.
-   - Optional MiGraphX compiler tooling lives under `lib/ave/migraphx/`.
-   - Bundled models live under `share/ave/models/` when model bundling is enabled.
+### Standard installed layout
 
-2. Portable extracted layout
-   - The install tree is staged into a single folder.
-   - That folder can be archived as `tar.gz`, extracted anywhere, and run in place.
-   - The launchers resolve all bundled paths relative to their own location.
-   - The bundle now includes a root-level `PORTABLE_RUNTIME_NOTES.txt` file that documents bundled paths, MiGraphX tooling, and the remaining host-side GPU driver requirements.
+- `bin/ave` and `bin/ave_gui` are launcher scripts.
+- Real binaries live under `libexec/ave/`.
+- Bundled runtime libraries live under `lib/ave/runtime/`.
+- Optional MiGraphX compiler tooling lives under `lib/ave/migraphx/`.
+- Bundled models live under `share/ave/models/` when model bundling is enabled.
 
-3. Native distro packages
-   - Arch Linux `.pkg.tar.zst`
-   - Debian/Ubuntu `.deb`
-   - Fedora/openSUSE/Rocky `.rpm`
-   - All native packages are built from one canonical Arch-origin staged release root
-   - The app payload remains private under `/opt/amd-video-enhancer`
-   - Public entrypoints remain thin under `/usr/bin`
+### Portable extracted layout
+
+- The install tree is staged into a single folder.
+- That folder can be archived as `tar.gz`, extracted anywhere, and run in place.
+- The launchers resolve all bundled paths relative to their own location.
+- The bundle includes a root-level `PORTABLE_RUNTIME_NOTES.txt` file that documents bundled paths, MiGraphX tooling, and the remaining host-side GPU driver requirements.
+
+### Native distro packages
+
+- Arch Linux `.pkg.tar.zst`
+- Arch Linux AUR handoff assets for `amd-video-enhancer-bin`
+- Debian/Ubuntu `.deb`
+- Fedora/openSUSE/Rocky `.rpm`
+- All native packages are built from one canonical Arch-origin staged release root.
+- The app payload remains private under `/opt/amd-video-enhancer`.
+- Public entrypoints remain thin under `/usr/bin`.
+- Each build emits a native package plus a matching SHA-256 checksum sidecar.
 
 ## Build
 
@@ -149,6 +154,13 @@ python3 ./tools/build_native_packages.py \
   --output-dir ./dist/native-packages
 ```
 
+The packaging helper writes one `.sha256` file per produced artifact. GitHub prereleases additionally publish a consolidated `SHA256SUMS` manifest.
+
+For Arch, the packaging helper can also emit:
+
+- a staged-root release asset tarball for the bundled `/opt/amd-video-enhancer` payload
+- an AUR handoff archive containing `PKGBUILD`, `.SRCINFO`, and submission notes for `amd-video-enhancer-bin`
+
 Default targets:
 
 - `archlinux`
@@ -162,6 +174,18 @@ Default targets:
 - `almalinux-9`
 
 The native packages all carry the same private payload layout and differ only in package manager metadata and containerized release validation path.
+
+## Installed documentation
+
+Release packages install:
+
+- `LICENSE`
+- `CHANGELOG.md`
+- `SECURITY.md`
+- `README.md`
+- `docs/PACKAGING.md`
+- `docs/RELEASING.md`
+- `docs/BENCHMARKS.md`
 
 ## Verification
 
@@ -183,14 +207,22 @@ The same host-side limitation applies to native packages. These packages isolate
 
 ## Portable Profiles
 
-1. Full compile-enabled portable bundle
-   - Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=ON` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON`.
-   - Requires a custom MiGraphX prefix whose compiler binaries and ONNX/TF/Python sidecars have a closed shared-library dependency set.
-   - If some compiler-side libraries live outside that prefix, point `AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS` at the directories containing the exact required sonames.
-   - In practice this usually includes versioned Abseil, Protobuf, and `utf8_validity` libraries that match the custom MiGraphX compiler build exactly. If those sonames are not present, packaging stops instead of emitting a broken archive.
+### Full compile-enabled portable bundle
 
-2. Runtime-only portable bundle
-   - Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=OFF` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=OFF`, or use `tools/package_release.sh runtime-portable`.
-   - Bundles the app-linked MiGraphX runtime needed to load/evaluate existing `.mxr` artifacts.
-   - This is the safest portable profile when you want the app to extract anywhere and run without depending on host ROCm package updates.
-   - This is the ready-now shipping profile when you want a self-contained archive that users can extract anywhere and run immediately.
+- Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=ON` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON`.
+- Requires a custom MiGraphX prefix whose compiler binaries and ONNX/TF/Python sidecars have a closed shared-library dependency set.
+- If some compiler-side libraries live outside that prefix, point `AVE_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS` at the directories containing the exact required sonames.
+- In practice this usually includes versioned Abseil, Protobuf, and `utf8_validity` libraries that match the custom MiGraphX compiler build exactly. If those sonames are not present, packaging stops instead of emitting a broken archive.
+
+### Runtime-only portable bundle
+
+- Configure with `AVE_INSTALL_BUNDLED_MIGRAPHX=OFF` and `AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=OFF`, or use `tools/package_release.sh runtime-portable`.
+- Bundles the app-linked MiGraphX runtime needed to load/evaluate existing `.mxr` artifacts.
+- This is the safest portable profile when you want the app to extract anywhere and run without depending on host ROCm package updates.
+- This is the lighter self-contained archive profile when you want users to extract the app and run existing compiled artifacts immediately.
+
+### Beta-release portable bundle
+
+- Use `tools/package_release.sh compiler-portable` with `ARCHIVE_MODE=archive`.
+- This is the beta-release profile when the bundled custom MiGraphX runtime/compiler must ship with the app instead of relying on a system MiGraphX install.
+- The produced archive can be unpacked into a folder and run in place, with checksum sidecars emitted next to the archive.

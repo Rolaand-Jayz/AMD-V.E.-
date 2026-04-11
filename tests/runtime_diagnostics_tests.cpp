@@ -23,15 +23,43 @@ void testMigraphxReadyReport() {
     snapshot.hipInfoPresent = true;
     snapshot.migraphxDriverPresent = true;
     snapshot.migraphxLibraryPresent = true;
+    snapshot.onnxruntimeLibraryPresent = true;
+    snapshot.onnxruntimeRocmProviderPresent = true;
     snapshot.hipRuntimePresent = true;
     snapshot.vulkanLoaderPresent = true;
     snapshot.ncnnRuntimePresent = true;
 
     const auto report = ave::buildRuntimeDiagnosticsReport(snapshot);
     check(report.migraphxReady, "fully provisioned ROCm snapshot should be migraphx ready");
+    check(report.rocmHipFallbackReady,
+          "fully provisioned ROCm snapshot should keep ROCm/HIP fallback ready too");
     check(report.ncnnFallbackReady, "vulkan-ready snapshot should also keep ncnn fallback ready");
     check(report.summary().find("preferred AMD execution path") != std::string::npos,
           "ready summary should mention preferred AMD execution path");
+}
+
+void testRocmHipFallbackReadyReport() {
+    ave::AmdRuntimeSnapshot snapshot;
+    snapshot.rocmRoot = "/opt/rocm";
+    snapshot.rocmRootPresent = true;
+    snapshot.kfdDevicePresent = true;
+    snapshot.kfdAccessible = true;
+    snapshot.rocminfoPresent = true;
+    snapshot.hipInfoPresent = true;
+    snapshot.migraphxDriverPresent = false;
+    snapshot.migraphxLibraryPresent = false;
+    snapshot.onnxruntimeLibraryPresent = true;
+    snapshot.onnxruntimeRocmProviderPresent = true;
+    snapshot.hipRuntimePresent = true;
+    snapshot.vulkanLoaderPresent = false;
+    snapshot.ncnnRuntimePresent = false;
+
+    const auto report = ave::buildRuntimeDiagnosticsReport(snapshot);
+    check(!report.migraphxReady, "MiGraphX should remain unavailable in fallback-only snapshot");
+    check(report.rocmHipFallbackReady,
+          "ROCm/HIP fallback should be marked ready when ONNX Runtime ROCm is present");
+    check(report.summary().find("ROCm/HIP fallback") != std::string::npos,
+          "fallback summary should mention ROCm/HIP fallback");
 }
 
 void testFallbackReportIncludesRemediation() {
@@ -88,6 +116,7 @@ int main() {
     testSharedGpuArchProbeRespectsEnvironmentOverride();
     testPreferredAmdDeviceIndexFromEnvironment();
     testMigraphxReadyReport();
+      testRocmHipFallbackReadyReport();
     testFallbackReportIncludesRemediation();
     testStatusToString();
     return 0;

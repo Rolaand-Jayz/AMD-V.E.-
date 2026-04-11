@@ -8,11 +8,16 @@
 #include <utility>
 #include <vector>
 
-namespace ave::process_observer {
+namespace ave {
+
+struct VideoStreamProbe;
+
+namespace process_observer {
 
 bool fileExists(const std::string& path);
 std::optional<std::filesystem::path> resolveCommandPath(const std::string& cmd);
 bool commandInPath(const std::string& cmd);
+int normalizeShellExitCode(int rawStatus);
 std::string quoteShellArg(const std::string& value);
 std::string trimOutput(std::string value);
 std::string wrapCommandWithEnv(
@@ -34,7 +39,11 @@ int runObservedCommand(
 
 std::int64_t countVideoFrames(const std::string& inputVideo,
                               double previewDurationSec);
+std::int64_t countVideoFrames(const VideoStreamProbe& probe,
+                              double previewDurationSec);
 
 std::string summarizeDiagnostics(const std::vector<std::string>& diagnostics);
 
 }  // namespace ave::process_observer
+
+}  // namespace ave

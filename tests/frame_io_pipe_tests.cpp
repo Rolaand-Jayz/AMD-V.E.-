@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -49,6 +50,15 @@ void cleanupTestClip() {
     std::filesystem::remove_all(tempDir, ec);
 }
 
+std::filesystem::path moveToShellSensitivePath(const std::filesystem::path& original,
+                                                                     const std::string& filename) {
+      const auto renamed = original.parent_path() / filename;
+      std::error_code ec;
+      std::filesystem::rename(original, renamed, ec);
+      check(!ec, "test clip should rename to a shell-sensitive path");
+      return renamed;
+}
+
 void testRgbPipeSourceReadsFramesAndSignalsEndOfStream() {
     const auto videoPath = prepareTestClip();
     if (videoPath.empty()) {
@@ -80,6 +90,33 @@ void testRgbPipeSourceReadsFramesAndSignalsEndOfStream() {
 
     source.close();
     cleanupTestClip();
+}
+
+void testRgbPipeSourceHandlesShellSensitiveInputPath() {
+      const auto videoPath = prepareTestClip();
+      if (videoPath.empty()) {
+            return;
+      }
+
+      const auto quotedPath = moveToShellSensitivePath(
+            videoPath,
+            "sample_$HOME'stress.mp4");
+
+      ave::frame_io::RgbVideoPipeSource source;
+      ave::frame_io::RgbVideoPipeSourceOptions options;
+      std::string error;
+      check(source.open(quotedPath.string(), 4, 2, options, error),
+              "RgbVideoPipeSource should open clips whose paths contain shell-sensitive characters");
+
+      std::vector<std::uint8_t> frame;
+      check(source.readFrame(frame, error) ==
+                    ave::frame_io::RgbVideoFrameReadStatus::FrameReady,
+              "RgbVideoPipeSource should decode a frame from a shell-sensitive input path");
+      check(frame.size() == 24u,
+              "decoded frame size should remain correct for shell-sensitive input paths");
+
+      source.close();
+      cleanupTestClip();
 }
 
 void testRgbFrameSourceDefaultsToRawPipeAndReadsFrames() {
@@ -189,6 +226,50 @@ void testAsyncRgbVideoPipeEncoderWritesProbeableOutput() {
     cleanupTestClip();
 }
 
+void testFrameHelpersHandleShellSensitivePaths() {
+    const auto videoPath = prepareTestClip();
+    if (videoPath.empty()) {
+        return;
+    }
+
+    const auto quotedVideoPath = moveToShellSensitivePath(
+        videoPath,
+        "preview_$HOME'stress.mp4");
+    const auto tempDir = quotedVideoPath.parent_path();
+    const auto pngPath = tempDir / "frame_$HOME'stress.png";
+
+    int width = 0;
+    int height = 0;
+    std::vector<std::uint8_t> extracted;
+    std::string error;
+    check(ave::frame_io::extractVideoFrameRgb24(
+              quotedVideoPath.string(), 0.0, width, height, extracted, error),
+          "extractVideoFrameRgb24 should handle shell-sensitive input paths");
+    check(width == 4 && height == 2,
+          "extracted frame dimensions should match the test clip");
+    check(extracted.size() == 24u,
+          "extracted frame byte count should match the RGB frame size");
+
+    check(ave::frame_io::saveRgb24ToPng(
+              pngPath.string(), width, height, extracted.data(), error),
+          "saveRgb24ToPng should handle shell-sensitive output paths");
+    check(std::filesystem::exists(pngPath),
+          "saveRgb24ToPng should create the literal shell-sensitive output path");
+
+    int loadedWidth = 0;
+    int loadedHeight = 0;
+    std::vector<std::uint8_t> loaded;
+    check(ave::frame_io::loadPngRgb24(
+              pngPath.string(), loadedWidth, loadedHeight, loaded, error),
+          "loadPngRgb24 should handle shell-sensitive input paths");
+    check(loadedWidth == width && loadedHeight == height,
+          "loadPngRgb24 should preserve PNG dimensions");
+    check(loaded.size() == extracted.size(),
+          "loadPngRgb24 should preserve the RGB byte count");
+
+    cleanupTestClip();
+}
+
 void testRgbVideoFrameWriterWritesProbeableOutput() {
     const auto videoPath = prepareTestClip();
     if (videoPath.empty()) {
@@ -285,9 +366,11 @@ void testRgbVideoSessionReadsAndWritesProbeableOutput() {
 
 int main() {
     testRgbPipeSourceReadsFramesAndSignalsEndOfStream();
+      testRgbPipeSourceHandlesShellSensitiveInputPath();
     testRgbFrameSourceDefaultsToRawPipeAndReadsFrames();
     testVideoFrameSourceDefaultsToRawPipeAndReturnsRgbPacket();
     testAsyncRgbVideoPipeEncoderWritesProbeableOutput();
+      testFrameHelpersHandleShellSensitivePaths();
     testRgbVideoFrameWriterWritesProbeableOutput();
     testRgbVideoSessionReadsAndWritesProbeableOutput();
     return 0;

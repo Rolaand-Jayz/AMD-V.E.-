@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ## Open alpha notice
+        ## Beta prerelease notice
 
         **This project is only tested on Arch Linux on a Ryzen 7 7800X3D + Radeon RX 7900 GRE.**
 

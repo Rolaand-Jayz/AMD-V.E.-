@@ -269,8 +269,9 @@ void SettingsDialog::buildUi() {
         auto* backendGroup = new QGroupBox(tr("Backend Preference"), page);
         auto* backendLayout = new QFormLayout(backendGroup);
         defaultBackendCombo_ = new QComboBox(backendGroup);
-        defaultBackendCombo_->addItem(tr("Auto (MiGraphX -> NCNN -> Vulkan Compute)"), QStringLiteral("auto"));
+        defaultBackendCombo_->addItem(tr("Auto (MiGraphX -> ROCm/HIP -> Vulkan Compute -> NCNN)"), QStringLiteral("auto"));
         defaultBackendCombo_->addItem(tr("MiGraphX (ROCm inference)"), QStringLiteral("migraphx"));
+        defaultBackendCombo_->addItem(tr("ROCm/HIP (ONNX Runtime fallback)"), QStringLiteral("rocm-hip"));
         defaultBackendCombo_->addItem(tr("NCNN Vulkan"), QStringLiteral("ncnn-vulkan"));
         defaultBackendCombo_->addItem(tr("Vulkan Compute"), QStringLiteral("vulkan"));
         defaultBackendCombo_->addItem(tr("VapourSynth"), QStringLiteral("vapoursynth"));

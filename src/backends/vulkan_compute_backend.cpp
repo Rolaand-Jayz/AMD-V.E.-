@@ -1061,6 +1061,20 @@ bool VulkanComputeBackend::Impl::processFrame(
         int width, int height, float param3,
         std::string& error) {
 
+    if (inputData == nullptr || outputData == nullptr) {
+        error = "Vulkan compute received null input/output buffers.";
+        return false;
+    }
+    if (inputFloats == 0u || outputFloats == 0u) {
+        error = "Vulkan compute received an empty frame buffer.";
+        return false;
+    }
+    if (inputFloats > (std::numeric_limits<VkDeviceSize>::max() / sizeof(float)) ||
+        outputFloats > (std::numeric_limits<VkDeviceSize>::max() / sizeof(float))) {
+        error = "Vulkan compute buffer size overflow.";
+        return false;
+    }
+
     const VkDeviceSize inBytes  = inputFloats * sizeof(float);
     const VkDeviceSize outBytes = outputFloats * sizeof(float);
 
@@ -1110,7 +1124,14 @@ bool VulkanComputeBackend::Impl::processFrame(
             return false;
         }
 
-        vkBindBufferMemory(device, buf, mem, 0);
+        if (vkBindBufferMemory(device, buf, mem, 0) != VK_SUCCESS) {
+            vkFreeMemory(device, mem, nullptr);
+            vkDestroyBuffer(device, buf, nullptr);
+            mem = VK_NULL_HANDLE;
+            buf = VK_NULL_HANDLE;
+            error = "Failed to bind buffer memory";
+            return false;
+        }
         return true;
     };
 
@@ -1133,12 +1154,6 @@ bool VulkanComputeBackend::Impl::processFrame(
         return false;
     }
 
-    // Upload input data
-    void* mapped = nullptr;
-    vkMapMemory(device, inMem, 0, inBytes, 0, &mapped);
-    std::memcpy(mapped, inputData, static_cast<std::size_t>(inBytes));
-    vkUnmapMemory(device, inMem);
-
     // ── Allocate descriptor set ─────────────────────────────────
     VkDescriptorSet descSet = VK_NULL_HANDLE;
     {
@@ -1153,6 +1168,17 @@ bool VulkanComputeBackend::Impl::processFrame(
             return false;
         }
     }
+
+    // Upload input data
+    void* mapped = nullptr;
+    if (vkMapMemory(device, inMem, 0, inBytes, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        vkFreeDescriptorSets(device, descriptorPool, 1, &descSet);
+        cleanup();
+        error = "Failed to map Vulkan input buffer memory";
+        return false;
+    }
+    std::memcpy(mapped, inputData, static_cast<std::size_t>(inBytes));
+    vkUnmapMemory(device, inMem);
 
     // Update descriptor set
     std::array<VkDescriptorBufferInfo, 2> bufInfos{};
@@ -1190,7 +1216,13 @@ bool VulkanComputeBackend::Impl::processFrame(
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    if (vkBeginCommandBuffer(cmdBuf, &beginInfo) != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
+        vkFreeDescriptorSets(device, descriptorPool, 1, &descSet);
+        cleanup();
+        error = "Failed to begin Vulkan command buffer recording";
+        return false;
+    }
 
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
     vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1211,7 +1243,13 @@ bool VulkanComputeBackend::Impl::processFrame(
     const uint32_t workGroups = (totalPixelsOut + 255u) / 256u;
     vkCmdDispatch(cmdBuf, workGroups, 1, 1);
 
-    vkEndCommandBuffer(cmdBuf);
+    if (vkEndCommandBuffer(cmdBuf) != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
+        vkFreeDescriptorSets(device, descriptorPool, 1, &descSet);
+        cleanup();
+        error = "Failed to end Vulkan command buffer recording";
+        return false;
+    }
 
     // Submit
     VkSubmitInfo submitInfo{};
@@ -1222,7 +1260,13 @@ bool VulkanComputeBackend::Impl::processFrame(
     VkFence fence = VK_NULL_HANDLE;
     VkFenceCreateInfo fenceCI{};
     fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    vkCreateFence(device, &fenceCI, nullptr, &fence);
+    if (vkCreateFence(device, &fenceCI, nullptr, &fence) != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
+        vkFreeDescriptorSets(device, descriptorPool, 1, &descSet);
+        cleanup();
+        error = "Failed to create Vulkan fence";
+        return false;
+    }
 
     if (vkQueueSubmit(computeQueue, 1, &submitInfo, fence) != VK_SUCCESS) {
         vkDestroyFence(device, fence, nullptr);
@@ -1246,7 +1290,13 @@ bool VulkanComputeBackend::Impl::processFrame(
     }
 
     // Read back output
-    vkMapMemory(device, outMem, 0, outBytes, 0, &mapped);
+    if (vkMapMemory(device, outMem, 0, outBytes, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+        vkFreeCommandBuffers(device, commandPool, 1, &cmdBuf);
+        vkFreeDescriptorSets(device, descriptorPool, 1, &descSet);
+        cleanup();
+        error = "Failed to map Vulkan output buffer memory";
+        return false;
+    }
     std::memcpy(outputData, mapped, static_cast<std::size_t>(outBytes));
     vkUnmapMemory(device, outMem);
 

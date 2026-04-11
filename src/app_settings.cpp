@@ -20,6 +20,11 @@ namespace ave {
 std::optional<BackendType> backendTypeFromString(const std::string& s) {
     if (s == "auto")         { return BackendType::Auto;       }
     if (s == "migraphx")     { return BackendType::MiGraphX;    }
+    if (s == "rocm-hip"
+     || s == "rocm_hip"
+     || s == "rocmhip"
+     || s == "rocm"
+     || s == "hip")         { return BackendType::RocmHip;     }
     if (s == "ncnn-vulkan"
      || s == "ncnn_vulkan"
      || s == "ncnn")         { return BackendType::NcnnVulkan;  }

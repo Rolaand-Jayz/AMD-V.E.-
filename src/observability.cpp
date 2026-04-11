@@ -4,6 +4,7 @@
 #include "ave/observability.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -13,7 +14,12 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <unordered_map>
+
+#if defined(__unix__) || defined(__APPLE__)
+#  include <unistd.h>
+#endif
 
 #include "ave/process_observer.hpp"
 #include "ave/runtime_diagnostics.hpp"
@@ -239,9 +245,38 @@ std::string buildArtifactSourceFingerprint(const std::string& sourcePath) {
 bool writeArtifactManifest(const std::string&            manifestPath,
                            const ArtifactManifestFields& f,
                            std::string&                  error) {
-    std::ofstream out(manifestPath, std::ios::trunc);
+    const std::filesystem::path finalPath(manifestPath);
+    const auto parentDir = finalPath.parent_path();
+    std::error_code ec;
+    if (!parentDir.empty()) {
+        std::filesystem::create_directories(parentDir, ec);
+        if (ec) {
+            error = "Cannot create manifest directory: " + parentDir.string();
+            return false;
+        }
+    }
+
+    std::filesystem::path tempPath;
+#if defined(__unix__) || defined(__APPLE__)
+    std::string pattern = (parentDir / (finalPath.filename().string() + ".tmp.XXXXXX")).string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    const int fd = ::mkstemp(writable.data());
+    if (fd < 0) {
+        error = "Cannot create temporary manifest file for " + manifestPath
+              + ": errno=" + std::to_string(errno);
+        return false;
+    }
+    ::close(fd);
+    tempPath = std::filesystem::path(writable.data());
+#else
+    tempPath = finalPath;
+    tempPath += ".tmp";
+#endif
+
+    std::ofstream out(tempPath, std::ios::trunc);
     if (!out.is_open()) {
-        error = "Cannot write manifest: " + manifestPath;
+        error = "Cannot write manifest: " + tempPath.string();
         return false;
     }
     out << "manifest_schema=" << f.manifestSchemaVersion << '\n'
@@ -264,6 +299,32 @@ bool writeArtifactManifest(const std::string&            manifestPath,
         << "miopen_compile_parallel_level=" << f.miopenCompileParallelLevel << '\n'
         << "visible_devices=" << f.visibleDevices << '\n'
         << "runtime_fingerprint=" << f.runtimeFingerprint << '\n';
+    out.flush();
+    if (!out.good()) {
+        out.close();
+        std::filesystem::remove(tempPath, ec);
+        error = "Failed while flushing manifest: " + tempPath.string();
+        return false;
+    }
+    out.close();
+    if (!out.good()) {
+        std::filesystem::remove(tempPath, ec);
+        error = "Failed while closing manifest: " + tempPath.string();
+        return false;
+    }
+
+    std::filesystem::rename(tempPath, finalPath, ec);
+    if (ec) {
+        std::error_code removeEc;
+        std::filesystem::remove(finalPath, removeEc);
+        ec.clear();
+        std::filesystem::rename(tempPath, finalPath, ec);
+    }
+    if (ec) {
+        std::filesystem::remove(tempPath, ec);
+        error = "Failed to replace manifest atomically: " + finalPath.string();
+        return false;
+    }
     return true;
 }
 

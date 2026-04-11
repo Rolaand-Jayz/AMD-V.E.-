@@ -31,6 +31,8 @@ struct AmdRuntimeSnapshot {
     bool hipInfoPresent = false;
     bool migraphxDriverPresent = false;
     bool migraphxLibraryPresent = false;
+    bool onnxruntimeLibraryPresent = false;
+    bool onnxruntimeRocmProviderPresent = false;
     bool hipRuntimePresent = false;
     bool vulkanLoaderPresent = false;
     bool ncnnRuntimePresent = false;
@@ -39,6 +41,7 @@ struct AmdRuntimeSnapshot {
 
 struct RuntimeDiagnosticsReport {
     bool migraphxReady = false;
+    bool rocmHipFallbackReady = false;
     bool ncnnFallbackReady = false;
     std::vector<RuntimeDiagnosticCheck> checks;
 

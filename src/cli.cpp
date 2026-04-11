@@ -28,6 +28,10 @@ std::optional<BackendType> parseBackend(const std::string& value) {
     if (normalized == "migraphx") {
         return BackendType::MiGraphX;
     }
+    if (normalized == "rocm-hip" || normalized == "rocm_hip" ||
+        normalized == "rocmhip" || normalized == "rocm" || normalized == "hip") {
+        return BackendType::RocmHip;
+    }
     if (normalized == "ncnn-vulkan" || normalized == "ncnn_vulkan" || normalized == "ncnn") {
         return BackendType::NcnnVulkan;
     }
@@ -61,7 +65,7 @@ void printUsage(const std::string& executableName) {
     std::cout << "Usage: " << executableName << " --input <in.mp4> --output <out.mp4> [options]\n"
               << "\n"
               << "Options:\n"
-              << "  --backend <auto|migraphx|ncnn-vulkan|vulkan>\n"
+              << "  --backend <auto|migraphx|rocm-hip|ncnn-vulkan|vulkan>\n"
               << "  --stage <name[:key=value,key=value]>      (repeatable, stackable)\n"
               << "  --codec <ffmpeg video codec>               default: libx264\n"
               << "  --profile <codec profile>                  default: (auto)\n"

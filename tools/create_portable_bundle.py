@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
 import pathlib
 import shutil
@@ -11,6 +12,20 @@ import tarfile
 
 def run(*command: str) -> None:
     subprocess.run(command, check=True)
+
+
+def file_digest(path: pathlib.Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_sha256_sidecar(path: pathlib.Path) -> pathlib.Path:
+    sidecar = path.with_name(path.name + ".sha256")
+    sidecar.write_text(f"{file_digest(path, 'sha256')}  {path.name}\n", encoding="utf-8")
+    return sidecar
 
 
 def create_archive(stage_dir: pathlib.Path, output_dir: pathlib.Path, archive_path: pathlib.Path, bundle_name: str) -> None:
@@ -244,9 +259,11 @@ def build_bundle(build_dir: pathlib.Path, output_dir: pathlib.Path, bundle_name:
         archive_path.unlink()
 
     create_archive(stage_dir, output_dir, archive_path, bundle_name)
+    checksum_path = write_sha256_sidecar(archive_path)
 
     print(f"[portable-bundle] staged install tree at {stage_dir}")
     print(f"[portable-bundle] wrote archive {archive_path}")
+    print(f"[portable-bundle] wrote checksum {checksum_path}")
     return 0
 
 
