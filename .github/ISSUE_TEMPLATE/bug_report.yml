@@ -9,9 +9,15 @@ body:
       value: |
         ## Beta prerelease notice
 
-        **This project is only tested on Arch Linux on a Ryzen 7 7800X3D + Radeon RX 7900 GRE.**
+        **This project is only verified on Arch Linux on a Ryzen 7 7800X3D + Radeon RX 7900 GRE.**
 
         If you are reporting from any other distro or hardware stack, the report is still wanted, but the environment must be filled in completely.
+
+        Before filing, read:
+
+        - `docs/RELEASE_STATUS.md`
+        - `docs/SUPPORT_TIERS.md`
+        - `docs/LIMITATIONS.md`
   - type: input
     id: summary
     attributes:
@@ -66,6 +72,11 @@ body:
       placeholder: source build, Arch package, Ubuntu package, Debian package, RPM package
     validations:
       required: true
+  - type: input
+    id: package_asset
+    attributes:
+      label: Package asset name
+      placeholder: Exact asset filename, or "source build" if not applicable
   - type: textarea
     id: logs
     attributes:

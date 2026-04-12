@@ -2,11 +2,19 @@
 
 ## Release status
 
-Current packaging is published as a **GitHub beta prerelease**.
+This branch is preparing the first public **GitHub beta prerelease**.
+
+As of 2026-04-12, no public prerelease is published yet. This document describes the asset set and packaging behavior intended for that first beta publication.
 
 - Primary verified stack: Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE
-- Other distro packages are preview builds that should be validated on the target system
+- Other distro package formats are preview targets that still need target-system validation
 - Package payloads now include the project license, changelog, security policy, and release-operation docs
+
+Before reading this page as a support promise, also read:
+
+- [`RELEASE_STATUS.md`](./RELEASE_STATUS.md)
+- [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md)
+- [`LIMITATIONS.md`](./LIMITATIONS.md)
 
 The app now supports three packaging layers:
 
@@ -75,6 +83,9 @@ Important packaging options:
 - `AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD=ON`
   - Build the app itself against `AVE_BUNDLED_MIGRAPHX_PREFIX`.
   - Leave this `OFF` unless that prefix is a complete MiGraphX runtime suitable for linking the app, not just an external compiler toolchain.
+- `AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx`
+  - Release packaging should set this explicitly when a bundled custom MiGraphX runtime/toolchain is part of the artifact contract.
+  - Do not rely on a hidden maintainer-local home-directory path when preparing public release assets.
 - `AVE_INSTALL_BUNDLED_MODELS=ON`
   - Download and stage the model catalog into the app tree.
 - `AVE_INSTALL_RUNTIME_DEPS=ON`
@@ -113,7 +124,9 @@ hand-editing CMake flags:
 ```bash
 tools/package_release.sh runtime-portable
 ARCHIVE_MODE=archive tools/package_release.sh runtime-portable
-EXTRA_MIGRAPHX_LIBRARY_DIRS="/vendor/lib;/custom/lib" tools/package_release.sh compiler-portable
+AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx \
+EXTRA_MIGRAPHX_LIBRARY_DIRS="/vendor/lib;/custom/lib" \
+tools/package_release.sh compiler-portable
 INSTALL_PREFIX="$PWD/dist/install-root" tools/package_release.sh install-tree
 ```
 
@@ -204,6 +217,8 @@ Portable bundles intentionally ship the user-space dependency closure, but they 
 If the custom MiGraphX prefix is incomplete, packaging fails with the unresolved sonames instead of producing a broken archive.
 
 The same host-side limitation applies to native packages. These packages isolate bundled userspace dependencies from the host, but they still rely on a working host AMD kernel/driver stack.
+
+Packaging reach is still not the same thing as verified compatibility. A package format existing in the tree or in a future release does not widen the verified support statement by itself.
 
 ## Portable Profiles
 

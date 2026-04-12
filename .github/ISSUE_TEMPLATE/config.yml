@@ -1,5 +1,61 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Documentation
-    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/README.md
-    about: Read the current beta prerelease support and packaging guidance first.
+  - name: Release status
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/RELEASE_STATUS.md
+    about: Check what is published, what is still staging-only, and what this branch is claiming right now.
+  - name: Support tiers
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/SUPPORT_TIERS.md
+    about: See verified, preview, experimental, and out-of-scope environments before assuming support.
+  - name: Beta testing program
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/BETA_TESTING_PROGRAM.md
+    about: Use the structured tester guidance for benchmark, compatibility, and quality submissions.
+*** Add File: /home/rolaandjayz/Desktop/C++ Video Enhancer/docs/RELEASE_STATUS.md
+# Release Status
+
+## Current public state
+
+AMD Video Enhancer is currently in **beta-prep** on the `pre-release-staging` branch.
+
+As of **2026-04-12**, the public GitHub Releases page should still show **no published beta prerelease**. The repository is preparing that first public beta, but it must not describe the release as published until outsiders can actually inspect the release page and its assets.
+
+## What is true today
+
+- the codebase contains real packaging, staging, release, benchmark, and validation machinery
+- the primary verified stack is **Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE**
+- the primary verified backend path is **MiGraphX + FFmpeg media pipeline** on that reference system
+- the planned beta release relies on a **bundled custom MiGraphX runtime/toolchain** because the required upstream behavior is not yet available in the stock system path
+- package recipes and release scripts exist for Arch/AUR, Debian/Ubuntu, Fedora/openSUSE, and RHEL-family RPM targets
+
+## What is not true yet
+
+- there is no public GitHub beta prerelease page to inspect yet
+- package targets do **not** equal broad compatibility proof
+- the public evidence stack is still narrower than the long-term gold standard
+- the public release surface should not imply that preview distro targets are already fully validated
+
+## Current truth vs target state
+
+| Surface | Current truth | Target state for first public beta |
+| --- | --- | --- |
+| Release page | Not published yet | Public GitHub beta prerelease with inspectable assets |
+| Verified platform | Arch Linux on the reference system | Same reference system, plus any added proof surfaced explicitly |
+| Preview package targets | Present in release tooling | Published only with clear preview/validation labels |
+| Bundled MiGraphX story | Real, but easy to miss if you skim | Impossible to miss in README, release notes, and packaging docs |
+| Public evidence | Maintainer benchmark snapshot and test surface | Same plus cleaner external validation and quality evidence |
+
+## What the first public beta must say clearly
+
+- it is a **GitHub beta prerelease**, not a general-availability release
+- Arch Linux on the reference system is the only **verified primary** environment today
+- preview distro assets are **validation targets**, not broad compatibility guarantees
+- the bundled custom MiGraphX path is **deliberate** and part of the support boundary
+- host AMD kernel/driver stack requirements are still outside the bundle
+
+## Read these next
+
+- [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md)
+- [`LIMITATIONS.md`](./LIMITATIONS.md)
+- [`VALIDATION_AND_EVIDENCE.md`](./VALIDATION_AND_EVIDENCE.md)
+- [`BETA_TESTING_PROGRAM.md`](./BETA_TESTING_PROGRAM.md)
+- [`PACKAGING.md`](./PACKAGING.md)
+- [`RELEASING.md`](./RELEASING.md)

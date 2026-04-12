@@ -90,6 +90,32 @@ void testCaptureCommandStdoutSupportsEnvOverrides() {
           "env-aware captureCommandStdout should apply environment overrides");
 }
 
+    void testRunCommandArgsCapturesOutput() {
+        ave::process_observer::CommandResult result;
+        std::string error;
+        check(ave::process_observer::runCommandArgs({"printf", "arg-helper-ok"}, result, error),
+            "runCommandArgs should launch a simple argv-based command");
+        check(result.exitCode == 0,
+            "runCommandArgs should preserve successful exit codes");
+        check(result.mergedOutput == "arg-helper-ok",
+            "runCommandArgs should capture merged stdout/stderr output");
+    }
+
+    void testRunCommandArgsSupportsEnvOverrides() {
+        ave::process_observer::CommandResult result;
+        std::string error;
+        check(ave::process_observer::runCommandArgs(
+              {"env"},
+              {{"AVE_PROCESS_OBSERVER_ARG_ENV", "argv-env-ok"}},
+              result,
+              error),
+            "env-aware runCommandArgs should launch the command");
+        check(result.exitCode == 0,
+            "env-aware runCommandArgs should preserve the exit code");
+        check(result.mergedOutput.find("AVE_PROCESS_OBSERVER_ARG_ENV=argv-env-ok") != std::string::npos,
+            "env-aware runCommandArgs should apply environment overrides");
+    }
+
 void testCommandExitCodesAreNormalized() {
     std::vector<std::string> lines;
     const int rc = ave::process_observer::runObservedCommand(
@@ -165,6 +191,8 @@ int main() {
     testRunObservedCommandSplitsLines();
     testRunObservedCommandSupportsEnvOverrides();
     testCaptureCommandStdoutSupportsEnvOverrides();
+    testRunCommandArgsCapturesOutput();
+    testRunCommandArgsSupportsEnvOverrides();
     testCommandExitCodesAreNormalized();
     testQuoteShellArgPreventsExpansion();
     testCountVideoFramesHonorsPreviewLimit();

@@ -108,6 +108,11 @@ def ensure_payload_root(staged_root: pathlib.Path) -> pathlib.Path:
         desktop_src = pathlib.Path(__file__).resolve().parent.parent / "packaging" / "common" / "amd-video-enhancer.desktop"
         shutil.copy2(desktop_src, app_dir / "amd-video-enhancer.desktop")
 
+        icon_src = pathlib.Path(__file__).resolve().parent.parent / "assets" / "icons" / "amd-video-enhancer.svg"
+        icon_dir = staged_root / "usr" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+        icon_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(icon_src, icon_dir / "amd-video-enhancer.svg")
+
     return payload_prefix
 
 

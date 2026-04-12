@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="amd-video-enhancer.svg">../../assets/icons/amd-video-enhancer.svg</file>
+  </qresource>
+</RCC>

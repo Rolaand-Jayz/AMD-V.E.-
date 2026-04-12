@@ -6,6 +6,11 @@ This folder is where the repository explains itself in long form. If the root [`
 
 | Read this file | Use it when you want... |
 | --- | --- |
+| [`RELEASE_STATUS.md`](./RELEASE_STATUS.md) | the current public truth about release state, what is published, and what is still staging-only |
+| [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md) | the platform, backend, and packaging support tiers without guessing from the code tree |
+| [`LIMITATIONS.md`](./LIMITATIONS.md) | the blunt user-facing list of current caveats, rough edges, and release blockers |
+| [`VALIDATION_AND_EVIDENCE.md`](./VALIDATION_AND_EVIDENCE.md) | what the current tests and benchmarks really prove, and what they do not |
+| [`BETA_TESTING_PROGRAM.md`](./BETA_TESTING_PROGRAM.md) | how to submit clean compatibility, benchmark, and quality reports |
 | [`WHY_THIS_PROJECT_MATTERS.md`](./WHY_THIS_PROJECT_MATTERS.md) | the sharp argument for why this repo matters as evidence about AI-assisted development, MiGraphX visibility, and under-documented stacks |
 | [`GOLD_STANDARD_FOR_IMPLEMENTATION.md`](./GOLD_STANDARD_FOR_IMPLEMENTATION.md) | the current technical truth of the app and how the real stack works |
 | [`FEATURE_PARITY_MATRIX.md`](./FEATURE_PARITY_MATRIX.md) | a feature-by-feature view of what is implemented and what is not |
@@ -21,11 +26,13 @@ This folder is where the repository explains itself in long form. If the root [`
 If you are new to the project, this order usually makes the most sense:
 
 1. [`../README.md`](../README.md)
-2. [`WHY_THIS_PROJECT_MATTERS.md`](./WHY_THIS_PROJECT_MATTERS.md)
-3. [`GOLD_STANDARD_FOR_IMPLEMENTATION.md`](./GOLD_STANDARD_FOR_IMPLEMENTATION.md)
-4. [`FEATURE_PARITY_MATRIX.md`](./FEATURE_PARITY_MATRIX.md)
-5. [`PACKAGING.md`](./PACKAGING.md)
-6. [`migraphx_debugging_playbook.md`](./migraphx_debugging_playbook.md)
+2. [`RELEASE_STATUS.md`](./RELEASE_STATUS.md)
+3. [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md)
+4. [`LIMITATIONS.md`](./LIMITATIONS.md)
+5. [`VALIDATION_AND_EVIDENCE.md`](./VALIDATION_AND_EVIDENCE.md)
+6. [`WHY_THIS_PROJECT_MATTERS.md`](./WHY_THIS_PROJECT_MATTERS.md)
+7. [`GOLD_STANDARD_FOR_IMPLEMENTATION.md`](./GOLD_STANDARD_FOR_IMPLEMENTATION.md)
+8. [`PACKAGING.md`](./PACKAGING.md)
 
 That order goes from “what is this?” to “how is it built?” to “how do I debug and ship it?”
 
@@ -52,3 +59,5 @@ This directory holds the narrative and reference docs, but it is not the only pl
 ## One simple rule
 
 If you need the repo's current architecture, trust [`GOLD_STANDARD_FOR_IMPLEMENTATION.md`](./GOLD_STANDARD_FOR_IMPLEMENTATION.md) first. It exists specifically to stop older aspirational descriptions from drifting away from the code.
+
+If you need the repo's current release state, support boundary, limitations, or public evidence claims, trust [`RELEASE_STATUS.md`](./RELEASE_STATUS.md), [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md), [`LIMITATIONS.md`](./LIMITATIONS.md), and [`VALIDATION_AND_EVIDENCE.md`](./VALIDATION_AND_EVIDENCE.md) before inferring anything from packaging scripts or the code tree.

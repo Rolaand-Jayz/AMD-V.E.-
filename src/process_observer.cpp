@@ -1,8 +1,10 @@
 #include "ave/process_observer.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <sstream>
@@ -230,6 +232,136 @@ int runObservedCommand(
     }
 
     return normalizeShellExitCode(pclose(pipe));
+}
+
+bool runCommandArgs(const std::vector<std::string>& args,
+                    CommandResult& result,
+                    std::string& error) {
+    return runCommandArgs(args, {}, result, error);
+}
+
+bool runCommandArgs(
+        const std::vector<std::string>& args,
+        const std::vector<std::pair<std::string, std::string>>& envOverrides,
+        CommandResult& result,
+        std::string& error) {
+    result = {};
+    if (args.empty() || args.front().empty()) {
+        error = "Cannot run an empty command.";
+        return false;
+    }
+
+#if defined(__unix__) || defined(__APPLE__)
+    int pipeFds[2] = {-1, -1};
+    if (::pipe(pipeFds) != 0) {
+        error = std::string("Failed to create subprocess pipe: ") + std::strerror(errno);
+        return false;
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        const int savedErrno = errno;
+        ::close(pipeFds[0]);
+        ::close(pipeFds[1]);
+        error = std::string("Failed to fork subprocess: ") + std::strerror(savedErrno);
+        return false;
+    }
+
+    if (pid == 0) {
+        ::close(pipeFds[0]);
+        if (::dup2(pipeFds[1], STDOUT_FILENO) < 0 ||
+            ::dup2(pipeFds[1], STDERR_FILENO) < 0) {
+            const std::string message =
+                std::string("Failed to redirect subprocess output: ") + std::strerror(errno) + "\n";
+            const auto size = static_cast<unsigned long>(message.size());
+            ::write(pipeFds[1], message.c_str(), size);
+            ::close(pipeFds[1]);
+            _exit(126);
+        }
+        ::close(pipeFds[1]);
+
+        for (const auto& [name, value] : envOverrides) {
+            if (::setenv(name.c_str(), value.c_str(), 1) != 0) {
+                const std::string message =
+                    std::string("Failed to set subprocess environment variable '") + name +
+                    "': " + std::strerror(errno) + "\n";
+                const auto size = static_cast<unsigned long>(message.size());
+                ::write(STDERR_FILENO, message.c_str(), size);
+                _exit(126);
+            }
+        }
+
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 1);
+        for (const auto& arg : args) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+
+        if (args.front().find('/') != std::string::npos) {
+            ::execv(args.front().c_str(), argv.data());
+        } else {
+            ::execvp(args.front().c_str(), argv.data());
+        }
+
+        const std::string message =
+            std::string("Failed to exec '") + args.front() + "': " + std::strerror(errno) + "\n";
+        const auto size = static_cast<unsigned long>(message.size());
+        ::write(STDERR_FILENO, message.c_str(), size);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    ::close(pipeFds[1]);
+    std::array<char, 4096> buffer{};
+    while (true) {
+        const auto bytesRead = ::read(pipeFds[0], buffer.data(), buffer.size());
+        if (bytesRead == 0) {
+            break;
+        }
+        if (bytesRead < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ::close(pipeFds[0]);
+            int status = 0;
+            (void)::waitpid(pid, &status, 0);
+            error = std::string("Failed to read subprocess output: ") + std::strerror(errno);
+            return false;
+        }
+        result.mergedOutput.append(buffer.data(), static_cast<std::size_t>(bytesRead));
+    }
+    ::close(pipeFds[0]);
+
+    int status = 0;
+    pid_t waited = 0;
+    do {
+        waited = ::waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        error = std::string("Failed to wait for subprocess: ") + std::strerror(errno);
+        return false;
+    }
+
+    result.exitCode = normalizeShellExitCode(status);
+    return true;
+#else
+    std::ostringstream command;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i > 0) {
+            command << ' ';
+        }
+        command << quoteShellArg(args[i]);
+    }
+    int exitCode = -1;
+    const auto output = captureCommandStdout(command.str(), envOverrides, exitCode);
+    if (!output.has_value()) {
+        error = "Failed to launch subprocess command.";
+        return false;
+    }
+    result.exitCode = exitCode;
+    result.mergedOutput = *output;
+    return true;
+#endif
 }
 
 std::int64_t countVideoFrames(const std::string& inputVideo,

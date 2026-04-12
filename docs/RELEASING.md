@@ -2,7 +2,9 @@
 
 ## Release channel
 
-The current public channel is a **GitHub beta prerelease**.
+The repository is preparing its first public **GitHub beta prerelease**.
+
+As of 2026-04-12, the public release page should still show no published prerelease. This document describes the process and checks that must be true when that first beta is actually published.
 
 That is deliberate and should remain the default until validation broadens beyond
 the primary reference system.
@@ -11,10 +13,11 @@ Current support statement:
 
 - Primary verified system: Arch Linux
 - Primary verified hardware: Ryzen 7 7800X3D + Radeon RX 7900 GRE
-- Other distro packages are published as preview builds
+- Other distro packages are planned preview assets, not broad compatibility proof
 - ROCm, Mesa, Vulkan, and MiGraphX compatibility still vary across distros and kernels
 
 Do not market current tags as a general-availability release.
+Do not claim that beta assets are published until outsiders can actually see those assets on the public release page.
 
 ## Verified versus preview targets
 
@@ -60,6 +63,7 @@ This project does not publish AppImage, Flatpak, or Snap builds.
 Stage the canonical release root:
 
 ```bash
+AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx \
 ./tools/stage_release_root.sh
 ```
 
@@ -86,6 +90,7 @@ python3 ./tools/build_native_packages.py \
 Build the beta portable archive with the bundled custom MiGraphX runtime/toolchain:
 
 ```bash
+AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx \
 ARCHIVE_MODE=archive ./tools/package_release.sh compiler-portable
 ```
 
@@ -108,6 +113,7 @@ Workflow model:
 Before publishing a beta prerelease, confirm:
 
 - the canonical Arch stage root builds and passes tests
+- the release page exists before any docs say it exists
 - package payloads include `LICENSE`, `CHANGELOG.md`, and `SECURITY.md`
 - the portable archive includes the bundled custom MiGraphX runtime/toolchain instead of requiring a system MiGraphX install
 - the Arch release includes both a local `pacman -U` package and an AUR handoff bundle
@@ -119,7 +125,7 @@ Before publishing a beta prerelease, confirm:
 
 Every release should state:
 
-- published as a GitHub beta prerelease
+- whether a GitHub beta prerelease is already published or is still being prepared
 - primarily verified on Arch Linux
 - primarily verified on Ryzen 7 7800X3D + Radeon RX 7900 GRE
 - other distro packages are preview builds

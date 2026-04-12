@@ -2,6 +2,26 @@
 
 AMD Video Enhancer is a Linux-first video enhancer that uses ML and AI models to restore, clean, and upscale footage on AMD GPUs. It is intentionally built around AMD's ROCm, MiGraphX, HIP, and Vulkan stack rather than NVIDIA/CUDA, because the whole point of this project is to give AMD hardware a first-class experience instead of treating it like an afterthought.
 
+## Release snapshot
+
+**Current public state:** `pre-release-staging` is preparing the first public GitHub beta prerelease. No public beta prerelease is published on the GitHub Releases page yet.
+
+**Verified primary system:** Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE.
+
+**Primary verified backend path:** MiGraphX inference with the FFmpeg media pipeline on that reference system.
+
+**Bundled MiGraphX reality:** the planned beta packages bundle a custom MiGraphX runtime/toolchain because the required upstream behavior is not yet available in the stock system path.
+
+**Support boundary:** package targets are broader than verified compatibility. Packaging reach is not the same thing as support proof.
+
+Start with these canonical release-facing docs before assuming more than the repo can currently prove:
+
+- [`docs/RELEASE_STATUS.md`](docs/RELEASE_STATUS.md)
+- [`docs/SUPPORT_TIERS.md`](docs/SUPPORT_TIERS.md)
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
+- [`docs/VALIDATION_AND_EVIDENCE.md`](docs/VALIDATION_AND_EVIDENCE.md)
+- [`docs/BETA_TESTING_PROGRAM.md`](docs/BETA_TESTING_PROGRAM.md)
+
 ## Why this kind of app matters
 
 Old video is usually not “bad” in just one way. It is often blurry, noisy, blocky, over-compressed, poorly scaled, repeatedly re-encoded, damaged by weak capture hardware, or scarred by years of format conversion.
@@ -157,6 +177,7 @@ The source build expects these core pieces:
 
 - release packages bundle app-private `ffmpeg` and `ffprobe`
 - source builds still expect `ffmpeg` and `ffprobe` in `PATH`
+- archive-backed model extraction expects `unzip` in `PATH`
 - mixed iGPU+dGPU systems may need `HIP_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES`
 - unsupported ROCm distributions are still best-effort even if the app itself builds there
 
@@ -177,7 +198,7 @@ ctest --test-dir build --output-on-failure
 
 Do **not** use a bare `cmake -S . -B build` in this repository. The project is designed around explicit backend selection.
 
-If an optimized MiGraphX install is available at `~/.local/opt/migraphx-codex`, the standard configure flow can prefer it automatically.
+If you need to bundle a custom MiGraphX runtime/toolchain for packaging work, pass it explicitly with `-DAVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx`. Release-facing packaging should not depend on a hidden maintainer-local home-directory path.
 
 ## How to use the app
 
@@ -218,13 +239,15 @@ If an optimized MiGraphX install is available at `~/.local/opt/migraphx-codex`, 
 
 The first run of a MiGraphX-backed model may trigger model preparation or compilation. Compiled `.mxr` artifacts are cached and reused later when the runtime fingerprint still matches the current environment.
 
+That first-run path can take minutes on the reference stack. The app now emits compile progress while `migraphx-driver` is working, but some preparation phases are still coarser than a perfect progress bar. Treat first-run preparation as deliberate setup work, not as a sign that later runs will always be that slow.
+
 ## ROCm and MiGraphX customization
 
 This repository does more than just “use ROCm if it happens to be installed.” It also supports a customized, app-bundled MiGraphX toolchain flow for packaging and portable builds.
 
 Important pieces of that story:
 
-- the build can detect a custom MiGraphX prefix at `~/.local/opt/migraphx-codex`
+- release tooling expects any custom MiGraphX prefix to be passed explicitly through `AVE_BUNDLED_MIGRAPHX_PREFIX` or `-DAVE_BUNDLED_MIGRAPHX_PREFIX=...`
 - packaging can bundle a custom MiGraphX runtime under the app tree
 - compile-enabled portable bundles can ship `migraphx-driver` and its side libraries
 - helper scripts can stage ABI-matched MiGraphX runtime overlays and compiler-side dependencies from the local package cache
@@ -248,10 +271,14 @@ Useful runtime tuning variables include:
 
 ## Current project status
 
-- releases are currently published as **GitHub beta prereleases**
+- `pre-release-staging` is preparing the first public GitHub beta prerelease; no public release is published yet
 - the primary verified stack is **Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE**
-- benchmark snapshots and reproduction notes live in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+- support tiers live in [`docs/SUPPORT_TIERS.md`](docs/SUPPORT_TIERS.md)
+- the current release truth surface lives in [`docs/RELEASE_STATUS.md`](docs/RELEASE_STATUS.md)
+- known limitations live in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
+- validation scope and evidence rules live in [`docs/VALIDATION_AND_EVIDENCE.md`](docs/VALIDATION_AND_EVIDENCE.md)
 - native package, AUR handoff, and portable bundle details live in [`docs/PACKAGING.md`](docs/PACKAGING.md)
+- benchmark snapshots and reproduction notes live in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 
 ## More project docs
 

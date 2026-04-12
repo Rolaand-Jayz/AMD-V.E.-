@@ -35,13 +35,14 @@ jobs:
             echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and stage canonical Arch release root
-        run: ./tools/stage_release_root.sh
+        run: AVE_BUNDLED_MIGRAPHX_PREFIX="$HOME/.local/opt/migraphx-codex" ./tools/stage_release_root.sh
       - name: Archive staged release root
         run: |
           mkdir -p dist
           tar -C dist -czf dist/stage-root.tar.gz stage-root
       - name: Build compiler-portable beta bundle
         run: |
+          AVE_BUNDLED_MIGRAPHX_PREFIX="$HOME/.local/opt/migraphx-codex" \
           ARCHIVE_MODE=archive BUILD_DIR="${GITHUB_WORKSPACE}/build_portable_beta" ./tools/package_release.sh compiler-portable
       - name: Build Arch AUR handoff assets
         run: |

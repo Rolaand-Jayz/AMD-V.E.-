@@ -9,9 +9,11 @@ body:
       value: |
         ## Experimental distro report
 
-        **All non-Arch distro support is experimental in the current beta prerelease.**
+        **All non-Arch distro support is experimental or preview-only in the current beta-prep state.**
 
         These reports are useful, but they need full environment detail.
+
+        Read `docs/SUPPORT_TIERS.md` and `docs/BETA_TESTING_PROGRAM.md` before submitting.
   - type: input
     id: distro
     attributes:

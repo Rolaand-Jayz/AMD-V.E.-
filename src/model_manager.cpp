@@ -950,18 +950,26 @@ bool rewriteOnnxResizeModeCubicToLinear(const std::filesystem::path& sourcePath,
         sf << pyScript;
     }
 
-    std::ostringstream cmd;
-    cmd << "python3 " << shellQuote(scriptPath->string())
-        << ' ' << shellQuote(sourcePath.string())
-        << ' ' << shellQuote(preparedPath.string());
-    const int rc = process_observer::normalizeShellExitCode(std::system(cmd.str().c_str()));
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"python3", scriptPath->string(), sourcePath.string(), preparedPath.string()},
+            result,
+            error)) {
+        std::error_code removeEc;
+        std::filesystem::remove(*scriptPath, removeEc);
+        return false;
+    }
 
     std::error_code removeEc;
     std::filesystem::remove(*scriptPath, removeEc);
 
-    if (rc != 0) {
+    if (result.exitCode != 0) {
         error = "Failed to rewrite ONNX Resize(mode=cubic) to Resize(mode=linear) for MiGraphX. "
                 "Ensure the Python 'onnx' package is installed.";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
         return false;
     }
     if (!fileExists(preparedPath)) {
@@ -1571,17 +1579,22 @@ bool extractFromZip(const std::filesystem::path& zipPath,
         return false;
     }
 
-    std::ostringstream cmd;
-    cmd << "unzip -o -j "
-        << shellQuote(zipPath.string()) << ' '
-        << shellQuote(internalPath) << ' '
-        << "-d " << shellQuote(tempDir->string());
-
-    const int rc = process_observer::normalizeShellExitCode(std::system(cmd.str().c_str()));
-    if (rc != 0) {
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"unzip", "-o", "-j", zipPath.string(), internalPath, "-d", tempDir->string()},
+            result,
+            error)) {
         std::filesystem::remove_all(*tempDir, ec);
-        error = "unzip failed (exit " + std::to_string(rc) +
+        return false;
+    }
+    if (result.exitCode != 0) {
+        std::filesystem::remove_all(*tempDir, ec);
+        error = "unzip failed (exit " + std::to_string(result.exitCode) +
                 ") extracting '" + internalPath + "' from archive.";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
         return false;
     }
 
@@ -1987,18 +2000,26 @@ bool torchExportToOnnx(const std::filesystem::path& pthPath,
         sf << pyScript;
     }
 
-    std::ostringstream cmd;
-    cmd << "python3 " << shellQuote(scriptPath->string())
-        << ' ' << shellQuote(pthPath.string())
-        << ' ' << shellQuote(onnxDest.string());
-    const int rc = process_observer::normalizeShellExitCode(std::system(cmd.str().c_str()));
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"python3", scriptPath->string(), pthPath.string(), onnxDest.string()},
+            result,
+            error)) {
+        std::error_code ec2;
+        std::filesystem::remove(*scriptPath, ec2);
+        return false;
+    }
 
     std::error_code ec2;
     std::filesystem::remove(*scriptPath, ec2);
 
-    if (rc != 0) {
-        error = "torch.onnx.export() failed (exit " + std::to_string(rc)
+    if (result.exitCode != 0) {
+        error = "torch.onnx.export() failed (exit " + std::to_string(result.exitCode)
               + ").  Ensure torch is installed: pip install torch torch_migraphx";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
         return false;
     }
     if (!fileExists(onnxDest)) {

@@ -19,6 +19,25 @@ The tests here are meant to prove that the important plumbing still works:
 - MiGraphX backend behavior
 - interop bridge behavior
 
+## What this test surface does and does not prove
+
+Today the repo has meaningful **subsystem regression coverage** and **runtime/diagnostic smoke coverage**.
+
+What that means in practice:
+
+- planner and stage-order invariants are checked
+- runtime paths, environment probing, and diagnostics are checked
+- media probing, FFmpeg orchestration, frame I/O, process loops, and job flows are checked
+- MiGraphX-specific behavior and interop paths have focused tests
+
+What it does **not** mean yet:
+
+- there is not yet a broad golden-clip media regression suite covering every backend and every model class
+- package-target breadth does not automatically become compatibility proof
+- output quality claims still need separate public evidence, not just green subsystem tests
+
+For the public confidence story, pair this file with [`../docs/VALIDATION_AND_EVIDENCE.md`](../docs/VALIDATION_AND_EVIDENCE.md).
+
 ## How the folder is organized
 
 Most files follow a simple pattern: one executable per subsystem.

@@ -24,9 +24,9 @@ option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # Requires roctracer-dev package: sudo apt install roctracer-dev
 option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
 option(AVE_INSTALL_BUNDLED_MIGRAPHX
-       "Install the bundled MiGraphX compiler toolchain with the app" ON)
+    "Install the bundled MiGraphX compiler toolchain with the app" OFF)
 option(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER
-       "Install bundled MiGraphX compiler tools and ONNX/TF sidecars with the app" ON)
+    "Install bundled MiGraphX compiler tools and ONNX/TF sidecars with the app" OFF)
 option(AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD
        "Prefer AVE_BUNDLED_MIGRAPHX_PREFIX for build-time MiGraphX discovery" OFF)
 option(AVE_STRICT_BUNDLED_MIGRAPHX
@@ -36,12 +36,9 @@ option(AVE_INSTALL_BUNDLED_MODELS
 option(AVE_INSTALL_RUNTIME_DEPS
        "Install non-system runtime shared libraries with the app"    ON)
 
-set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "")
-if(EXISTS "$ENV{HOME}/.local/opt/migraphx-codex/bin/migraphx-driver")
-    set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{HOME}/.local/opt/migraphx-codex")
-endif()
+set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{AVE_BUNDLED_MIGRAPHX_PREFIX}")
 set(AVE_BUNDLED_MIGRAPHX_PREFIX "${_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX}" CACHE PATH
-    "Optimized MiGraphX install prefix to bundle with the app")
+    "Explicit custom MiGraphX install prefix to bundle with the app")
 set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS "")
 foreach(_ave_extra_root IN ITEMS /usr/lib /usr/local/lib /opt/rocm/lib /opt/rocm/lib64)
     if(EXISTS "${_ave_extra_root}")
@@ -62,12 +59,18 @@ if(AVE_HAVE_MIGRAPHX AND AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD AND
 endif()
 
 if(AVE_INSTALL_BUNDLED_MIGRAPHX)
-    if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "" OR
-       NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib")
+    if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "")
+        message(STATUS
+            "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but no explicit AVE_BUNDLED_MIGRAPHX_PREFIX was provided; "
+            "disabling bundled MiGraphX install for this configure.")
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER OFF)
+    elseif(NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib")
         message(WARNING
             "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but AVE_BUNDLED_MIGRAPHX_PREFIX does not contain "
             "lib/migraphx/lib; disabling bundled MiGraphX install.")
         set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER OFF)
     else()
         message(STATUS "Bundling optimized MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
         if(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER AND
@@ -454,6 +457,7 @@ if(AVE_BUILD_GUI)
 
         add_executable(ave_gui
             src/gui/main_gui.cpp
+            src/gui/ave_gui_resources.qrc
             src/gui/main_window.cpp
             src/gui/main_window.hpp
             src/gui/model_manager_dialog.cpp
@@ -690,8 +694,13 @@ install(FILES
     CHANGELOG.md
     SECURITY.md
     docs/BENCHMARKS.md
+    docs/BETA_TESTING_PROGRAM.md
+    docs/LIMITATIONS.md
     docs/PACKAGING.md
+    docs/RELEASE_STATUS.md
     docs/RELEASING.md
+    docs/SUPPORT_TIERS.md
+    docs/VALIDATION_AND_EVIDENCE.md
     DESTINATION ${AVE_INSTALL_DOC_DIR}
 )
 

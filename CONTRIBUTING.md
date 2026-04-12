@@ -2,11 +2,13 @@
 
 ## Release Status
 
-## **BETA PRERELEASE**
+## **BETA PREP / PRE-RELEASE STAGING**
 
-## **ONLY TESTED ON ARCH LINUX**
+## **ONLY VERIFIED ON ARCH LINUX + RX 7900 GRE**
 
-This project is currently a beta prerelease.
+This repository is preparing its first public beta prerelease.
+
+As of this document, no public GitHub beta prerelease is published yet.
 
 The app and release payloads have only been tested on:
 
@@ -16,6 +18,14 @@ The app and release payloads have only been tested on:
 
 All other distros, kernels, ROCm stacks, Mesa stacks, and GPU configurations are experimental.
 Feedback is wanted, but reports outside the tested Arch hardware/software stack should be filed with full environment details.
+
+Before contributing against the release surface, read:
+
+- [`README.md`](README.md)
+- [`docs/RELEASE_STATUS.md`](docs/RELEASE_STATUS.md)
+- [`docs/SUPPORT_TIERS.md`](docs/SUPPORT_TIERS.md)
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)
+- [`docs/BETA_TESTING_PROGRAM.md`](docs/BETA_TESTING_PROGRAM.md)
 
 ## Why contributing here matters
 
@@ -43,8 +53,8 @@ If someone's professional comfort depends on the idea that thin docs and sparse 
 
 ## Before You Start
 
-1. Read [README.md](/home/rolaandjayz/Desktop/C++%20Video%20Enhancer/README.md) and [docs/PACKAGING.md](/home/rolaandjayz/Desktop/C++%20Video%20Enhancer/docs/PACKAGING.md).
-2. Read [docs/WHY_THIS_PROJECT_MATTERS.md](/home/rolaandjayz/Desktop/C++%20Video%20Enhancer/docs/WHY_THIS_PROJECT_MATTERS.md) if you want the strategic context for why this repo exists.
+1. Read [`README.md`](README.md) and [`docs/PACKAGING.md`](docs/PACKAGING.md).
+2. Read [`docs/WHY_THIS_PROJECT_MATTERS.md`](docs/WHY_THIS_PROJECT_MATTERS.md) if you want the strategic context for why this repo exists.
 3. Build with every backend flag enabled.
 4. Keep changes free of stubs, placeholders, and fake-success paths.
 5. Prefer narrow, reviewable pull requests.
@@ -80,6 +90,7 @@ When filing an issue, include:
 - Whether the problem reproduces on the tested Arch stack
 
 Use the distro-report issue template when the problem is on a non-Arch system.
+Use the benchmark/validation issue template when you are submitting performance or compatibility evidence rather than a bug.
 
 ## Pull Requests
 
@@ -100,7 +111,7 @@ If your PR changes packaging, document:
 ## Code Style
 
 - Keep all app code in `namespace ave`
-- Use the existing naming and layout conventions from [AGENTS.md](/home/rolaandjayz/Desktop/C++%20Video%20Enhancer/AGENTS.md)
+- Use the existing naming and layout conventions from [`AGENTS.md`](AGENTS.md)
 - Add comments only where the code would otherwise be hard to follow
 - Do not add dead fallback paths or "temporary" fake completion
 

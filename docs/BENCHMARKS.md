@@ -4,6 +4,10 @@
 
 Latest recorded release-readiness benchmark run: **2026-04-10**.
 
+These numbers are **maintainer-verified evidence on one reference system**. They prove that the app runs real work on that stack. They do **not** by themselves prove cross-distro compatibility, broad backend coverage, or public output-quality superiority.
+
+For the current evidence policy, read [`VALIDATION_AND_EVIDENCE.md`](./VALIDATION_AND_EVIDENCE.md). For clean outside submissions, read [`BETA_TESTING_PROGRAM.md`](./BETA_TESTING_PROGRAM.md).
+
 Test environment:
 
 - OS: CachyOS / Linux 6.19.11
@@ -25,6 +29,7 @@ Test environment:
 - **MiGraphX total** and **MiGraphX FPS** come from the backend timing emitted by the app itself.
 - The x2 model demonstrates the current fast 1080p delivery path from a 960x540 source.
 - The x4 model demonstrates the current lightweight 4K delivery path from the same source clip.
+- This page is a throughput snapshot, not a full visual-quality gallery.
 
 ## Reproducing the benchmark
 

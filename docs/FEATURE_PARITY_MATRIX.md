@@ -5,6 +5,7 @@ Current implementation status for the AMD C++ video enhancement pipeline.
 ## Legend
 
 - `Implemented`: available in the current tree
+- `Partial`: meaningful coverage or behavior exists, but it is not yet a full release-grade promise
 - `Planned`: intended work, not finished
 - `Removed`: intentionally out of scope
 
@@ -45,8 +46,13 @@ Current implementation status for the AMD C++ video enhancement pipeline.
 | Qt GUI | Implemented | `ave_gui` target when Qt6 is available |
 | Settings persistence | Implemented | INI-backed app settings |
 | Profile save/load | Implemented | JSON profile support in the GUI |
-| Planner tests | Implemented | `planner_tests` target |
-| End-to-end backend regression tests | Planned | coverage still light outside planner tests |
+| Subsystem regression tests | Implemented | planner, tensor, runtime diagnostics/paths, model-manager profile, video probe, process, frame I/O, FFmpeg runner, job, telemetry, MiGraphX backend, and interop executables are all present in the tree |
+| Media-level regression coverage | Partial | targeted subsystem and smoke coverage exists, but there is not yet a broad golden-clip release gate across every backend/path |
+| Published-artifact validation across preview distro targets | Partial | packaging machinery exists, but public validation breadth is still narrower than the package target list |
+
+## Support promise note
+
+Code presence is not the same thing as release support. For the actual support promise, read [`SUPPORT_TIERS.md`](./SUPPORT_TIERS.md).
 
 ## Out of scope
 
