@@ -29,6 +29,8 @@ This repository does not just rely on whatever `/opt/rocm` happens to look like 
 
 In other words: this folder contains the practical glue that makes a customized MiGraphX toolchain shippable instead of merely interesting.
 
+For release-facing packaging, the custom MiGraphX prefix should be an explicit input (`AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx`), not a quietly discovered maintainer-local path.
+
 ## If you are new, read in this order
 
 1. `package_release.sh`
