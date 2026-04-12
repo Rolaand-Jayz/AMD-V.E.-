@@ -21,6 +21,7 @@ The reusable personal skill pack for this environment lives in:
 - requirements or specification packs -> `specification-pack`
 - skeptical challenge or scope pressure testing -> `devils-advocate`
 - release go/no-go review -> `release-readiness`
+- public truth-surface alignment, launch credibility, support-tier discipline, or gold-standard release prep -> start with `release-readiness` and `specification-pack`, then add `devils-advocate` if claims or scope need stress-testing
 - full no-stubs workflow -> `clean-stubs`
 - stub audit only -> `stub-sweep`
 - security audit -> `security-audit`
@@ -34,6 +35,8 @@ The reusable personal skill pack for this environment lives in:
 ## Repo-first rule
 
 Before invoking a shared skill, use this repository's `AGENTS.md` and repo-local instructions for build/test/runtime facts.
+
+For release-facing or public-facing work in this repo, also obey `.github/instructions/release-gold-standard.instructions.md` so the shared workflow stays aligned with the repo's claim-vs-proof standard.
 
 ## No-duplication rule
 
