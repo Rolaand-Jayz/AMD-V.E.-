@@ -2,13 +2,13 @@
 
 ## Release Status
 
-## **BETA PREP / PRE-RELEASE STAGING**
+## **PUBLIC BETA RELEASE LIVE**
 
 ## **ONLY VERIFIED ON ARCH LINUX + RX 7900 GRE**
 
-This repository is preparing its first public beta prerelease.
+This repository has published its first public beta prerelease.
 
-As of this document, no public GitHub beta prerelease is published yet.
+As of this document, `v0.1.0-beta.1` is live on the GitHub Releases page.
 
 The app and release payloads have only been tested on:
 

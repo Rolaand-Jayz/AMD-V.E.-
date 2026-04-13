@@ -6,8 +6,8 @@ Code presence is **not** the same thing as release support. This file is the sup
 
 | Tier | Scope | Current statement |
 | --- | --- | --- |
-| Verified primary | Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE | This is the only environment currently treated as verified for the beta-prep branch |
-| Preview target | Ubuntu 24.04, Ubuntu 22.04, Debian 12, Fedora 41, openSUSE Leap 15.6, openSUSE Tumbleweed, Rocky 9, AlmaLinux 9 | Package targets exist or are planned in the release tooling, but these are still validation targets rather than broad compatibility proof |
+| Verified primary | Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE | This is the only environment currently treated as verified for the public beta release |
+| Preview target | Ubuntu 24.04, Ubuntu 22.04, Debian 12, Fedora 41, openSUSE Leap 15.6, openSUSE Tumbleweed, Rocky 9, AlmaLinux 9 | Published preview package assets exist for these targets, but they remain validation targets rather than broad compatibility proof |
 | Experimental / manual | Other AMD Linux distros, custom Mesa/ROCm/kernel mixes, mixed iGPU+dGPU setups, bespoke source-build environments | Reports are welcome, but these paths require full environment detail and should not be marketed as stable support yet |
 | Out of scope | Windows, macOS, NVIDIA/CUDA workflows, AppImage/Flatpak/Snap | Not part of the current product promise |
 
@@ -24,18 +24,18 @@ Code presence is **not** the same thing as release support. This file is the sup
 
 | Tier | Packaging surface | Current statement |
 | --- | --- | --- |
-| Planned primary beta asset | Arch package + portable bundle + checksum sidecars | Intended for the first public beta release once published |
-| Preview target | AUR handoff bundle, Debian/Ubuntu packages, RPM-family packages | Packaging reach exists in tooling, but these assets still need public validation on target systems |
+| Current public beta asset | Arch package + portable bundle + checksum sidecars | Published on GitHub Releases for `v0.1.0-beta.1` |
+| Preview target | AUR handoff bundle, Debian/Ubuntu packages, RPM-family packages | Published as preview assets, but these still need public validation on target systems |
 | Not proof by itself | Any package emitted by the build pipeline | A package format existing does not widen verified compatibility on its own |
 
 ## Bundled vs host-required boundary
 
-### Bundled with the planned beta payload
+### Bundled with the current beta payload
 
 - app binaries and launchers
 - app-private runtime libraries
 - app-private `ffmpeg` / `ffprobe`
-- bundled custom MiGraphX runtime/toolchain when the beta asset requires it
+- bundled custom MiGraphX runtime/toolchain when the current beta asset requires it
 
 ### Still required from the host
 

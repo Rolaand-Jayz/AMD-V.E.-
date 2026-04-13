@@ -4,8 +4,8 @@ This file is the blunt version. Beta users should not have to discover these by 
 
 ## Release-state limitations
 
-- The repository is still preparing its **first public GitHub beta prerelease**.
-- No public release assets are published yet, so outsiders cannot inspect the final artifact set from the release page today.
+- The first public GitHub beta prerelease is now published as `v0.1.0-beta.1`.
+- This is still a beta prerelease, not a general-availability release.
 - Public repo metadata and external website polish are still lighter than the long-term gold standard.
 
 ## Validation limitations

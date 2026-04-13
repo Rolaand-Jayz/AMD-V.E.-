@@ -4,13 +4,13 @@ AMD Video Enhancer is a Linux-first video enhancer that uses ML and AI models to
 
 ## Release snapshot
 
-**Current public state:** `pre-release-staging` is preparing the first public GitHub beta prerelease. No public beta prerelease is published on the GitHub Releases page yet.
+**Current public state:** `v0.1.0-beta.1` is published on the GitHub Releases page as the first public beta prerelease from `main`.
 
 **Verified primary system:** Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE.
 
 **Primary verified backend path:** MiGraphX inference with the FFmpeg media pipeline on that reference system.
 
-**Bundled MiGraphX reality:** the planned beta packages bundle a custom MiGraphX runtime/toolchain because the required upstream behavior is not yet available in the stock system path.
+**Bundled MiGraphX reality:** the current beta prerelease packages bundle a custom MiGraphX runtime/toolchain because the required upstream behavior is not yet available in the stock system path.
 
 **Support boundary:** package targets are broader than verified compatibility. Packaging reach is not the same thing as support proof.
 
@@ -271,7 +271,7 @@ Useful runtime tuning variables include:
 
 ## Current project status
 
-- `pre-release-staging` is preparing the first public GitHub beta prerelease; no public release is published yet
+- `v0.1.0-beta.1` is the current public GitHub beta prerelease on `main`
 - the primary verified stack is **Arch Linux + Ryzen 7 7800X3D + Radeon RX 7900 GRE**
 - support tiers live in [`docs/SUPPORT_TIERS.md`](docs/SUPPORT_TIERS.md)
 - the current release truth surface lives in [`docs/RELEASE_STATUS.md`](docs/RELEASE_STATUS.md)

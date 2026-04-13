@@ -7,6 +7,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.1.0-beta.1] - 2026-04-13
+
 ### Added
 
 - Installed release documentation for licensing, security, release operations, and packaging.

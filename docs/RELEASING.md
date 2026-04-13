@@ -2,9 +2,9 @@
 
 ## Release channel
 
-The repository is preparing its first public **GitHub beta prerelease**.
+The repository has published its first public **GitHub beta prerelease** as `v0.1.0-beta.1`.
 
-As of 2026-04-12, the public release page should still show no published prerelease. This document describes the process and checks that must be true when that first beta is actually published.
+As of 2026-04-13, the public release page should show that prerelease and its assets. This document describes the process and checks used for that publication and for future beta tags.
 
 That is deliberate and should remain the default until validation broadens beyond
 the primary reference system.
@@ -17,7 +17,7 @@ Current support statement:
 - ROCm, Mesa, Vulkan, and MiGraphX compatibility still vary across distros and kernels
 
 Do not market current tags as a general-availability release.
-Do not claim that beta assets are published until outsiders can actually see those assets on the public release page.
+Do not claim broader validation than outsiders can actually verify from the public release page, docs, and benchmark evidence.
 
 ## Verified versus preview targets
 
@@ -125,7 +125,7 @@ Before publishing a beta prerelease, confirm:
 
 Every release should state:
 
-- whether a GitHub beta prerelease is already published or is still being prepared
+- whether the current GitHub beta prerelease is already published or a future tag is still being prepared
 - primarily verified on Arch Linux
 - primarily verified on Ryzen 7 7800X3D + Radeon RX 7900 GRE
 - other distro packages are preview builds

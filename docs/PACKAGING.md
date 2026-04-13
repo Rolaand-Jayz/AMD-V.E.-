@@ -2,9 +2,9 @@
 
 ## Release status
 
-This branch is preparing the first public **GitHub beta prerelease**.
+The first public **GitHub beta prerelease** `v0.1.0-beta.1` is now published on the GitHub Releases page.
 
-As of 2026-04-12, no public prerelease is published yet. This document describes the asset set and packaging behavior intended for that first beta publication.
+As of 2026-04-13, outsiders can inspect the release page, release assets, and checksum files directly. This document describes the asset set and packaging behavior used for that beta publication and for future beta refreshes.
 
 - Primary verified stack: Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE
 - Other distro package formats are preview targets that still need target-system validation
