@@ -8,6 +8,8 @@
 
 namespace ave {
 
+std::filesystem::path defaultWritableCacheDir();
+
 std::filesystem::path defaultWritableModelsDir();
 
 std::optional<std::filesystem::path> bundledModelsDirectory();

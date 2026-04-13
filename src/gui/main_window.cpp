@@ -184,6 +184,10 @@ bool isMigraphxCompatibleFormat(ave::ModelFormat format) {
     return format == ave::ModelFormat::Onnx || format == ave::ModelFormat::Pytorch;
 }
 
+bool isRocmHipCompatibleFormat(ave::ModelFormat format) {
+    return format == ave::ModelFormat::Onnx;
+}
+
 bool isNcnnCompatibleFormat(ave::ModelFormat format) {
     return format == ave::ModelFormat::NcnnBin;
 }
@@ -196,11 +200,17 @@ bool isCompatibleWithBackend(const ave::ManagedModel& model, ave::BackendType ba
                (hasUsableModelPath(model.downloadedPath) && hasMxrExtension(model.downloadedPath)) ||
                (hasUsableModelPath(model.convertedPath) && hasMxrExtension(model.convertedPath));
     }
+    if (backend == ave::BackendType::RocmHip) {
+        return isRocmHipCompatibleFormat(model.entry.sourceFormat) &&
+               hasUsableModelPath(model.downloadedPath) &&
+               !hasMxrExtension(model.downloadedPath);
+    }
     if (backend == ave::BackendType::NcnnVulkan) {
         return isNcnnCompatibleFormat(model.entry.sourceFormat);
     }
     if (backend == ave::BackendType::Auto) {
         return isCompatibleWithBackend(model, ave::BackendType::MiGraphX) ||
+               isCompatibleWithBackend(model, ave::BackendType::RocmHip) ||
                isCompatibleWithBackend(model, ave::BackendType::NcnnVulkan);
     }
     return false;
@@ -211,6 +221,12 @@ bool isReadyForBackend(const ave::ManagedModel& model, ave::BackendType backend)
         return (hasUsableModelPath(model.downloadedPath) && hasMxrExtension(model.downloadedPath)) ||
                (hasUsableModelPath(model.convertedPath) && hasMxrExtension(model.convertedPath));
     }
+    if (backend == ave::BackendType::RocmHip) {
+        return model.state == ave::ModelState::Downloaded &&
+               isRocmHipCompatibleFormat(model.entry.sourceFormat) &&
+               !model.downloadedPath.empty() &&
+               !hasMxrExtension(model.downloadedPath);
+    }
     if (backend == ave::BackendType::NcnnVulkan) {
         return model.state == ave::ModelState::Downloaded &&
                isNcnnCompatibleFormat(model.entry.sourceFormat) &&
@@ -219,6 +235,7 @@ bool isReadyForBackend(const ave::ManagedModel& model, ave::BackendType backend)
     }
     if (backend == ave::BackendType::Auto) {
         return isReadyForBackend(model, ave::BackendType::MiGraphX) ||
+               isReadyForBackend(model, ave::BackendType::RocmHip) ||
                isReadyForBackend(model, ave::BackendType::NcnnVulkan);
     }
     return false;
@@ -228,11 +245,20 @@ bool needsMigraphxCompile(const ave::ManagedModel& model, ave::BackendType backe
     if (backend != ave::BackendType::MiGraphX && backend != ave::BackendType::Auto) {
         return false;
     }
-    return isMigraphxCompatibleFormat(model.entry.sourceFormat) &&
-           hasUsableModelPath(model.downloadedPath) &&
-           model.state == ave::ModelState::Downloaded &&
-           !hasMxrExtension(model.downloadedPath) &&
-           !hasMxrExtension(model.convertedPath);
+    const bool compileCandidate =
+        isMigraphxCompatibleFormat(model.entry.sourceFormat) &&
+        hasUsableModelPath(model.downloadedPath) &&
+        model.state == ave::ModelState::Downloaded &&
+        !hasMxrExtension(model.downloadedPath) &&
+        !hasMxrExtension(model.convertedPath);
+    if (!compileCandidate) {
+        return false;
+    }
+    if (backend == ave::BackendType::Auto &&
+        isReadyForBackend(model, ave::BackendType::RocmHip)) {
+        return false;
+    }
+    return true;
 }
 
 ave::ParameterValue parseParameterValue(const QString& text) {
@@ -285,6 +311,9 @@ std::optional<ave::BackendType> backendFromString(const QString& s) {
     const QString n = s.trimmed().toLower();
     if (n == "auto") return ave::BackendType::Auto;
     if (n == "migraphx") return ave::BackendType::MiGraphX;
+    if (n == "rocm-hip" || n == "rocm_hip" || n == "rocmhip" || n == "rocm" || n == "hip") {
+        return ave::BackendType::RocmHip;
+    }
     if (n == "ncnn-vulkan" || n == "ncnn") return ave::BackendType::NcnnVulkan;
     if (n == "vulkan-compute" || n == "vulkan_compute" || n == "vulkan") {
         return ave::BackendType::VulkanCompute;
@@ -302,6 +331,7 @@ QString backendDisplayName(ave::BackendType backend) {
     switch (backend) {
         case ave::BackendType::Auto:          return QStringLiteral("Auto");
         case ave::BackendType::MiGraphX:      return QStringLiteral("MiGraphX");
+        case ave::BackendType::RocmHip:       return QStringLiteral("ROCm/HIP");
         case ave::BackendType::VulkanCompute: return QStringLiteral("Vulkan Compute");
         case ave::BackendType::NcnnVulkan:    return QStringLiteral("NCNN Vulkan");
         case ave::BackendType::VapourSynth:   return QStringLiteral("VapourSynth");
@@ -321,6 +351,11 @@ QString inferredProgressRuntimeName(const QString& msg,
     }
     if (lower.contains("migraphx")) {
         return QStringLiteral("MiGraphX");
+    }
+    if (lower.contains("rocm/hip") ||
+        (lower.contains("onnx runtime") && lower.contains("rocm")) ||
+        lower.contains("rocmexecutionprovider")) {
+        return QStringLiteral("ROCm/HIP");
     }
     if (lower.contains("vulkan compute")) {
         return QStringLiteral("Vulkan Compute");
@@ -1080,8 +1115,9 @@ void MainWindow::buildUi() {
     setupGrid->addWidget(browseOut, 2, 3);
 
     backendCombo_ = new QComboBox(setupGroup);
-    backendCombo_->addItem("Auto (MiGraphX → NCNN → Vulkan)", static_cast<int>(ave::BackendType::Auto));
+    backendCombo_->addItem("Auto (MiGraphX → ROCm/HIP → Vulkan Compute → NCNN)", static_cast<int>(ave::BackendType::Auto));
     backendCombo_->addItem("MiGraphX (ROCm)",         static_cast<int>(ave::BackendType::MiGraphX));
+    backendCombo_->addItem("ROCm/HIP (ONNX Runtime)", static_cast<int>(ave::BackendType::RocmHip));
     backendCombo_->addItem("NCNN (Vulkan)",            static_cast<int>(ave::BackendType::NcnnVulkan));
     backendCombo_->addItem("Vulkan Compute",           static_cast<int>(ave::BackendType::VulkanCompute));
     backendCombo_->addItem("VapourSynth",              static_cast<int>(ave::BackendType::VapourSynth));
@@ -1198,13 +1234,13 @@ void MainWindow::buildUi() {
 
     auto* templateRow = new QHBoxLayout;
     auto* pipelineHint = new QLabel(
-        "Start with a template or assemble the stage list manually. Filters are available in a separate tab.",
+        "Start with a stage starter or build the enhancement list manually. Optional catalog filters live in their own tab if you want extra post-processing.",
         pipelineGroup);
     pipelineHint->setWordWrap(true);
     pipelineHint->setStyleSheet("color: #666;");
     templateRow->addWidget(pipelineHint, 1);
     quickTemplateCombo_ = new QComboBox(pipelineGroup);
-    quickTemplateCombo_->addItem("Start from template");
+    quickTemplateCombo_->addItem("Choose a stage starter");
     quickTemplateCombo_->addItem("Web Cleanup 1080p60");
     quickTemplateCombo_->addItem("Anime Upscale 4K60");
     quickTemplateCombo_->addItem("Archive Restore 1440p");
@@ -1301,17 +1337,24 @@ void MainWindow::buildUi() {
     connect(moveDownButton_,    &QPushButton::clicked, this, [this]() { moveSelectedStage(1); });
     connect(clearStagesButton_, &QPushButton::clicked, this, &MainWindow::clearStages);
 
+    auto* plannerHintRow = new QHBoxLayout;
     auto* plannerHint = new QLabel(
-        "Requested order is editable. The planner preview shows the execution order the app will actually use.",
+        "Build your enhancement list here. The app will auto-arrange the final execution order when needed.",
         stagesTab);
     plannerHint->setWordWrap(true);
     plannerHint->setStyleSheet("color: #666;");
-    stagesTabLayout->addWidget(plannerHint);
+    plannerHintRow->addWidget(plannerHint, 1);
+    auto* plannerPreviewButton = new QPushButton("Show execution order", stagesTab);
+    plannerPreviewButton->setCheckable(true);
+    plannerPreviewButton->setToolTip(
+        "Reveal the planner's final execution order. This is helpful when you want to see how the app rearranges stages behind the scenes.");
+    plannerHintRow->addWidget(plannerPreviewButton);
+    stagesTabLayout->addLayout(plannerHintRow);
 
     auto* listSplit = new QSplitter(Qt::Horizontal, stagesTab);
     listSplit->setChildrenCollapsible(false);
 
-    auto* reqGroup  = new QGroupBox("Requested Order", listSplit);
+    auto* reqGroup  = new QGroupBox("My Pipeline", listSplit);
     auto* reqLayout = new QVBoxLayout(reqGroup);
     requestedStagesView_ = new QListWidget(reqGroup);
     requestedStagesView_->setDragDropMode(QAbstractItemView::InternalMove);
@@ -1320,7 +1363,7 @@ void MainWindow::buildUi() {
     requestedStagesView_->setAlternatingRowColors(true);
     reqLayout->addWidget(requestedStagesView_);
 
-    auto* planGroup  = new QGroupBox("Planner Order", listSplit);
+    auto* planGroup  = new QGroupBox("Execution Order (auto-arranged)", listSplit);
     auto* planLayout = new QVBoxLayout(planGroup);
     plannedStagesView_ = new QListWidget(planGroup);
     plannedStagesView_->setAlternatingRowColors(true);
@@ -1331,16 +1374,23 @@ void MainWindow::buildUi() {
     listSplit->addWidget(planGroup);
     listSplit->setStretchFactor(0, 1);
     listSplit->setStretchFactor(1, 1);
+    planGroup->setVisible(false);
+    connect(plannerPreviewButton, &QPushButton::toggled, planGroup,
+            [plannerPreviewButton, planGroup](const bool checked) {
+                planGroup->setVisible(checked);
+                plannerPreviewButton->setText(
+                    checked ? "Hide execution order" : "Show execution order");
+            });
     stagesTabLayout->addWidget(listSplit, 1);
 
-    pipelineTabs->addTab(stagesTab, "Stages");
+    pipelineTabs->addTab(stagesTab, "Main Enhancements");
 
     auto* filtersTab = new QWidget(pipelineTabs);
     auto* filtersTabLayout = new QVBoxLayout(filtersTab);
     filtersTabLayout->setContentsMargins(0, 0, 0, 0);
     filtersTabLayout->setSpacing(8);
     auto* filtersHint = new QLabel(
-        "Catalog GLSL and VapourSynth filters are separate from the main stage list. The execution plan on the right shows which of them will actually run with the current backend and pipeline.",
+        "Optional GLSL and VapourSynth filters live here. Use them after the main enhancement pipeline when you want extra cleanup or polish.",
         filtersTab);
     filtersHint->setWordWrap(true);
     filtersHint->setStyleSheet("color: #666;");
@@ -1355,14 +1405,14 @@ void MainWindow::buildUi() {
     filterCatalogLayout->setSpacing(6);
     auto* presetRow = new QHBoxLayout;
     filterPresetCombo_ = new QComboBox(filterCatalogPane);
-    filterPresetCombo_->addItem(QStringLiteral("Manual / current selection"), QString());
+    filterPresetCombo_->addItem(QStringLiteral("Manual / current filter selection"), QString());
     for (const auto& preset : filterPresetDefinitions()) {
         filterPresetCombo_->addItem(QString::fromUtf8(preset.name),
                                     QString::fromUtf8(preset.id));
     }
     auto* applyPresetButton = new QPushButton(QStringLiteral("Apply Preset"), filterCatalogPane);
     auto* clearFiltersButton = new QPushButton(QStringLiteral("Clear Filters"), filterCatalogPane);
-    presetRow->addWidget(new QLabel(QStringLiteral("Quick Preset:"), filterCatalogPane));
+    presetRow->addWidget(new QLabel(QStringLiteral("Filter preset:"), filterCatalogPane));
     presetRow->addWidget(filterPresetCombo_, 1);
     presetRow->addWidget(applyPresetButton);
     presetRow->addWidget(clearFiltersButton);
@@ -1396,7 +1446,7 @@ void MainWindow::buildUi() {
     filtersSplit->setStretchFactor(0, 2);
     filtersSplit->setStretchFactor(1, 1);
     filtersTabLayout->addWidget(filtersSplit, 1);
-    pipelineTabs->addTab(filtersTab, "Filters");
+    pipelineTabs->addTab(filtersTab, "Optional Filters");
 
     connect(applyPresetButton, &QPushButton::clicked,
             this, &MainWindow::applySelectedFilterPreset);
@@ -2086,7 +2136,7 @@ void MainWindow::refreshActiveFilters() {
         } else if (!backendCompatible) {
             status = QStringLiteral("Ignored by backend");
             if (backend == ave::BackendType::Auto) {
-                reason = QStringLiteral("Auto only picks MiGraphX, Vulkan Compute, or NCNN Vulkan. It will not select GLSL Shader or VapourSynth for catalog filters.");
+                reason = QStringLiteral("Auto only picks MiGraphX, ROCm/HIP, Vulkan Compute, or NCNN Vulkan. It will not select GLSL Shader or VapourSynth for catalog filters.");
             } else {
                 reason = QStringLiteral("%1 does not execute %2 catalog filters.")
                              .arg(backendDisplayName(backend), filterRuntimeName(entry->runtime));
@@ -2228,6 +2278,54 @@ void MainWindow::refreshCommandPreview() {
     if (dryRunToggle_->isChecked()) args << "--dry-run";
 
     commandPreviewEdit_->setText(args.join(' '));
+    refreshActionReadiness();
+}
+
+void MainWindow::refreshActionReadiness() {
+    const bool running = isRunning_.load();
+
+    QString runError;
+    const bool canRun = buildJob(runError).has_value();
+    const QString runTooltip = canRun
+        ? QStringLiteral("Run the current job with the settings shown here.")
+        : runError;
+
+    const QString trimmedInput = inputPathEdit_ != nullptr ? inputPathEdit_->text().trimmed() : QString();
+    const QString trimmedOutput = outputPathEdit_ != nullptr ? outputPathEdit_->text().trimmed() : QString();
+    const QString trimmedCodec = codecCombo_ != nullptr ? codecCombo_->currentText().trimmed() : QString();
+    const QString trimmedPreset = presetCombo_ != nullptr ? presetCombo_->currentText().trimmed() : QString();
+
+    QString previewError;
+    if (dryRunToggle_ != nullptr && dryRunToggle_->isChecked()) {
+        previewError = QStringLiteral("Turn off Dry run to process a short preview clip.");
+    } else if (trimmedInput.isEmpty()) {
+        previewError = QStringLiteral("Choose an input video first.");
+    } else if (trimmedOutput.isEmpty()) {
+        previewError = QStringLiteral("Choose an output path first.");
+    } else if (trimmedCodec.isEmpty()) {
+        previewError = QStringLiteral("Choose a codec first.");
+    } else if (trimmedPreset.isEmpty()) {
+        previewError = QStringLiteral("Choose a preset first.");
+    }
+    const bool canPreview = previewError.isEmpty();
+    const QString previewTooltip = canPreview
+        ? QStringLiteral("Process a short clip so you can inspect the result before the full run.")
+        : previewError;
+
+    if (runButton_ != nullptr) {
+        runButton_->setEnabled(!running && canRun);
+        runButton_->setToolTip(runTooltip);
+    }
+    if (previewButton_ != nullptr) {
+        previewButton_->setEnabled(!running && canPreview);
+        previewButton_->setToolTip(previewTooltip);
+    }
+    if (addQueueButton_ != nullptr) {
+        addQueueButton_->setEnabled(!running && canRun);
+        addQueueButton_->setToolTip(canRun
+            ? QStringLiteral("Add the current job to the batch queue.")
+            : runTooltip);
+    }
 }
 
 void MainWindow::updateFilterPresetDescription() {
@@ -3068,8 +3166,6 @@ std::optional<ave::VideoJob> MainWindow::buildJob(QString& error) const {
 
 void MainWindow::setRunning(bool running) {
     isRunning_.store(running);
-    runButton_->setEnabled(!running);
-    previewButton_->setEnabled(!running);
 
     // Show pause/cancel only while running
     pauseButton_->setVisible(running);
@@ -3123,6 +3219,7 @@ void MainWindow::setRunning(bool running) {
     clearStagesButton_->setEnabled(!running);
     refreshStageBuilderActions();
     refreshQueueControls();
+    refreshActionReadiness();
 }
 
 void MainWindow::applyProgressUpdate(const int overallPct,
@@ -3625,6 +3722,8 @@ void MainWindow::refreshQueuedJobsView() {
 
 void MainWindow::refreshQueueControls() {
     const bool running = isRunning_.load();
+    QString buildError;
+    const bool canQueueCurrentJob = buildJob(buildError).has_value();
     const bool hasSelection = queuedJobsView_ != nullptr && queuedJobsView_->currentRow() >= 0;
     const bool hasRunnable = nextRunnableQueuedJobIndex().has_value();
     const bool hasFinished = std::any_of(
@@ -3634,7 +3733,7 @@ void MainWindow::refreshQueueControls() {
         });
 
     if (addQueueButton_ != nullptr) {
-        addQueueButton_->setEnabled(!running);
+        addQueueButton_->setEnabled(!running && canQueueCurrentJob);
     }
     if (runQueueButton_ != nullptr) {
         runQueueButton_->setEnabled(!running && hasRunnable);

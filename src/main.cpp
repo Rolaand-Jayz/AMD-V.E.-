@@ -2,6 +2,10 @@
 #include <csignal>
 #include <iostream>
 
+#if defined(__unix__) || defined(__APPLE__)
+#  include <unistd.h>
+#endif
+
 #include "ave/backend_manager.hpp"
 #include "ave/cli.hpp"
 #include "ave/telemetry.hpp"
@@ -9,14 +13,20 @@
 
 namespace {
 std::atomic<bool> g_cancelFlag{false};
+volatile std::sig_atomic_t g_signalCount = 0;
 
 void signalHandler(int /*sig*/) {
-    if (g_cancelFlag.load(std::memory_order_relaxed)) {
+    if (g_signalCount > 0) {
         // Second Ctrl+C — force-exit immediately
         std::_Exit(130);
     }
+    g_signalCount = 1;
     g_cancelFlag.store(true, std::memory_order_relaxed);
-    std::cerr << "\nCancelling… (press Ctrl+C again to force quit)\n";
+#if defined(__unix__) || defined(__APPLE__)
+    static constexpr char kCancelMessage[] =
+        "\nCancelling... (press Ctrl+C again to force quit)\n";
+    (void)::write(STDERR_FILENO, kCancelMessage, sizeof(kCancelMessage) - 1);
+#endif
 }
 }  // namespace
 

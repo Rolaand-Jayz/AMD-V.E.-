@@ -5,6 +5,7 @@
 /build-main-merge/
 /build-migraphx-patched/
 /dist/
+/.local/
 /.cache/
 *.pyc
 __pycache__/

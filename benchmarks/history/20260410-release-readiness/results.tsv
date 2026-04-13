@@ -1,0 +1,3 @@
+model_id	input_resolution	output_resolution	frames	wall_seconds	migraphx_total_seconds	migraphx_fps	artifact_path	notes
+openproteus-compact-x2	960x540@30	1920x1080	600	23.799	11.1084	54.0133	/home/rolaandjayz/.local/share/ave/models/migraphx/openproteus-compact-x2_960x540_fp16.mxr	direct_final_encode=on; tiles_per_frame=1; batches_per_frame=1
+clearreality-x4-fast	960x540@30	3840x2160	600	49.723	36.7233	16.3384	/home/rolaandjayz/.local/share/ave/models/migraphx/clearreality-x4-fast_960x540_fp16.mxr	direct_final_encode=on; tiles_per_frame=2; batches_per_frame=2

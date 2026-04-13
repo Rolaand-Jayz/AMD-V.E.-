@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Documentation
-    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/README.md
-    about: Read the current open-alpha support and packaging guidance first.
+  - name: Release status
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/RELEASE_STATUS.md
+    about: Check what is published, what is still staging-only, and what this branch is claiming right now.
+  - name: Support tiers
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/SUPPORT_TIERS.md
+    about: See verified, preview, experimental, and out-of-scope environments before assuming support.
+  - name: Beta testing program
+    url: https://github.com/Rolaand-Jayz/AMD-V.E.-/blob/main/docs/BETA_TESTING_PROGRAM.md
+    about: Use the structured tester guidance for benchmark, compatibility, and quality submissions.

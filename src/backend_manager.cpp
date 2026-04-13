@@ -7,6 +7,7 @@
 #include "ave/backends/glsl_shader_backend.hpp"
 #include "ave/backends/migraphx_backend.hpp"
 #include "ave/backends/ncnn_vulkan_backend.hpp"
+#include "ave/backends/rocm_hip_backend.hpp"
 #include "ave/backends/vapoursynth_backend.hpp"
 #include "ave/backends/vulkan_compute_backend.hpp"
 #include "ave/interop_bridge.hpp"
@@ -22,6 +23,13 @@ std::vector<BackendInfo> BackendManager::probeBackends() const {
         std::string detail;
         const bool ok = backend.isAvailable(detail);
         infos.push_back(BackendInfo{BackendType::MiGraphX, backend.name(), ok, detail});
+    }
+
+    {
+        RocmHipBackend backend;
+        std::string detail;
+        const bool ok = backend.isAvailable(detail);
+        infos.push_back(BackendInfo{BackendType::RocmHip, backend.name(), ok, detail});
     }
 
     {
@@ -73,6 +81,11 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
         return std::make_unique<MiGraphXBackend>();
     };
 
+    auto selectRocmHip = [&selectionSummary]() -> std::unique_ptr<IAcceleratorBackend> {
+        selectionSummary = "Selected ROCm/HIP (ONNX Runtime).";
+        return std::make_unique<RocmHipBackend>();
+    };
+
     if (requested == BackendType::MiGraphX) {
         MiGraphXBackend migraphx;
         std::string reason;
@@ -91,6 +104,16 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
             return std::make_unique<VulkanComputeBackend>();
         }
         selectionSummary = "Vulkan Compute explicitly requested but unavailable: " + reason;
+        return nullptr;
+    }
+
+    if (requested == BackendType::RocmHip) {
+        RocmHipBackend rocmHip;
+        std::string reason;
+        if (rocmHip.isAvailable(reason)) {
+            return selectRocmHip();
+        }
+        selectionSummary = "ROCm/HIP explicitly requested but unavailable: " + reason;
         return nullptr;
     }
 
@@ -134,11 +157,25 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
             return selectMigraphx();
         }
 
+        RocmHipBackend rocmHip;
+        std::string rocmHipReason;
+        if (rocmHip.isAvailable(rocmHipReason)) {
+            std::ostringstream os;
+            os << "MiGraphX unavailable: " << migraphxReason
+               << " Falling back to ROCm/HIP (ONNX Runtime).";
+            if (!diagnostics.migraphxReady) {
+                os << " Runtime diagnostics: " << diagnostics.summary();
+            }
+            selectionSummary = os.str();
+            return std::make_unique<RocmHipBackend>();
+        }
+
         VulkanComputeBackend vkCompute;
         std::string vkReason;
         if (vkCompute.isAvailable(vkReason)) {
             std::ostringstream os;
             os << "MiGraphX unavailable: " << migraphxReason
+               << " ROCm/HIP unavailable: " << rocmHipReason
                << " Falling back to Vulkan Compute.";
             if (!diagnostics.migraphxReady) {
                 os << " Runtime diagnostics: " << diagnostics.summary();
@@ -152,6 +189,7 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
         if (ncnn.isAvailable(ncnnReason)) {
             std::ostringstream os;
             os << "MiGraphX unavailable: " << migraphxReason
+               << " ROCm/HIP unavailable: " << rocmHipReason
                << " Vulkan Compute unavailable: " << vkReason
                << " Falling back to NCNN Vulkan.";
             if (!diagnostics.migraphxReady) {
@@ -164,6 +202,7 @@ std::unique_ptr<IAcceleratorBackend> BackendManager::createBackend(BackendType r
         std::ostringstream os;
         os << "No supported AMD backend is available. "
            << "MiGraphX: " << migraphxReason << " | "
+              << "ROCm/HIP: " << rocmHipReason << " | "
            << "Vulkan Compute: " << vkReason << " | "
            << "NCNN Vulkan: " << ncnnReason;
         if (!diagnostics.checks.empty()) {

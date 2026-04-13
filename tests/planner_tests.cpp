@@ -129,6 +129,14 @@ void testBackendPreferredModelSelection() {
     check(migraphxPreferred->id == "realesrgan-x4-general",
           "MiGraphX should retain the general ONNX upscale default");
 
+    const auto* rocmHipPreferred =
+        ave::preferredBackendModelForStage(StageKind::Upscale, ave::BackendType::RocmHip);
+    check(rocmHipPreferred != nullptr, "ROCm/HIP should expose a preferred upscale model");
+    check(rocmHipPreferred->id == "realesrgan-x4-general",
+          "ROCm/HIP should prefer the general ONNX upscale default");
+    check(rocmHipPreferred->sourceFormat == ave::ModelFormat::Onnx,
+          "ROCm/HIP preferred model must be an ONNX model");
+
     const auto* ncnnDenoise =
         ave::preferredBackendModelForStage(StageKind::Denoise, ave::BackendType::NcnnVulkan);
     check(ncnnDenoise == nullptr,

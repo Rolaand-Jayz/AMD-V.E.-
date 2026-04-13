@@ -35,7 +35,7 @@ void testJobRecoveryRoundTrip() {
     state.startedAtUtc = "2026-04-01T12:00:00Z";
     state.job.inputPath = "/tmp/input clip.mp4";
     state.job.outputPath = "/tmp/output clip.mp4";
-    state.job.requestedBackend = ave::BackendType::MiGraphX;
+    state.job.requestedBackend = ave::BackendType::RocmHip;
     state.job.encode.codec = "libx265";
     state.job.encode.profile = "main10";
     state.job.encode.crf = 14;
@@ -73,7 +73,7 @@ void testJobRecoveryRoundTrip() {
     assert(loaded->startedAtUtc == state.startedAtUtc);
     assert(loaded->job.inputPath == state.job.inputPath);
     assert(loaded->job.outputPath == state.job.outputPath);
-    assert(loaded->job.requestedBackend == ave::BackendType::MiGraphX);
+    assert(loaded->job.requestedBackend == ave::BackendType::RocmHip);
     assert(loaded->job.encode.codec == "libx265");
     assert(loaded->job.encode.profile == "main10");
     assert(loaded->job.encode.crf == 14);

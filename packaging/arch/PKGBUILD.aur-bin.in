@@ -1,0 +1,24 @@
+# Maintainer: @PACKAGE_MAINTAINER@
+
+pkgname=@AUR_PKGNAME@
+pkgver=@ARCH_PKGVER@
+pkgrel=@ARCH_PKGREL@
+_upstream_version=@UPSTREAM_VERSION@
+_release_tag=@RELEASE_TAG@
+pkgdesc="Linux-first AMD GPU video enhancement app with bundled custom MiGraphX runtime"
+arch=('x86_64')
+url='https://github.com/Rolaand-Jayz/AMD-V.E.-'
+license=('MIT')
+depends=('bash')
+provides=('amd-video-enhancer')
+conflicts=('amd-video-enhancer')
+source=(
+  "@PAYLOAD_ARCHIVE_NAME@::@PAYLOAD_URL@"
+)
+sha256sums=(
+  '@PAYLOAD_SHA256@'
+)
+
+package() {
+  bsdtar -xpf "${srcdir}/@PAYLOAD_ARCHIVE_NAME@" -C "${pkgdir}"
+}

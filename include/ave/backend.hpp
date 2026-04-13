@@ -12,6 +12,7 @@ namespace ave {
 enum class BackendType {
     Auto,
     MiGraphX,
+    RocmHip,
     NcnnVulkan,
     VulkanCompute,
     VapourSynth,

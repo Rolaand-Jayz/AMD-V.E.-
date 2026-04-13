@@ -7,11 +7,11 @@ Maintainer: @PACKAGE_MAINTAINER@
 Depends: bash
 Recommends: ffmpeg
 Homepage: https://github.com/Rolaand-Jayz/AMD-V.E.-
-Description: Open-alpha AMD GPU video enhancement app
- Native package built from the Arch-origin staged release root.
+Description: Linux-first AMD GPU video enhancement application
+ Native package built from the canonical staged release root.
  .
  This package keeps the application and bundled userspace dependencies private
  under /opt/amd-video-enhancer and exposes only thin entrypoints under /usr/bin.
  .
- Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE is the only tested stack.
- All other distro packages are experimental in the current open alpha.
+ Arch Linux on Ryzen 7 7800X3D + Radeon RX 7900 GRE remains the primary verified stack.
+ Other distro packages are published as preview builds and should be validated on the target system.

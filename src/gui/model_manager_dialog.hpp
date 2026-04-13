@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <thread>
 
 #include <QDialog>
 
@@ -33,7 +35,7 @@ class ModelManagerDialog final : public QDialog {
                                 ave::AppSettings&   settings,
                                 const QString&      initialModelId = QString(),
                                 QWidget*            parent = nullptr);
-    ~ModelManagerDialog() override = default;
+    ~ModelManagerDialog() override;
 
   private slots:
     void onSelectionChanged();
@@ -52,7 +54,9 @@ class ModelManagerDialog final : public QDialog {
     void closeEvent(QCloseEvent* event) override;
 
     void buildUi();
+    void joinWorkerThread();
     void populateList();
+    void refreshOperationKickoffState();
     void updateDetailPanel(const QString& modelId);
     void setButtonsEnabled(bool enabled);
 
@@ -84,6 +88,8 @@ class ModelManagerDialog final : public QDialog {
     QPushButton* refreshBtn_   = nullptr;
     QPushButton* closeBtn_     = nullptr;
 
+    std::jthread workerThread_;
     QString selectedModelId_;
     bool operationKickoff_ = false;
+    std::atomic<bool> workerActive_{false};
 };

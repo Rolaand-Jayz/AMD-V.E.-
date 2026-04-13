@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">AMD Video Enhancer icon</title>
+  <desc id="desc">Rounded dark video tile with an orange play symbol, enhancement spark, and upscale rails.</desc>
+  <defs>
+    <linearGradient id="bg" x1="28" y1="24" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#132238"/>
+      <stop offset="0.55" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="82" y1="72" x2="180" y2="166" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fb923c"/>
+      <stop offset="0.5" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#facc15"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="132" y1="134" x2="208" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fdba74" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#f59e0b" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="12" y="12" width="232" height="232" rx="46" fill="url(#bg)" stroke="#ea580c" stroke-width="8"/>
+  <rect x="40" y="50" width="176" height="112" rx="24" fill="#0b1220" stroke="#334155" stroke-width="4"/>
+
+  <rect x="50" y="60" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="50" y="82" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="50" y="104" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="50" y="126" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="194" y="60" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="194" y="82" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="194" y="104" width="12" height="14" rx="4" fill="#475569"/>
+  <rect x="194" y="126" width="12" height="14" rx="4" fill="#475569"/>
+
+  <circle cx="170" cy="172" r="42" fill="url(#glow)"/>
+  <path d="M103 80 L103 132 L154 106 Z" fill="url(#accent)"/>
+
+  <path d="M176 56 L182 72 L198 78 L182 84 L176 100 L170 84 L154 78 L170 72 Z" fill="#fde68a"/>
+
+  <path d="M68 194 C88 176 110 166 132 166 C154 166 176 176 194 194" fill="none" stroke="#f97316" stroke-width="10" stroke-linecap="round"/>
+  <path d="M82 206 C98 191 114 184 132 184 C150 184 166 191 180 206" fill="none" stroke="#fdba74" stroke-width="8" stroke-linecap="round"/>
+
+  <path d="M84 36 L98 36 L84 50 Z" fill="#fb923c" opacity="0.92"/>
+  <path d="M158 206 L172 206 L172 220 Z" fill="#facc15" opacity="0.9"/>
+</svg>

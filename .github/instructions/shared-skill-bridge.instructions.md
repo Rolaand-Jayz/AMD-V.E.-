@@ -8,7 +8,8 @@ When working in this repository:
 
 1. Follow `AGENTS.md` first for architecture, build/test commands, and project conventions.
 2. Follow the no-stubs rules in this repo and user profile without exception.
-3. Use the personal shared skill pack for reusable specialist workflows when the task matches one of these families:
+3. Follow the repo-local gold-standard release-truth guidance in `.github/instructions/release-gold-standard.instructions.md` for any public-facing, release-facing, packaging, docs, or support-surface work.
+4. Use the personal shared skill pack for reusable specialist workflows when the task matches one of these families:
    - specification and documentation planning
    - devil's-advocate challenge reviews
    - release-readiness reviews
@@ -20,6 +21,8 @@ When working in this repository:
 ## Conflict rule
 
 If a reusable shared skill recommendation conflicts with repo facts or repo constraints, the repo facts win.
+
+The same applies if a shared skill recommendation conflicts with the repo's gold-standard truth-surface requirements.
 
 ## Scope rule
 

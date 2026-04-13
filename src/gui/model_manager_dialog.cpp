@@ -55,7 +55,9 @@ ModelProgressCb ModelManagerDialog::makeProgressCb(const std::string& modelId) {
     return [self, modelId](const std::string&, float p, const std::string& msg) {
         QString qid  = QString::fromStdString(modelId);
         QString qmsg = QString::fromStdString(msg);
-        QMetaObject::invokeMethod(QApplication::instance(),
+        auto* app = QApplication::instance();
+        if (app == nullptr) { return; }
+        QMetaObject::invokeMethod(app,
             [self, qid, p, qmsg]() {
                 if (!self) { return; }
                 self->onProgressQt(qid, p, qmsg);
@@ -67,7 +69,9 @@ ModelStateCb ModelManagerDialog::makeStateCb(const std::string& modelId) {
     QPointer<ModelManagerDialog> self(this);
     return [self, modelId](const std::string&, ModelState st) {
         QString qid = QString::fromStdString(modelId);
-        QMetaObject::invokeMethod(QApplication::instance(),
+        auto* app = QApplication::instance();
+        if (app == nullptr) { return; }
+        QMetaObject::invokeMethod(app,
             [self, qid, st]() {
                 if (!self) { return; }
                 self->onStateChangedQt(qid, st);
@@ -80,7 +84,7 @@ ModelStateCb ModelManagerDialog::makeStateCb(const std::string& modelId) {
 // ─── closeEvent ──────────────────────────────────────────────────
 // Block the dialog from closing while any model operation is in progress.
 void ModelManagerDialog::closeEvent(QCloseEvent* event) {
-    if (operationKickoff_) {
+    if (operationKickoff_ || workerActive_.load(std::memory_order_acquire)) {
         QMessageBox::information(
             this,
             tr("Operation in progress"),
@@ -103,6 +107,10 @@ void ModelManagerDialog::closeEvent(QCloseEvent* event) {
         }
     }
     QDialog::closeEvent(event);
+}
+
+ModelManagerDialog::~ModelManagerDialog() {
+    joinWorkerThread();
 }
 
 ModelManagerDialog::ModelManagerDialog(ModelManager& manager,
@@ -287,8 +295,10 @@ void ModelManagerDialog::updateDetailPanel(const QString& modelId) {
     auto bestPath = manager_.bestPathForModel(modelId.toStdString());
     pathLabel_->setText(bestPath ? QString::fromStdString(*bestPath) : tr("(not on disk)"));
 
-    const bool busy = (m.state == ModelState::Downloading ||
-                       m.state == ModelState::Converting);
+    const bool busy = operationKickoff_ ||
+                      workerActive_.load(std::memory_order_acquire) ||
+                      m.state == ModelState::Downloading ||
+                      m.state == ModelState::Converting;
     progressBar_->setVisible(busy);
     progressMsg_->setVisible(busy);
     if (!busy) {
@@ -319,6 +329,23 @@ void ModelManagerDialog::setButtonsEnabled(bool enabled) {
     openFolderBtn_->setEnabled(enabled);
 }
 
+void ModelManagerDialog::refreshOperationKickoffState() {
+    operationKickoff_ = false;
+    for (const auto& m : manager_.allModels()) {
+        if (m.state == ModelState::Downloading ||
+            m.state == ModelState::Converting) {
+            operationKickoff_ = true;
+            break;
+        }
+    }
+}
+
+void ModelManagerDialog::joinWorkerThread() {
+    if (workerThread_.joinable()) {
+        workerThread_.join();
+    }
+}
+
 // ─── Qt-thread callbacks ──────────────────────────────────────────
 
 void ModelManagerDialog::onProgressQt(const QString& modelId, float p, const QString& msg) {
@@ -345,13 +372,7 @@ void ModelManagerDialog::onStateChangedQt(const QString& modelId, ModelState) {
             break;
         }
     }
-    operationKickoff_ = false;
-    for (const auto& m : manager_.allModels()) {
-        if (m.state == ModelState::Downloading || m.state == ModelState::Converting) {
-            operationKickoff_ = true;
-            break;
-        }
-    }
+    refreshOperationKickoffState();
     if (modelId == selectedModelId_) updateDetailPanel(selectedModelId_);
 }
 
@@ -377,49 +398,83 @@ void ModelManagerDialog::onDownloadClicked() {
 
 void ModelManagerDialog::onConvertClicked() {
     if (selectedModelId_.isEmpty()) return;
+    if (workerActive_.load(std::memory_order_acquire)) {
+        QMessageBox::information(
+            this,
+            tr("Operation in progress"),
+            tr("Please wait for the current model operation to finish before starting another one."));
+        return;
+    }
+    joinWorkerThread();
     const std::string id = selectedModelId_.toStdString();
     operationKickoff_ = true;
+    workerActive_.store(true, std::memory_order_release);
+    updateDetailPanel(selectedModelId_);
     const auto progressCb = makeProgressCb(id);
     const auto stateCb = makeStateCb(id);
-    ModelManager* manager = &manager_;
     QPointer<ModelManagerDialog> self(this);
-    std::thread([manager, id, progressCb, stateCb, self]() {
+    workerThread_ = std::jthread([this, id, progressCb, stateCb, self]() {
         std::string err;
-        if (!manager->convertToMiGraphX(id, progressCb, stateCb, err)) {
-            const QString msg = QString::fromStdString("MiGraphX conversion failed:\n" + err);
-            QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
-                QMessageBox::warning(nullptr, "Conversion Failed", msg);
-            }, Qt::QueuedConnection);
-            QMetaObject::invokeMethod(QApplication::instance(), [self]() {
-                if (!self) { return; }
-                self->operationKickoff_ = false;
-            }, Qt::QueuedConnection);
+        const bool ok = manager_.convertToMiGraphX(id, progressCb, stateCb, err);
+        workerActive_.store(false, std::memory_order_release);
+
+        auto* app = QApplication::instance();
+        if (app == nullptr) {
+            return;
         }
-    }).detach();
+        const QString msg = ok
+            ? QString()
+            : QString::fromStdString("MiGraphX conversion failed:\n" + err);
+        QMetaObject::invokeMethod(app, [self, msg]() {
+            if (!self) { return; }
+            self->refreshOperationKickoffState();
+            self->updateDetailPanel(self->selectedModelId_);
+            if (!msg.isEmpty()) {
+                QMessageBox::warning(self.data(), "Conversion Failed", msg);
+            }
+        }, Qt::QueuedConnection);
+    });
     updateDetailPanel(selectedModelId_);
 }
 
 void ModelManagerDialog::onPrewarmClicked() {
     if (selectedModelId_.isEmpty()) return;
+    if (workerActive_.load(std::memory_order_acquire)) {
+        QMessageBox::information(
+            this,
+            tr("Operation in progress"),
+            tr("Please wait for the current model operation to finish before starting another one."));
+        return;
+    }
+    joinWorkerThread();
     const std::string id = selectedModelId_.toStdString();
     operationKickoff_ = true;
+    workerActive_.store(true, std::memory_order_release);
+    updateDetailPanel(selectedModelId_);
     const auto progressCb = makeProgressCb(id);
     const auto stateCb = makeStateCb(id);
-    ModelManager* manager = &manager_;
     QPointer<ModelManagerDialog> self(this);
-    std::thread([manager, id, progressCb, stateCb, self]() {
+    workerThread_ = std::jthread([this, id, progressCb, stateCb, self]() {
         std::string err;
-        if (!manager->prewarmStandardArtifacts(id, progressCb, stateCb, err)) {
-            const QString msg = QString::fromStdString("MiGraphX prewarm failed:\n" + err);
-            QMetaObject::invokeMethod(QApplication::instance(), [msg]() {
-                QMessageBox::warning(nullptr, "Prewarm Failed", msg);
-            }, Qt::QueuedConnection);
-            QMetaObject::invokeMethod(QApplication::instance(), [self]() {
-                if (!self) { return; }
-                self->operationKickoff_ = false;
-            }, Qt::QueuedConnection);
+        const bool ok = manager_.prewarmStandardArtifacts(id, progressCb, stateCb, err);
+        workerActive_.store(false, std::memory_order_release);
+
+        auto* app = QApplication::instance();
+        if (app == nullptr) {
+            return;
         }
-    }).detach();
+        const QString msg = ok
+            ? QString()
+            : QString::fromStdString("MiGraphX prewarm failed:\n" + err);
+        QMetaObject::invokeMethod(app, [self, msg]() {
+            if (!self) { return; }
+            self->refreshOperationKickoffState();
+            self->updateDetailPanel(self->selectedModelId_);
+            if (!msg.isEmpty()) {
+                QMessageBox::warning(self.data(), "Prewarm Failed", msg);
+            }
+        }, Qt::QueuedConnection);
+    });
     updateDetailPanel(selectedModelId_);
 }
 
@@ -436,5 +491,6 @@ void ModelManagerDialog::onOpenFolderClicked() {
 
 void ModelManagerDialog::onRefreshClicked() {
     populateList();
+    refreshOperationKickoffState();
     if (!selectedModelId_.isEmpty()) updateDetailPanel(selectedModelId_);
 }

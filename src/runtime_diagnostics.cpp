@@ -1,5 +1,6 @@
 #include "ave/runtime_diagnostics.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -16,6 +17,10 @@
 
 #ifdef AVE_HAVE_HIP
 #  include <hip/hip_runtime.h>
+#endif
+
+#ifdef AVE_HAVE_ONNXRUNTIME_ROCM
+#  include <onnxruntime/onnxruntime_cxx_api.h>
 #endif
 
 #include "ave/runtime_paths.hpp"
@@ -77,6 +82,30 @@ std::string summarizeFailures(const std::vector<RuntimeDiagnosticCheck>& checks)
         first = false;
     }
     return out.str();
+}
+
+std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](const unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    return value;
+}
+
+bool onnxRuntimeRocmProviderDetected() {
+#ifdef AVE_HAVE_ONNXRUNTIME_ROCM
+    try {
+        const auto providers = Ort::GetAvailableProviders();
+        return std::any_of(providers.begin(), providers.end(),
+                           [](const std::string& provider) {
+                               return toLowerCopy(provider).find("rocm") != std::string::npos;
+                           });
+    } catch (...) {
+        return false;
+    }
+#else
+    return false;
+#endif
 }
 
 }  // namespace
@@ -193,6 +222,19 @@ AmdRuntimeSnapshot probeAmdRuntimeSnapshot() {
     snapshot.migraphxLibraryPresent = true;
 #endif
 
+    snapshot.onnxruntimeLibraryPresent = anyPathExists({
+        fs::path(snapshot.rocmRoot) / "lib" / "libonnxruntime.so",
+        fs::path(snapshot.rocmRoot) / "lib64" / "libonnxruntime.so",
+        "/usr/lib/libonnxruntime.so",
+        "/usr/lib64/libonnxruntime.so",
+        "/usr/local/lib/libonnxruntime.so",
+        "/usr/local/lib64/libonnxruntime.so",
+    });
+#ifdef AVE_HAVE_ONNXRUNTIME_ROCM
+    snapshot.onnxruntimeLibraryPresent = true;
+#endif
+    snapshot.onnxruntimeRocmProviderPresent = onnxRuntimeRocmProviderDetected();
+
     snapshot.hipRuntimePresent = anyPathExists({
         fs::path(snapshot.rocmRoot) / "lib" / "libamdhip64.so",
         fs::path(snapshot.rocmRoot) / "lib64" / "libamdhip64.so",
@@ -217,7 +259,7 @@ AmdRuntimeSnapshot probeAmdRuntimeSnapshot() {
 
 RuntimeDiagnosticsReport buildRuntimeDiagnosticsReport(const AmdRuntimeSnapshot& snapshot) {
     RuntimeDiagnosticsReport report;
-    report.checks.reserve(6);
+    report.checks.reserve(7);
 
     report.checks.push_back({
         "rocm-root",
@@ -287,6 +329,25 @@ RuntimeDiagnosticsReport buildRuntimeDiagnosticsReport(const AmdRuntimeSnapshot&
         "Install migraphx-driver plus libmigraphx.so, or bundle the optimized runtime with the app."
     });
 
+    RuntimeDiagnosticStatus rocmHipStatus = RuntimeDiagnosticStatus::Error;
+    std::string rocmHipDetail;
+    if (snapshot.onnxruntimeLibraryPresent && snapshot.onnxruntimeRocmProviderPresent) {
+        rocmHipStatus = RuntimeDiagnosticStatus::Ok;
+        rocmHipDetail = "ONNX Runtime and the ROCMExecutionProvider were detected.";
+    } else if (snapshot.onnxruntimeLibraryPresent || snapshot.onnxruntimeRocmProviderPresent) {
+        rocmHipStatus = RuntimeDiagnosticStatus::Warning;
+        rocmHipDetail = "ONNX Runtime ROCm support is only partially available.";
+    } else {
+        rocmHipDetail = "ONNX Runtime ROCm execution provider could not be detected.";
+    }
+    report.checks.push_back({
+        "onnxruntime-rocm",
+        "ROCm/HIP fallback runtime",
+        rocmHipStatus,
+        rocmHipDetail,
+        "Install an ONNX Runtime build that includes ROCMExecutionProvider support and keep libamdhip64 available at runtime."
+    });
+
     RuntimeDiagnosticStatus vulkanStatus = RuntimeDiagnosticStatus::Error;
     std::string vulkanDetail;
     if (snapshot.vulkanLoaderPresent) {
@@ -310,6 +371,13 @@ RuntimeDiagnosticsReport buildRuntimeDiagnosticsReport(const AmdRuntimeSnapshot&
         snapshot.migraphxDriverPresent &&
         snapshot.migraphxLibraryPresent &&
         snapshot.hipRuntimePresent;
+    report.rocmHipFallbackReady =
+        snapshot.rocmRootPresent &&
+        snapshot.kfdDevicePresent &&
+        snapshot.kfdAccessible &&
+        snapshot.hipRuntimePresent &&
+        snapshot.onnxruntimeLibraryPresent &&
+        snapshot.onnxruntimeRocmProviderPresent;
     report.ncnnFallbackReady = snapshot.ncnnRuntimePresent;
     return report;
 }
@@ -322,10 +390,13 @@ std::string RuntimeDiagnosticsReport::summary() const {
     if (migraphxReady) {
         return "ROCm and MiGraphX look ready for the preferred AMD execution path.";
     }
-    if (ncnnFallbackReady) {
-        return "MiGraphX is not fully ready; Vulkan/NCNN fallback should remain available.";
+    if (rocmHipFallbackReady) {
+        return "MiGraphX is not fully ready; ONNX Runtime ROCm/HIP fallback should cover supported ONNX image models.";
     }
-    return "MiGraphX is not ready and Vulkan fallback also looks incomplete.";
+    if (ncnnFallbackReady) {
+        return "MiGraphX and ROCm/HIP fallback are not fully ready; Vulkan/NCNN fallback should remain available.";
+    }
+    return "MiGraphX, ROCm/HIP fallback, and Vulkan fallback all look incomplete.";
 }
 
 std::string RuntimeDiagnosticsReport::detailedText(const bool includeRemediation) const {

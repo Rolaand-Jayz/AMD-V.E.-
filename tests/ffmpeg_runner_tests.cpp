@@ -27,6 +27,21 @@ EnhancementStage stage(const StageKind kind) {
     return value;
 }
 
+void testUnsafeEncodeTokensAreRejected() {
+    FfmpegRunner runner;
+
+    VideoJob job;
+    job.inputPath = "input.mp4";
+    job.outputPath = "output.mp4";
+    job.encode.codec = "libx264;rm";
+
+    std::string error;
+    const bool ok = runner.encode(job, {}, nullptr, error);
+    check(!ok, "unsafe ffmpeg codec tokens should be rejected before execution");
+    check(error.find("Invalid FFmpeg codec token") != std::string::npos,
+          "unsafe codec rejection should mention the codec token validation failure");
+}
+
 void testStereo3dRequiresAiBackend() {
     FfmpegRunner runner;
     std::string availabilityError;
@@ -49,6 +64,7 @@ void testStereo3dRequiresAiBackend() {
 }  // namespace
 
 int main() {
+    testUnsafeEncodeTokensAreRejected();
     testStereo3dRequiresAiBackend();
     return 0;
 }

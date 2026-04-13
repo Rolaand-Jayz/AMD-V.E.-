@@ -19,6 +19,9 @@ Environment:
   BUILD_DIR                  Override the build directory used for packaging.
   INSTALL_PREFIX             Prefix for install-tree mode.
   ARCHIVE_MODE               "stage" (default) or "archive" for portable modes.
+  AVE_BUNDLED_MIGRAPHX_PREFIX
+                             Explicit custom MiGraphX prefix used for
+                             compiler-portable release packaging.
   EXTRA_MIGRAPHX_LIBRARY_DIRS
                              Semicolon-separated extra directories searched when
                              closing custom MiGraphX compiler dependencies.
@@ -26,7 +29,7 @@ Environment:
 Examples:
   tools/package_release.sh runtime-portable
   ARCHIVE_MODE=archive tools/package_release.sh runtime-portable
-  EXTRA_MIGRAPHX_LIBRARY_DIRS="/custom/lib;/vendor/lib" tools/package_release.sh compiler-portable
+  AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx EXTRA_MIGRAPHX_LIBRARY_DIRS="/custom/lib;/vendor/lib" tools/package_release.sh compiler-portable
   INSTALL_PREFIX="$PWD/dist/install-root" tools/package_release.sh install-tree
 EOF
 }
@@ -96,15 +99,11 @@ case "${mode}" in
       build_dir="${root_dir}/build_portable_compiler"
     fi
     rm -rf "${build_dir}"
-    if [[ -z "${AVE_BUNDLED_MIGRAPHX_PREFIX:-}" ]]; then
-      if [[ -d "$HOME/.local/opt/migraphx-codex" ]]; then
-        bundled_migraphx_prefix="$HOME/.local/opt/migraphx-codex"
-      fi
-    else
+    if [[ -n "${AVE_BUNDLED_MIGRAPHX_PREFIX:-}" ]]; then
       bundled_migraphx_prefix="${AVE_BUNDLED_MIGRAPHX_PREFIX}"
     fi
     if [[ -z "${bundled_migraphx_prefix}" ]]; then
-      echo "compiler-portable requires a bundled MiGraphX prefix" >&2
+      echo "compiler-portable requires AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx" >&2
       exit 1
     fi
     compiler_overlay_root="$(mktemp -d "${TMPDIR:-/tmp}/ave-migraphx-compiler-overlay.XXXXXX")"

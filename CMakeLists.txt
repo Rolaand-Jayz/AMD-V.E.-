@@ -16,15 +16,17 @@ option(AVE_BUILD_GUI         "Build Qt desktop GUI"                  ON)
 option(AVE_HAVE_CURL         "Enable libcurl for model downloads"    ON)
 option(AVE_HAVE_MIGRAPHX     "Enable MiGraphX ROCm runtime"          OFF)
 option(AVE_HAVE_HIP          "Enable HIP GPU headers (ROCm)"         OFF)
+option(AVE_HAVE_ONNXRUNTIME_ROCM
+    "Enable ONNX Runtime ROCm/HIP fallback runtime"               ON)
 option(AVE_HAVE_NCNN         "Enable NCNN Vulkan runtime"            OFF)
 option(AVE_HAVE_VULKAN       "Enable Vulkan runtime for interop"     ON)
 # ROCTx: zero-overhead stage markers for rocprof --roctx-trace integration.
 # Requires roctracer-dev package: sudo apt install roctracer-dev
 option(AVE_HAVE_ROCTX        "Enable ROCTx markers for rocprof"      OFF)
 option(AVE_INSTALL_BUNDLED_MIGRAPHX
-       "Install the bundled MiGraphX compiler toolchain with the app" ON)
+    "Install the bundled MiGraphX compiler toolchain with the app" OFF)
 option(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER
-       "Install bundled MiGraphX compiler tools and ONNX/TF sidecars with the app" ON)
+    "Install bundled MiGraphX compiler tools and ONNX/TF sidecars with the app" OFF)
 option(AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD
        "Prefer AVE_BUNDLED_MIGRAPHX_PREFIX for build-time MiGraphX discovery" OFF)
 option(AVE_STRICT_BUNDLED_MIGRAPHX
@@ -34,12 +36,9 @@ option(AVE_INSTALL_BUNDLED_MODELS
 option(AVE_INSTALL_RUNTIME_DEPS
        "Install non-system runtime shared libraries with the app"    ON)
 
-set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "")
-if(EXISTS "$ENV{HOME}/.local/opt/migraphx-codex/bin/migraphx-driver")
-    set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{HOME}/.local/opt/migraphx-codex")
-endif()
+set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX "$ENV{AVE_BUNDLED_MIGRAPHX_PREFIX}")
 set(AVE_BUNDLED_MIGRAPHX_PREFIX "${_AVE_DEFAULT_BUNDLED_MIGRAPHX_PREFIX}" CACHE PATH
-    "Optimized MiGraphX install prefix to bundle with the app")
+    "Explicit custom MiGraphX install prefix to bundle with the app")
 set(_AVE_DEFAULT_BUNDLED_MIGRAPHX_EXTRA_LIBRARY_DIRS "")
 foreach(_ave_extra_root IN ITEMS /usr/lib /usr/local/lib /opt/rocm/lib /opt/rocm/lib64)
     if(EXISTS "${_ave_extra_root}")
@@ -60,12 +59,18 @@ if(AVE_HAVE_MIGRAPHX AND AVE_PREFER_BUNDLED_MIGRAPHX_FOR_BUILD AND
 endif()
 
 if(AVE_INSTALL_BUNDLED_MIGRAPHX)
-    if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "" OR
-       NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib")
+    if(AVE_BUNDLED_MIGRAPHX_PREFIX STREQUAL "")
+        message(STATUS
+            "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but no explicit AVE_BUNDLED_MIGRAPHX_PREFIX was provided; "
+            "disabling bundled MiGraphX install for this configure.")
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER OFF)
+    elseif(NOT EXISTS "${AVE_BUNDLED_MIGRAPHX_PREFIX}/lib/migraphx/lib")
         message(WARNING
             "AVE_INSTALL_BUNDLED_MIGRAPHX=ON but AVE_BUNDLED_MIGRAPHX_PREFIX does not contain "
             "lib/migraphx/lib; disabling bundled MiGraphX install.")
         set(AVE_INSTALL_BUNDLED_MIGRAPHX OFF)
+        set(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER OFF)
     else()
         message(STATUS "Bundling optimized MiGraphX runtime from ${AVE_BUNDLED_MIGRAPHX_PREFIX}")
         if(AVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER AND
@@ -133,6 +138,24 @@ if(AVE_HAVE_HIP)
 endif()
 
 # ─────────────────────────────────────────────────────────────────
+# Optional: ONNX Runtime ROCm/HIP fallback
+# ─────────────────────────────────────────────────────────────────
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime/onnxruntime_cxx_api.h
+        HINTS /usr/include /usr/local/include /opt/rocm/include)
+    find_library(ONNXRUNTIME_LIBRARY
+        NAMES onnxruntime
+        HINTS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/rocm/lib /opt/rocm/lib64)
+    if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+        message(WARNING "AVE_HAVE_ONNXRUNTIME_ROCM=ON but ONNX Runtime was not found; disabling.")
+        set(AVE_HAVE_ONNXRUNTIME_ROCM OFF)
+    else()
+        message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIBRARY}")
+    endif()
+endif()
+
+# ─────────────────────────────────────────────────────────────────
 # Optional: NCNN + Vulkan
 # ─────────────────────────────────────────────────────────────────
 if(AVE_HAVE_NCNN)
@@ -182,6 +205,9 @@ if(AVE_HAVE_MIGRAPHX)
 endif()
 if(AVE_HAVE_HIP)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_HIP)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    list(APPEND AVE_COMPILE_DEFS AVE_HAVE_ONNXRUNTIME_ROCM)
 endif()
 if(AVE_HAVE_NCNN)
     list(APPEND AVE_COMPILE_DEFS AVE_HAVE_NCNN)
@@ -303,6 +329,7 @@ add_library(ave_core
     src/backends/glsl_shader_backend.cpp
     src/backends/migraphx_backend.cpp
     src/backends/ncnn_vulkan_backend.cpp
+    src/backends/rocm_hip_backend.cpp
     src/backends/vapoursynth_backend.cpp
     src/backends/vulkan_compute_backend.cpp
 )
@@ -327,6 +354,10 @@ if(AVE_HAVE_MIGRAPHX)
 endif()
 if(AVE_HAVE_HIP AND hip_FOUND)
     target_link_libraries(ave_core PUBLIC hip::host)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    target_include_directories(ave_core PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(ave_core PUBLIC ${ONNXRUNTIME_LIBRARY})
 endif()
 if(AVE_HAVE_NCNN AND ncnn_FOUND)
     target_link_libraries(ave_core PUBLIC ncnn)
@@ -426,6 +457,7 @@ if(AVE_BUILD_GUI)
 
         add_executable(ave_gui
             src/gui/main_gui.cpp
+            src/gui/ave_gui_resources.qrc
             src/gui/main_window.cpp
             src/gui/main_window.hpp
             src/gui/model_manager_dialog.cpp
@@ -487,6 +519,10 @@ target_include_directories(runtime_diagnostics_tests PRIVATE include)
 target_compile_definitions(runtime_diagnostics_tests PRIVATE ${AVE_COMPILE_DEFS})
 if(AVE_HAVE_HIP AND hip_FOUND)
     target_link_libraries(runtime_diagnostics_tests PRIVATE hip::host)
+endif()
+if(AVE_HAVE_ONNXRUNTIME_ROCM)
+    target_include_directories(runtime_diagnostics_tests PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(runtime_diagnostics_tests PRIVATE ${ONNXRUNTIME_LIBRARY})
 endif()
 ave_add_warnings(runtime_diagnostics_tests)
 add_test(NAME runtime_diagnostics_tests COMMAND runtime_diagnostics_tests)
@@ -649,6 +685,29 @@ target_include_directories(interop_bridge_tests PRIVATE include)
 target_compile_definitions(interop_bridge_tests PRIVATE ${AVE_COMPILE_DEFS})
 ave_add_warnings(interop_bridge_tests)
 add_test(NAME interop_bridge_tests COMMAND interop_bridge_tests)
+
+set(AVE_INSTALL_DOC_DIR "${CMAKE_INSTALL_DATADIR}/doc/amd-video-enhancer")
+set(AVE_INSTALL_LICENSE_DIR "${CMAKE_INSTALL_DATADIR}/licenses/amd-video-enhancer")
+
+install(FILES
+    README.md
+    CHANGELOG.md
+    SECURITY.md
+    docs/BENCHMARKS.md
+    docs/BETA_TESTING_PROGRAM.md
+    docs/LIMITATIONS.md
+    docs/PACKAGING.md
+    docs/RELEASE_STATUS.md
+    docs/RELEASING.md
+    docs/SUPPORT_TIERS.md
+    docs/VALIDATION_AND_EVIDENCE.md
+    DESTINATION ${AVE_INSTALL_DOC_DIR}
+)
+
+install(FILES
+    LICENSE
+    DESTINATION ${AVE_INSTALL_LICENSE_DIR}
+)
 
 install(TARGETS ave
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/ave

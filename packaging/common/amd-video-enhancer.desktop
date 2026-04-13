@@ -2,8 +2,10 @@
 Type=Application
 Name=AMD Video Enhancer
 GenericName=AMD GPU Video Enhancement
-Comment=Open-alpha AMD GPU video enhancement app
+Comment=AMD-first Linux video enhancement app for restoration, cleanup, and upscale workflows
 Exec=/usr/bin/ave_gui
+Icon=amd-video-enhancer
 Terminal=false
 Categories=AudioVideo;Video;
+Keywords=AMD;ROCm;MiGraphX;Video;Upscale;Restore;Enhance;FFmpeg;
 StartupNotify=true

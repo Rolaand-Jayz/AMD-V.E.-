@@ -1,0 +1,82 @@
+name: Benchmark / validation report
+description: Submit structured compatibility, benchmark, or quality evidence for the beta program.
+title: "[validation] "
+labels:
+  - validation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Beta validation report
+
+        Use this template when you are contributing evidence, not just filing a bug.
+
+        Read first:
+
+        - `docs/RELEASE_STATUS.md`
+        - `docs/SUPPORT_TIERS.md`
+        - `docs/BETA_TESTING_PROGRAM.md`
+  - type: dropdown
+    id: report_type
+    attributes:
+      label: Report type
+      options:
+        - benchmark
+        - compatibility
+        - output quality
+        - mixed validation
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU and GPU
+    validations:
+      required: true
+  - type: input
+    id: rocm
+    attributes:
+      label: ROCm / MiGraphX versions
+      placeholder: ROCm x.y, MiGraphX z if known
+    validations:
+      required: true
+  - type: input
+    id: package_asset
+    attributes:
+      label: Package asset or source-build reference
+      placeholder: Exact asset filename or commit/branch for source builds
+    validations:
+      required: true
+  - type: textarea
+    id: command_or_workflow
+    attributes:
+      label: Exact command or workflow used
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Include timings, what worked, what failed, and whether the result is reproducible.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots, before/after notes, or asset links
+      render: text
+    validations:
+      required: true

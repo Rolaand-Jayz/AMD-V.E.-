@@ -16,6 +16,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #if defined(__linux__)
 #  include <fcntl.h>
@@ -26,6 +27,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include "ave/process_observer.hpp"
 #include "ave/video_probe.hpp"
 
 namespace ave {
@@ -101,16 +103,61 @@ SwsContext* getOrCreateSwsContext(const SwsKey& key) {
     return sws;
 }
 
+class PipeHandle {
+  public:
+    PipeHandle() = default;
+    explicit PipeHandle(FILE* pipe)
+        : pipe_(pipe) {}
+
+    PipeHandle(const PipeHandle&) = delete;
+    PipeHandle& operator=(const PipeHandle&) = delete;
+
+    PipeHandle(PipeHandle&& other) noexcept
+        : pipe_(std::exchange(other.pipe_, nullptr)) {}
+
+    PipeHandle& operator=(PipeHandle&& other) noexcept {
+        if (this != &other) {
+            reset();
+            pipe_ = std::exchange(other.pipe_, nullptr);
+        }
+        return *this;
+    }
+
+    ~PipeHandle() {
+        reset();
+    }
+
+    FILE* get() const {
+        return pipe_;
+    }
+
+    explicit operator bool() const {
+        return pipe_ != nullptr;
+    }
+
+    void reset(FILE* pipe = nullptr) {
+        if (pipe_ != nullptr) {
+            (void)close();
+        }
+        pipe_ = pipe;
+    }
+
+    int close() {
+        FILE* pipe = std::exchange(pipe_, nullptr);
+        if (pipe == nullptr) {
+            return 0;
+        }
+        return process_observer::normalizeShellExitCode(pclose(pipe));
+    }
+
+  private:
+    FILE* pipe_ = nullptr;
+};
+
 // ─── Helper: quote a shell argument ──────────────────────────────
 
 std::string quoteArg(const std::string& value) {
-    std::string out = "\"";
-    for (const char ch : value) {
-        if (ch == '\\' || ch == '"') out.push_back('\\');
-        out.push_back(ch);
-    }
-    out.push_back('"');
-    return out;
+    return process_observer::quoteShellArg(value);
 }
 
 void tunePipeIo(FILE* pipe, std::size_t stdioBufferBytes, int pipeBytes) {
@@ -565,7 +612,7 @@ bool cloneFrameReference(const AVFrame* source,
 }  // namespace
 
 struct RgbVideoPipeSource::Impl {
-    FILE* pipe = nullptr;
+    PipeHandle pipe;
     std::size_t frameBytes = 0u;
 };
 
@@ -599,7 +646,7 @@ struct AsyncRgbVideoPipeEncoder::Impl {
         std::vector<std::uint8_t> pixels;
     };
 
-    FILE* pipe = nullptr;
+    PipeHandle pipe;
     std::size_t frameBytes = 0u;
     std::size_t queueDepth = 1u;
     std::filesystem::path logPath;
@@ -774,21 +821,21 @@ bool RgbVideoPipeSource::open(const std::string& path,
     cmd << "-i " << quoteArg(path)
         << " -f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null";
 
-    impl_->pipe = popen(cmd.str().c_str(), "r");
-    if (impl_->pipe == nullptr) {
+    impl_->pipe.reset(popen(cmd.str().c_str(), "r"));
+    if (!impl_->pipe) {
         error = "Failed to open FFmpeg decode pipe for " + path;
         return false;
     }
 
     impl_->frameBytes =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u;
-    tunePipeIo(impl_->pipe, options.stdioBufferBytes, options.pipeBytes);
+    tunePipeIo(impl_->pipe.get(), options.stdioBufferBytes, options.pipeBytes);
     return true;
 }
 
 RgbVideoFrameReadStatus RgbVideoPipeSource::readFrame(std::vector<std::uint8_t>& rgb,
                                                       std::string& error) {
-    if (impl_->pipe == nullptr) {
+    if (!impl_->pipe) {
         error = "RgbVideoPipeSource: source not open.";
         return RgbVideoFrameReadStatus::Error;
     }
@@ -797,7 +844,7 @@ RgbVideoFrameReadStatus RgbVideoPipeSource::readFrame(std::vector<std::uint8_t>&
     std::size_t totalRead = 0u;
     while (totalRead < impl_->frameBytes) {
         const std::size_t count = std::fread(
-            rgb.data() + totalRead, 1, impl_->frameBytes - totalRead, impl_->pipe);
+            rgb.data() + totalRead, 1, impl_->frameBytes - totalRead, impl_->pipe.get());
         if (count == 0u) {
             break;
         }
@@ -816,10 +863,7 @@ RgbVideoFrameReadStatus RgbVideoPipeSource::readFrame(std::vector<std::uint8_t>&
 }
 
 void RgbVideoPipeSource::close() {
-    if (impl_->pipe != nullptr) {
-        (void)pclose(impl_->pipe);
-        impl_->pipe = nullptr;
-    }
+    (void)impl_->pipe.close();
     impl_->frameBytes = 0u;
 }
 
@@ -1194,12 +1238,12 @@ bool AsyncRgbVideoPipeEncoder::open(const RgbVideoPipeEncoderOptions& options,
         encodeCmd << "2> " << quoteArg(impl_->logPath.string());
     }
 
-    impl_->pipe = popen(encodeCmd.str().c_str(), "w");
-    if (impl_->pipe == nullptr) {
+    impl_->pipe.reset(popen(encodeCmd.str().c_str(), "w"));
+    if (!impl_->pipe) {
         error = "Failed to open FFmpeg encode pipe for " + options.outputVideo;
         return false;
     }
-    tunePipeIo(impl_->pipe, options.stdioBufferBytes, options.pipeBytes);
+    tunePipeIo(impl_->pipe.get(), options.stdioBufferBytes, options.pipeBytes);
 
     {
         std::lock_guard<std::mutex> lk(impl_->mutex);
@@ -1227,7 +1271,7 @@ bool AsyncRgbVideoPipeEncoder::open(const RgbVideoPipeEncoderOptions& options,
 
             const auto writeStart = Clock::now();
             const std::size_t written =
-                std::fwrite(frame.pixels.data(), 1, impl_->frameBytes, impl_->pipe);
+                std::fwrite(frame.pixels.data(), 1, impl_->frameBytes, impl_->pipe.get());
             const auto elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 Clock::now() - writeStart).count();
             impl_->writeTimeNs.fetch_add(elapsedNs, std::memory_order_relaxed);
@@ -1298,7 +1342,7 @@ int AsyncRgbVideoPipeEncoder::finish(const bool discardPending) {
     int status = 0;
     {
         std::lock_guard<std::mutex> lk(impl_->mutex);
-        if (impl_->pipe == nullptr) {
+        if (!impl_->pipe) {
             return 0;
         }
         if (discardPending) {
@@ -1310,8 +1354,7 @@ int AsyncRgbVideoPipeEncoder::finish(const bool discardPending) {
     if (impl_->writerThread.joinable()) {
         impl_->writerThread.join();
     }
-    status = pclose(impl_->pipe);
-    impl_->pipe = nullptr;
+    status = impl_->pipe.close();
     return status;
 }
 
@@ -1396,8 +1439,8 @@ bool extractVideoFrameRgb24(const std::string& path,
     cmd << "-i " << quoteArg(path)
         << " -frames:v 1 -f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null";
 
-    FILE* pipe = popen(cmd.str().c_str(), "r");
-    if (pipe == nullptr) {
+    PipeHandle pipe(popen(cmd.str().c_str(), "r"));
+    if (!pipe) {
         error = "Failed to start FFmpeg while extracting a preview frame.";
         return false;
     }
@@ -1407,14 +1450,14 @@ bool extractVideoFrameRgb24(const std::string& path,
         const std::size_t bytes = std::fread(data.data() + totalRead,
                                              1,
                                              expected - totalRead,
-                                             pipe);
+                                             pipe.get());
         if (bytes == 0) {
             break;
         }
         totalRead += bytes;
     }
 
-    const int exitCode = pclose(pipe);
+    const int exitCode = pipe.close();
     if (exitCode != 0 || totalRead != expected) {
         error = "FFmpeg could not extract a full preview frame from: " + path;
         return false;
@@ -1446,7 +1489,7 @@ bool loadPngRgb24(const std::string& path,
         "ffmpeg -hide_banner -loglevel quiet -i " + quoteArg(path) +
         " -f rawvideo -pix_fmt rgb24 -frames:v 1 pipe:1 2>/dev/null";
 
-    FILE* pipe = popen(cmd.c_str(), "r");
+    PipeHandle pipe(popen(cmd.c_str(), "r"));
     if (!pipe) {
         error = "Failed to start FFmpeg for frame loading: " + path;
         return false;
@@ -1455,11 +1498,11 @@ bool loadPngRgb24(const std::string& path,
     std::size_t totalRead = 0;
     while (totalRead < expected) {
         const std::size_t n = std::fread(data.data() + totalRead, 1,
-                                         expected - totalRead, pipe);
+                                         expected - totalRead, pipe.get());
         if (n == 0) break;
         totalRead += n;
     }
-    const int ret = pclose(pipe);
+    const int ret = pipe.close();
 
     if (ret != 0 || totalRead != expected) {
         error = "FFmpeg frame load incomplete for " + path +
@@ -1486,14 +1529,14 @@ bool saveRgb24ToPng(const std::string& path,
         std::to_string(width) + "x" + std::to_string(height) +
         " -i pipe:0 -frames:v 1 " + quoteArg(path) + " 2>/dev/null";
 
-    FILE* pipe = popen(cmd.c_str(), "w");
+    PipeHandle pipe(popen(cmd.c_str(), "w"));
     if (!pipe) {
         error = "Failed to start FFmpeg for frame saving: " + path;
         return false;
     }
 
-    const std::size_t written = std::fwrite(data, 1, bytes, pipe);
-    const int ret = pclose(pipe);
+    const std::size_t written = std::fwrite(data, 1, bytes, pipe.get());
+    const int ret = pipe.close();
 
     if (ret != 0 || written != bytes) {
         error = "FFmpeg frame save failed for " + path;

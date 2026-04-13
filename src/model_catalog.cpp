@@ -1095,6 +1095,8 @@ bool modelSupportsBackend(const ModelEntry& entry, const BackendType backend) {
         case BackendType::MiGraphX:
             return entry.sourceFormat == ModelFormat::Onnx
                 || entry.sourceFormat == ModelFormat::Pytorch;
+        case BackendType::RocmHip:
+            return entry.sourceFormat == ModelFormat::Onnx;
         default:
             return true;
     }

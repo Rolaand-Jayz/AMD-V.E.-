@@ -87,6 +87,10 @@ std::optional<BackendType> backendFromStringRecovery(const std::string& value) {
     if (value == "migraphx") {
         return BackendType::MiGraphX;
     }
+    if (value == "rocm-hip" || value == "rocm_hip" ||
+        value == "rocmhip" || value == "rocm" || value == "hip") {
+        return BackendType::RocmHip;
+    }
     if (value == "vulkan-compute" || value == "vulkan_compute" ||
         value == "vulkan") {
         return BackendType::VulkanCompute;

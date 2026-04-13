@@ -56,8 +56,9 @@ stage_bundled_migraphx_overlay() {
   bundled_migraphx_prefix="${overlay_root}"
 }
 
-if [[ -z "${bundled_migraphx_prefix}" && -d "$HOME/.local/opt/migraphx-codex" ]]; then
-  bundled_migraphx_prefix="$HOME/.local/opt/migraphx-codex"
+if [[ -z "${bundled_migraphx_prefix}" ]]; then
+  echo "stage_release_root.sh requires AVE_BUNDLED_MIGRAPHX_PREFIX=/path/to/custom/migraphx" >&2
+  exit 1
 fi
 
 trap 'rm -rf "${compiler_vendor_root}" "${compiler_overlay_root}"' EXIT
@@ -69,6 +70,8 @@ cmake_args=(
   -DAVE_HAVE_HIP=ON
   -DAVE_HAVE_VULKAN=ON
   -DAVE_HAVE_NCNN=ON
+  -DAVE_INSTALL_BUNDLED_MIGRAPHX=ON
+  -DAVE_INSTALL_BUNDLED_MIGRAPHX_COMPILER=ON
   -DAVE_INSTALL_BUNDLED_MODELS=OFF
 )
 

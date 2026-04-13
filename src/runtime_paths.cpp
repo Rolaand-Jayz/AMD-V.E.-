@@ -19,6 +19,20 @@ namespace {
 
 namespace fs = std::filesystem;
 
+fs::path tempScopedFallbackRoot() {
+    std::error_code ec;
+    fs::path tempRoot = fs::temp_directory_path(ec);
+    if (ec || tempRoot.empty()) {
+        tempRoot = fs::path("/tmp");
+    }
+
+#if defined(__linux__)
+    return tempRoot / ("ave-" + std::to_string(static_cast<long long>(::geteuid())));
+#else
+    return tempRoot / "ave";
+#endif
+}
+
 bool pathExists(const fs::path& path) {
     std::error_code ec;
     return fs::exists(path, ec);
@@ -186,6 +200,24 @@ std::optional<fs::path> bundledMiGraphXPrefixImpl() {
 
 }  // namespace
 
+std::filesystem::path defaultWritableCacheDir() {
+    if (const auto overrideDir = envPath("AVE_CACHE_DIR"); overrideDir.has_value()) {
+        return *overrideDir;
+    }
+
+    const char* xdgCacheHome = std::getenv("XDG_CACHE_HOME");
+    if (xdgCacheHome != nullptr && *xdgCacheHome != '\0') {
+        return fs::path(xdgCacheHome) / "ave";
+    }
+
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && *home != '\0') {
+        return fs::path(home) / ".cache" / "ave";
+    }
+
+    return tempScopedFallbackRoot() / "cache";
+}
+
 std::filesystem::path defaultWritableModelsDir() {
     if (const auto overrideDir = envPath("AVE_MODELS_DIR"); overrideDir.has_value()) {
         return *overrideDir;
@@ -201,7 +233,7 @@ std::filesystem::path defaultWritableModelsDir() {
         return fs::path(home) / ".local" / "share" / "ave" / "models";
     }
 
-    return fs::path("/tmp/ave_models");
+    return tempScopedFallbackRoot() / "models";
 }
 
 std::optional<std::filesystem::path> bundledModelsDirectory() {

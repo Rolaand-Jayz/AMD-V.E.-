@@ -20,15 +20,19 @@
 #include <vector>
 
 #ifdef __unix__
+#  include <sys/wait.h>
 #  include <unistd.h>
 #endif
 
 #include "ave/backend.hpp"
+#include "ave/process_observer.hpp"
 #include "ave/stage.hpp"
 #include "ave/types.hpp"
 
 namespace ave {
 namespace {
+
+namespace fs = std::filesystem;
 
 struct VideoProbeInfo {
     std::int64_t width = 0;
@@ -51,6 +55,93 @@ struct TempDirectoryGuard {
 bool isAiProcessable(const EnhancementStage& stage,
                      const IAcceleratorBackend* backend);
 
+fs::path tempBaseDirectory() {
+    std::error_code ec;
+    fs::path base = fs::temp_directory_path(ec);
+    if (ec || base.empty()) {
+        return fs::path("/tmp");
+    }
+    return base;
+}
+
+std::optional<fs::path> createSecureTempFilePath(const fs::path& baseDir,
+                                                 const std::string& prefix,
+                                                 std::string& error) {
+    std::error_code ec;
+    fs::create_directories(baseDir, ec);
+    if (ec) {
+        error = "Failed to create temporary directory '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+#if defined(__unix__)
+    std::string pattern = (baseDir / (prefix + "XXXXXX")).string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+
+    const int fd = ::mkstemp(writable.data());
+    if (fd < 0) {
+        error = "Failed to create secure temporary file in '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+    ::close(fd);
+
+    const fs::path path(writable.data());
+    fs::permissions(path,
+                    fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace,
+                    ec);
+    return path;
+#else
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path path = baseDir / (prefix + std::to_string(tick));
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        error = "Failed to create temporary file '" + path.string() + "'.";
+        return std::nullopt;
+    }
+    return path;
+#endif
+}
+
+std::optional<fs::path> createSecureTempDirectory(const fs::path& baseDir,
+                                                  const std::string& prefix,
+                                                  std::string& error) {
+    std::error_code ec;
+    fs::create_directories(baseDir, ec);
+    if (ec) {
+        error = "Failed to create temporary directory base '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+#if defined(__unix__)
+    std::string pattern = (baseDir / (prefix + "XXXXXX")).string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+
+    if (::mkdtemp(writable.data()) == nullptr) {
+        error = "Failed to create secure temporary directory in '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+    const fs::path path(writable.data());
+    fs::permissions(path,
+                    fs::perms::owner_all,
+                    fs::perm_options::replace,
+                    ec);
+    return path;
+#else
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path path = baseDir / (prefix + std::to_string(tick));
+    fs::create_directories(path, ec);
+    if (ec) {
+        error = "Failed to create temporary directory '" + path.string() + "'.";
+        return std::nullopt;
+    }
+    return path;
+#endif
+}
+
 bool commandInPath(const std::string& command) {
     const char* pathEnv = std::getenv("PATH");
     if (pathEnv == nullptr) {
@@ -68,7 +159,11 @@ bool commandInPath(const std::string& command) {
         if (!dir.empty()) {
             std::error_code ec;
             const auto candidate = std::filesystem::path(dir) / command;
-            if (std::filesystem::exists(candidate, ec)) {
+            if (std::filesystem::exists(candidate, ec)
+#if defined(__unix__)
+                && ::access(candidate.c_str(), X_OK) == 0
+#endif
+            ) {
                 return true;
             }
         }
@@ -81,14 +176,15 @@ bool commandInPath(const std::string& command) {
 }
 
 std::string quoteArg(const std::string& value) {
-    std::string out = "\"";
+    std::string out = "'";
     for (const char ch : value) {
-        if (ch == '\\' || ch == '"') {
-            out.push_back('\\');
+        if (ch == '\'') {
+            out += "'\\''";
+        } else {
+            out.push_back(ch);
         }
-        out.push_back(ch);
     }
-    out.push_back('"');
+    out.push_back('\'');
     return out;
 }
 
@@ -130,7 +226,7 @@ std::optional<std::string> captureCommandStdout(const std::string& cmd, int& exi
         output.append(buffer.data(), bytes);
     }
 
-    exitCode = pclose(pipe);
+    exitCode = process_observer::normalizeShellExitCode(pclose(pipe));
     return output;
 }
 
@@ -198,8 +294,13 @@ bool runFfmpegWithProgress(
         std::string& error,
         std::atomic<bool>* cancelFlag = nullptr) {
     // Capture stderr to a temp file so we can report the actual error.
-    const std::string errTmp = "/tmp/ave_ffmpeg_"
-        + std::to_string(static_cast<long>(getpid())) + ".err";
+    std::string tempError;
+    const auto errTmpPath = createSecureTempFilePath(tempBaseDirectory(), "ave_ffmpeg_", tempError);
+    if (!errTmpPath.has_value()) {
+        error = stepName + " could not create a secure temporary stderr file: " + tempError;
+        return false;
+    }
+    const std::string errTmp = errTmpPath->string();
     const std::string fullCmd = cmd + " 2>" + quoteArg(errTmp);
     std::cout << "[cmd] " << stepName << ": " << cmd << std::endl;
 
@@ -234,7 +335,7 @@ bool runFfmpegWithProgress(
             if (taskCb) taskCb(1.0f, stepName + " \u2013 complete");
         }
     }
-    const int ret = pclose(pipe);
+    const int ret = process_observer::normalizeShellExitCode(pclose(pipe));
 
     if (cancelled) {
         error = stepName + " cancelled by user.";
@@ -336,6 +437,34 @@ std::string formatDouble(const double value) {
     std::ostringstream os;
     os << std::fixed << std::setprecision(6) << value;
     return os.str();
+}
+
+bool isSafeFfmpegToken(const std::string& value) {
+    if (value.empty()) {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](const unsigned char ch) {
+        return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == '.' || ch == '+';
+    });
+}
+
+bool validateFfmpegToken(const std::string& value,
+                        const char* fieldName,
+                        const bool allowEmpty,
+                        std::string& error) {
+    if (value.empty()) {
+        if (allowEmpty) {
+            return true;
+        }
+        error = std::string("FFmpeg ") + fieldName + " must not be empty.";
+        return false;
+    }
+    if (isSafeFfmpegToken(value)) {
+        return true;
+    }
+    error = std::string("Invalid FFmpeg ") + fieldName + " token '" + value
+          + "'. Only letters, numbers, '.', '_', '-', and '+' are allowed.";
+    return false;
 }
 
 double getDoubleParam(const EnhancementStage& stage, const std::string& key, const double defaultValue) {
@@ -618,10 +747,24 @@ bool isAiProcessable(const EnhancementStage& stage,
 }
 
 std::filesystem::path createTempJobDir(const std::filesystem::path& outputPath) {
-    const auto base = std::filesystem::path(outputPath).parent_path();
+    const fs::path requestedBase = outputPath.parent_path();
+    std::string error;
+    if (!requestedBase.empty()) {
+        if (const auto path = createSecureTempDirectory(requestedBase, "ave_ai_job_", error);
+            path.has_value()) {
+            return *path;
+        }
+    }
+
+    if (const auto path = createSecureTempDirectory(tempBaseDirectory(), "ave_ai_job_", error);
+        path.has_value()) {
+        return *path;
+    }
+
     const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
-    std::filesystem::path path = base / ("ave_ai_job_" + std::to_string(tick));
-    std::filesystem::create_directories(path);
+    fs::path path = tempBaseDirectory() / ("ave_ai_job_" + std::to_string(tick));
+    std::error_code ec;
+    fs::create_directories(path, ec);
     return path;
 }
 
@@ -931,6 +1074,12 @@ bool FfmpegRunner::encode(const VideoJob& job,
                           const std::vector<EnhancementStage>& orderedStages,
                           IAcceleratorBackend* backend,
                           std::string& error) const {
+    if (!validateFfmpegToken(job.encode.codec, "codec", false, error) ||
+        !validateFfmpegToken(job.encode.preset, "preset", false, error) ||
+        !validateFfmpegToken(job.encode.profile, "profile", true, error)) {
+        return false;
+    }
+
     std::string availabilityError;
     if (!isAvailable(availabilityError)) {
         error = availabilityError;

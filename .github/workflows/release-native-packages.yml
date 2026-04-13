@@ -14,18 +14,56 @@ jobs:
       - linux
       - x64
       - arch
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      release_tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve release version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && -n "${GITHUB_REF_NAME:-}" ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            short="$(git rev-parse --short HEAD 2>/dev/null || true)"
+            if [[ -z "$short" ]]; then
+              short="${AVE_VERSION_FALLBACK_SHA:-nogit}"
+            fi
+            version="0.1.0-beta.1.git$(date -u +%Y%m%d).${short}"
+            echo "value=${version}" >> "$GITHUB_OUTPUT"
+            echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build and stage canonical Arch release root
-        run: ./tools/stage_release_root.sh
+        run: AVE_BUNDLED_MIGRAPHX_PREFIX="$HOME/.local/opt/migraphx-codex" ./tools/stage_release_root.sh
       - name: Archive staged release root
         run: |
           mkdir -p dist
           tar -C dist -czf dist/stage-root.tar.gz stage-root
+      - name: Build compiler-portable beta bundle
+        run: |
+          AVE_BUNDLED_MIGRAPHX_PREFIX="$HOME/.local/opt/migraphx-codex" \
+          ARCHIVE_MODE=archive BUILD_DIR="${GITHUB_WORKSPACE}/build_portable_beta" ./tools/package_release.sh compiler-portable
+      - name: Build Arch AUR handoff assets
+        run: |
+          python3 ./tools/build_native_packages.py \
+            --staged-root ./dist/stage-root \
+            --output-dir ./dist/aur-handoff \
+            --targets archlinux-aur \
+            --version "${{ steps.version.outputs.value }}" \
+            --release-tag "${{ steps.version.outputs.tag }}"
       - uses: actions/upload-artifact@v4
         with:
           name: stage-root
           path: dist/stage-root.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-bundle
+          path: build_portable_beta/dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur-handoff
+          path: dist/aur-handoff/*
 
   native-packages:
     name: native-packages-${{ matrix.target }}
@@ -81,7 +119,8 @@ jobs:
           python3 ./tools/build_native_packages.py \
             --staged-root ./dist/stage-root \
             --output-dir ./dist/native-packages \
-            --targets "${{ matrix.target }}"
+            --targets "${{ matrix.target }}" \
+            --version "${{ needs.stage-arch-release-root.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: native-package-${{ matrix.target }}
@@ -100,7 +139,24 @@ jobs:
           path: dist/release-assets
           pattern: native-package-*
           merge-multiple: true
-      - name: Publish open-alpha release
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-bundle
+          path: dist/release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: aur-handoff
+          path: dist/release-assets
+      - name: Generate release checksums
+        run: |
+          cd dist/release-assets
+          find . -maxdepth 1 -type f \
+            ! -name 'SHA256SUMS' \
+            ! -name '*.sha256' \
+            -printf '%f\n' \
+            | sort \
+            | xargs sha256sum > SHA256SUMS
+      - name: Publish beta prerelease
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true

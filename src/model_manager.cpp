@@ -25,6 +25,7 @@
 #include <vector>
 #if defined(__unix__) || defined(__APPLE__)
 #  include <sys/wait.h>
+#  include <unistd.h>
 #endif
 
 #ifdef AVE_HAVE_CURL
@@ -46,6 +47,8 @@ namespace ave {
 // Helpers
 // ─────────────────────────────────────────────────────────────────
 namespace {
+
+namespace fs = std::filesystem;
 
 // Small fixed-shape fallback used only for explicit "convert model" actions
 // where no real video dimensions are available yet. Runtime auto-compile still
@@ -128,6 +131,19 @@ std::vector<std::pair<std::string, std::string>> mergeEnvOverrides(
     return merged;
 }
 
+const std::unordered_map<std::string, std::size_t>& builtinModelOrderIndex() {
+    static const std::unordered_map<std::string, std::size_t> index = [] {
+        std::unordered_map<std::string, std::size_t> out;
+        const auto& catalog = builtinModelCatalog();
+        out.reserve(catalog.size());
+        for (std::size_t i = 0; i < catalog.size(); ++i) {
+            out.emplace(catalog[i].id, i);
+        }
+        return out;
+    }();
+    return index;
+}
+
 class ScopedEnvOverrides {
   public:
     explicit ScopedEnvOverrides(const std::vector<std::pair<std::string, std::string>>& overrides)
@@ -187,6 +203,151 @@ bool ensureDir(const std::filesystem::path& p) {
 bool fileExists(const std::filesystem::path& p) {
     std::error_code ec;
     return std::filesystem::exists(p, ec);
+}
+
+std::filesystem::path tempBaseDirectory() {
+    std::error_code ec;
+    auto base = fs::temp_directory_path(ec);
+    if (ec || base.empty()) {
+        return fs::path("/tmp");
+    }
+    return base;
+}
+
+std::optional<fs::path> createSecureTempFilePath(const fs::path& baseDir,
+                                                 const std::string& prefix,
+                                                 std::string& error) {
+    std::error_code ec;
+    fs::create_directories(baseDir, ec);
+    if (ec) {
+        error = "Failed to create temporary directory '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+#if defined(__unix__) || defined(__APPLE__)
+    std::string pattern = (baseDir / (prefix + "XXXXXX")).string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+
+    const int fd = ::mkstemp(writable.data());
+    if (fd < 0) {
+        error = "Failed to create secure temporary file in '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+    ::close(fd);
+
+    const fs::path path(writable.data());
+    fs::permissions(path,
+                    fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace,
+                    ec);
+    return path;
+#else
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path path = baseDir / (prefix + std::to_string(tick));
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        error = "Failed to create temporary file '" + path.string() + "'.";
+        return std::nullopt;
+    }
+    return path;
+#endif
+}
+
+std::optional<fs::path> createSecureTempDirectory(const fs::path& baseDir,
+                                                  const std::string& prefix,
+                                                  std::string& error) {
+    std::error_code ec;
+    fs::create_directories(baseDir, ec);
+    if (ec) {
+        error = "Failed to create temporary directory base '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+#if defined(__unix__) || defined(__APPLE__)
+    std::string pattern = (baseDir / (prefix + "XXXXXX")).string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+
+    if (::mkdtemp(writable.data()) == nullptr) {
+        error = "Failed to create secure temporary directory in '" + baseDir.string() + "'.";
+        return std::nullopt;
+    }
+
+    const fs::path path(writable.data());
+    fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace, ec);
+    return path;
+#else
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path path = baseDir / (prefix + std::to_string(tick));
+    fs::create_directories(path, ec);
+    if (ec) {
+        error = "Failed to create temporary directory '" + path.string() + "'.";
+        return std::nullopt;
+    }
+    return path;
+#endif
+}
+
+bool isHttpsUrl(const std::string& url) {
+    if (url.size() < 8) {
+        return false;
+    }
+    std::string prefix = url.substr(0, 8);
+    std::transform(prefix.begin(), prefix.end(), prefix.begin(), [](const unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return prefix == "https://";
+}
+
+bool isSafeDownloadFileName(const std::string& value) {
+    if (value.empty()) {
+        return false;
+    }
+
+    const fs::path path(value);
+    if (path.is_absolute()) {
+        return false;
+    }
+    if (!path.has_filename() || path.filename() != path) {
+        return false;
+    }
+
+    const std::string filename = path.filename().string();
+    return filename != "." && filename != "..";
+}
+
+bool validateDownloadSpecification(const ModelEntry& entry, std::string& error) {
+    if (!entry.downloadUrl.empty() && !isHttpsUrl(entry.downloadUrl)) {
+        error = "Model downloads must use HTTPS URLs. Unsupported download URL: " + entry.downloadUrl;
+        return false;
+    }
+    if (!entry.downloadUrlAux.empty() && !isHttpsUrl(entry.downloadUrlAux)) {
+        error = "Auxiliary model downloads must use HTTPS URLs. Unsupported download URL: "
+              + entry.downloadUrlAux;
+        return false;
+    }
+    if (!entry.filename.empty() && !isSafeDownloadFileName(entry.filename)) {
+        error = "Unsafe primary model filename '" + entry.filename + "'. Downloaded files must stay inside the model cache root.";
+        return false;
+    }
+    if (!entry.filenameAux.empty() && !isSafeDownloadFileName(entry.filenameAux)) {
+        error = "Unsafe auxiliary model filename '" + entry.filenameAux + "'. Downloaded files must stay inside the model cache root.";
+        return false;
+    }
+    if (!entry.downloadUrlAux.empty() && entry.filenameAux.empty()) {
+        error = "Auxiliary download URL is set but filenameAux is empty for model '" + entry.id + "'.";
+        return false;
+    }
+    if (!entry.archiveSubPath.empty() && entry.filename.empty()) {
+        error = "Archive-backed download is missing a primary filename for model '" + entry.id + "'.";
+        return false;
+    }
+    if (!entry.archiveSubPathAux.empty() && entry.filenameAux.empty()) {
+        error = "Archive-backed download is missing an auxiliary filename for model '" + entry.id + "'.";
+        return false;
+    }
+    return true;
 }
 
 std::string trimCopy(const std::string& input) {
@@ -774,29 +935,41 @@ bool rewriteOnnxResizeModeCubicToLinear(const std::filesystem::path& sourcePath,
         "else:\n"
         "    onnx.save(model, dst)\n";
 
-    const auto scriptPath = std::filesystem::temp_directory_path()
-                          / "ave_prepare_onnx_for_migraphx.py";
+    const auto scriptPath = createSecureTempFilePath(tempBaseDirectory(),
+                                                     "ave_prepare_onnx_for_migraphx_",
+                                                     error);
+    if (!scriptPath.has_value()) {
+        return false;
+    }
     {
-        std::ofstream sf(scriptPath);
+        std::ofstream sf(*scriptPath);
         if (!sf) {
-            error = "Cannot write temporary ONNX preparation script to " + scriptPath.string();
+            error = "Cannot write temporary ONNX preparation script to " + scriptPath->string();
             return false;
         }
         sf << pyScript;
     }
 
-    std::ostringstream cmd;
-    cmd << "python3 " << shellQuote(scriptPath.string())
-        << ' ' << shellQuote(sourcePath.string())
-        << ' ' << shellQuote(preparedPath.string());
-    const int rc = std::system(cmd.str().c_str());
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"python3", scriptPath->string(), sourcePath.string(), preparedPath.string()},
+            result,
+            error)) {
+        std::error_code removeEc;
+        std::filesystem::remove(*scriptPath, removeEc);
+        return false;
+    }
 
     std::error_code removeEc;
-    std::filesystem::remove(scriptPath, removeEc);
+    std::filesystem::remove(*scriptPath, removeEc);
 
-    if (rc != 0) {
+    if (result.exitCode != 0) {
         error = "Failed to rewrite ONNX Resize(mode=cubic) to Resize(mode=linear) for MiGraphX. "
                 "Ensure the Python 'onnx' package is installed.";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
         return false;
     }
     if (!fileExists(preparedPath)) {
@@ -983,11 +1156,7 @@ std::string buildMiGraphXRuntimeFingerprint(const std::string& profileLabel,
 }
 
 std::string defaultAveCacheDir() {
-    const char* home = std::getenv("HOME");
-    if (home != nullptr) {
-        return std::string(home) + "/.cache/ave";
-    }
-    return "/tmp/ave_cache";
+    return defaultWritableCacheDir().string();
 }
 
 std::filesystem::path defaultMiGraphXProblemCachePath(const std::string& fingerprint) {
@@ -1310,12 +1479,24 @@ bool curlDownload(const std::string& url, const std::filesystem::path& destPath,
 
     curl_easy_setopt(curl, CURLOPT_URL,              url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION,   1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS,        5L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS,       0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgress);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA,     &progressCtx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,    curlWrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,        &writeCtx);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,        "AMD Video Enhancer/1.0");
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,   30L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,          1800L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER,   1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST,   2L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR,    "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS,        CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,  CURLPROTO_HTTPS);
+#endif
 
     const CURLcode res = curl_easy_perform(curl);
 
@@ -1389,31 +1570,38 @@ bool extractFromZip(const std::filesystem::path& zipPath,
         return false;
     }
 
-    // Extract with -j (junk paths) into a temp directory next to the zip.
-    const std::filesystem::path tempDir = zipPath.parent_path() /
-        (zipPath.stem().string() + "_extract_" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
+    // Extract with -j (junk paths) into a secure temp directory next to the zip.
     std::error_code ec;
-    std::filesystem::create_directories(tempDir, ec);
-
-    std::ostringstream cmd;
-    cmd << "unzip -o -j "
-        << "\"" << zipPath.string() << "\" "
-        << "\"" << internalPath     << "\" "
-        << "-d \"" << tempDir.string() << "\"";
-
-    const int rc = std::system(cmd.str().c_str());
-    if (rc != 0) {
-        std::filesystem::remove_all(tempDir, ec);
-        error = "unzip failed (exit " + std::to_string(rc) +
-                ") extracting '" + internalPath + "' from archive.";
+    const auto tempDir = createSecureTempDirectory(zipPath.parent_path(),
+                                                   zipPath.stem().string() + "_extract_",
+                                                   error);
+    if (!tempDir.has_value()) {
         return false;
     }
 
-    const auto extracted = tempDir /
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"unzip", "-o", "-j", zipPath.string(), internalPath, "-d", tempDir->string()},
+            result,
+            error)) {
+        std::filesystem::remove_all(*tempDir, ec);
+        return false;
+    }
+    if (result.exitCode != 0) {
+        std::filesystem::remove_all(*tempDir, ec);
+        error = "unzip failed (exit " + std::to_string(result.exitCode) +
+                ") extracting '" + internalPath + "' from archive.";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
+        return false;
+    }
+
+    const auto extracted = *tempDir /
         std::filesystem::path(internalPath).filename();
     if (!fileExists(extracted)) {
-        std::filesystem::remove_all(tempDir, ec);
+        std::filesystem::remove_all(*tempDir, ec);
         error = "Extracted file not found after unzip: " + extracted.string();
         return false;
     }
@@ -1425,7 +1613,7 @@ bool extractFromZip(const std::filesystem::path& zipPath,
             std::filesystem::copy_options::overwrite_existing, ec);
         std::filesystem::remove(extracted, ec);
     }
-    std::filesystem::remove_all(tempDir, ec);
+    std::filesystem::remove_all(*tempDir, ec);
     return true;
 }
 
@@ -1797,29 +1985,41 @@ bool torchExportToOnnx(const std::filesystem::path& pthPath,
         "    opset_version=17)\n"
         "print('OK: exported to', out)\n";
 
-    const auto scriptPath = std::filesystem::temp_directory_path()
-                          / "ave_torch_export.py";
+    const auto scriptPath = createSecureTempFilePath(tempBaseDirectory(),
+                                                     "ave_torch_export_",
+                                                     error);
+    if (!scriptPath.has_value()) {
+        return false;
+    }
     {
-        std::ofstream sf(scriptPath);
+        std::ofstream sf(*scriptPath);
         if (!sf) {
-            error = "Cannot write temp export script to " + scriptPath.string();
+            error = "Cannot write temp export script to " + scriptPath->string();
             return false;
         }
         sf << pyScript;
     }
 
-    std::ostringstream cmd;
-    cmd << "python3 " << scriptPath.string()
-        << " \"" << pthPath.string()  << "\""
-        << " \"" << onnxDest.string() << "\"";
-    const int rc = std::system(cmd.str().c_str());
+    process_observer::CommandResult result;
+    if (!process_observer::runCommandArgs(
+            {"python3", scriptPath->string(), pthPath.string(), onnxDest.string()},
+            result,
+            error)) {
+        std::error_code ec2;
+        std::filesystem::remove(*scriptPath, ec2);
+        return false;
+    }
 
     std::error_code ec2;
-    std::filesystem::remove(scriptPath, ec2);
+    std::filesystem::remove(*scriptPath, ec2);
 
-    if (rc != 0) {
-        error = "torch.onnx.export() failed (exit " + std::to_string(rc)
+    if (result.exitCode != 0) {
+        error = "torch.onnx.export() failed (exit " + std::to_string(result.exitCode)
               + ").  Ensure torch is installed: pip install torch torch_migraphx";
+        const auto output = process_observer::trimOutput(result.mergedOutput);
+        if (!output.empty()) {
+            error += "\nHelper output:\n" + output;
+        }
         return false;
     }
     if (!fileExists(onnxDest)) {
@@ -2070,17 +2270,36 @@ std::vector<ManagedModel> ModelManager::allModels() const {
     for (const auto& [id, m] : impl_->records) {
         out.push_back(m);
     }
-    // Stable order: preserve catalog order
-    std::sort(out.begin(), out.end(), [](const ManagedModel& a, const ManagedModel& b) {
-        const auto& cat = builtinModelCatalog();
-        auto pos = [&](const std::string& id_) {
-            for (std::size_t i = 0; i < cat.size(); ++i) {
-                if (cat[i].id == id_) return static_cast<int>(i);
-            }
-            return static_cast<int>(cat.size());
-        };
-        return pos(a.entry.id) < pos(b.entry.id);
+
+    const auto& orderIndex = builtinModelOrderIndex();
+
+    struct OrderedModel {
+        std::size_t order = 0;
+        ManagedModel model;
+    };
+
+    std::vector<OrderedModel> ordered;
+    ordered.reserve(out.size());
+    for (auto& model : out) {
+        const auto it = orderIndex.find(model.entry.id);
+        ordered.push_back(OrderedModel{
+            it == orderIndex.end() ? orderIndex.size() : it->second,
+            std::move(model),
+        });
+    }
+
+    std::sort(ordered.begin(), ordered.end(), [](const OrderedModel& a, const OrderedModel& b) {
+        if (a.order != b.order) {
+            return a.order < b.order;
+        }
+        return a.model.entry.id < b.model.entry.id;
     });
+
+    out.clear();
+    out.reserve(ordered.size());
+    for (auto& item : ordered) {
+        out.push_back(std::move(item.model));
+    }
     return out;
 }
 
@@ -2381,6 +2600,7 @@ bool ModelManager::startDownload(const std::string& modelId,
                                   const ModelProgressCb& progressCb,
                                   const ModelStateCb&    stateCb,
                                   std::string&           error) {
+    ModelEntry entry;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
         auto it = impl_->records.find(modelId);
@@ -2402,16 +2622,18 @@ bool ModelManager::startDownload(const std::string& modelId,
             error = "Model has no download URL (built-in / parametric).";
             return false;
         }
+        if (!validateDownloadSpecification(m.entry, error)) {
+            return false;
+        }
 
         // Set transient state
+        entry = m.entry;
         impl_->records[modelId].state = ModelState::Downloading;
         impl_->cancelFlags[modelId] = std::make_shared<std::atomic<bool>>(false);
     }
 
     if (stateCb) { stateCb(modelId, ModelState::Downloading); }
 
-    // Capture copies for the thread
-    const ModelEntry entry  = *catalogEntryById(modelId);
     const std::filesystem::path dlDir = impl_->downloadedDir();
 
     // Capture cancelFlag as shared_ptr so the thread holds a stable reference
@@ -2428,25 +2650,47 @@ bool ModelManager::startDownload(const std::string& modelId,
     std::shared_ptr<Impl> implPtr = impl_;
     std::thread([implPtr, entry, dlDir, progressCb, stateCb, modelId, cancelFlag]() mutable {
         std::string err;
+        std::vector<std::filesystem::path> createdPaths;
 
         const bool isZipArchive = !entry.archiveSubPath.empty();
 
-        // For zip archives, download to a temporary file; for direct files,
-        // download straight to the final destination.
-        const auto destPath = isZipArchive
-            ? dlDir / (entry.id + "_archive.zip")
-            : dlDir / entry.filename;
+        std::filesystem::path destPath;
+        if (isZipArchive) {
+            const auto tempArchive = createSecureTempFilePath(dlDir, entry.id + "_archive_", err);
+            if (!tempArchive.has_value()) {
+                ModelState finalState = ModelState::Error;
+                {
+                    std::lock_guard<std::mutex> lock(implPtr->mtx);
+                    auto& m = implPtr->records[modelId];
+                    m.state = ModelState::Error;
+                    m.errorMessage = err;
+                    finalState = m.state;
+                }
+                if (stateCb) { stateCb(modelId, finalState); }
+                if (progressCb) {
+                    progressCb(modelId, 1.0f, "Download failed: " + err);
+                }
+                return;
+            }
+            destPath = *tempArchive;
+            createdPaths.push_back(destPath);
+        } else {
+            destPath = dlDir / entry.filename;
+            createdPaths.push_back(destPath);
+        }
 
         bool ok = curlDownload(entry.downloadUrl, destPath,
                                progressCb, modelId, *cancelFlag, err);
 
         if (ok && isZipArchive) {
             if (progressCb) { progressCb(entry.id, 0.95f, "Extracting from archive…"); }
-            ok = extractFromZip(destPath, entry.archiveSubPath,
-                                dlDir / entry.filename, err);
+            const auto primaryDest = dlDir / entry.filename;
+            createdPaths.push_back(primaryDest);
+            ok = extractFromZip(destPath, entry.archiveSubPath, primaryDest, err);
             if (ok && !entry.archiveSubPathAux.empty() && !entry.filenameAux.empty()) {
-                ok = extractFromZip(destPath, entry.archiveSubPathAux,
-                                    dlDir / entry.filenameAux, err);
+                const auto auxDest = dlDir / entry.filenameAux;
+                createdPaths.push_back(auxDest);
+                ok = extractFromZip(destPath, entry.archiveSubPathAux, auxDest, err);
             }
             // Remove the temporary archive regardless of extraction outcome.
             std::error_code removeEc;
@@ -2454,8 +2698,16 @@ bool ModelManager::startDownload(const std::string& modelId,
         } else if (ok && !entry.downloadUrlAux.empty()) {
             // Direct download of a second file (NCNN .bin without zip)
             const auto destAux = dlDir / entry.filenameAux;
+            createdPaths.push_back(destAux);
             ok = curlDownload(entry.downloadUrlAux, destAux,
                               progressCb, modelId, *cancelFlag, err);
+        }
+
+        if (!ok) {
+            std::error_code cleanupEc;
+            for (const auto& path : createdPaths) {
+                std::filesystem::remove(path, cleanupEc);
+            }
         }
 
         ModelState finalState = ModelState::Error;
@@ -2541,8 +2793,22 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
     std::filesystem::path tempOnnxPath;
     if (sourceFormat == ModelFormat::Pytorch) {
         if (progressCb) { progressCb(modelId, 0.02f, "Exporting PyTorch model to ONNX…"); }
-        tempOnnxPath = std::filesystem::temp_directory_path()
-                     / (modelId + "_torch_export.onnx");
+        const auto secureTempOnnx = createSecureTempFilePath(tempBaseDirectory(),
+                                                             modelId + "_torch_export_",
+                                                             error);
+        if (!secureTempOnnx.has_value()) {
+            ModelState finalState = ModelState::Error;
+            {
+                std::lock_guard<std::mutex> lockErr(impl_->mtx);
+                auto& mErr = impl_->records[modelId];
+                mErr.state = ModelState::Error;
+                mErr.errorMessage = error;
+                finalState = mErr.state;
+            }
+            if (stateCb) { stateCb(modelId, finalState); }
+            return false;
+        }
+        tempOnnxPath = *secureTempOnnx;
         std::string exportErr;
         if (!torchExportToOnnx(modelPath, tempOnnxPath, exportErr)) {
             error = "PyTorch → ONNX export failed: " + exportErr;
@@ -2734,12 +3000,17 @@ std::optional<std::string> ModelManager::autoCompileForInference(
     }
     const int requestedCompileBatch = normaliseCompileBatch(compileBatch);
 
-    const ModelEntry* entry = catalogEntryById(modelId);
-    if (entry == nullptr) {
-        error = "Unknown model id: " + modelId;
-        return std::nullopt;
+    ModelEntry entry;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx);
+        auto it = impl_->records.find(modelId);
+        if (it == impl_->records.end()) {
+            error = "Unknown model id: " + modelId;
+            return std::nullopt;
+        }
+        entry = it->second.entry;
     }
-    const bool fixedCompileDims = hasFixedMiGraphXCompileDims(*entry);
+    const bool fixedCompileDims = hasFixedMiGraphXCompileDims(entry);
 
     int compileWidth = baselineCompileWidth();
     int compileHeight = baselineCompileHeight();
@@ -2754,7 +3025,7 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         compileHeight = static_cast<int>(*inputHeight);
     }
     std::tie(compileWidth, compileHeight) =
-        resolveMiGraphXCompileDims(*entry, compileWidth, compileHeight);
+        resolveMiGraphXCompileDims(entry, compileWidth, compileHeight);
 
     const bool compileDimsResolved = fixedCompileDims || useCustomDims;
     const bool canReuseGenericBaselineArtifact =
@@ -2803,7 +3074,7 @@ std::optional<std::string> ModelManager::autoCompileForInference(
             std::cout << prefix << *validated << std::endl;
             return validated;
         }
-        if (const auto defaultDims = defaultMiGraphXCompileDims(*entry); defaultDims.has_value()) {
+        if (const auto defaultDims = defaultMiGraphXCompileDims(entry); defaultDims.has_value()) {
             logRejectedArtifact(compiledArtifactPath(impl_->convertedDir(), modelId, precision,
                                                      defaultDims->first, defaultDims->second, 1),
                                 detail);
@@ -2931,8 +3202,13 @@ std::optional<std::string> ModelManager::autoCompileForInference(
     std::filesystem::path onnxPath = modelPath;
     std::filesystem::path tempOnnxPath;
     if (sourceFormat == ModelFormat::Pytorch) {
-        tempOnnxPath = std::filesystem::temp_directory_path()
-                     / (modelId + "_torch_export.onnx");
+        const auto secureTempOnnx = createSecureTempFilePath(tempBaseDirectory(),
+                                                             modelId + "_torch_export_",
+                                                             error);
+        if (!secureTempOnnx.has_value()) {
+            return std::nullopt;
+        }
+        tempOnnxPath = *secureTempOnnx;
         std::string exportErr;
         if (!torchExportToOnnx(modelPath, tempOnnxPath, exportErr)) {
             error = "PyTorch → ONNX export failed: " + exportErr;
@@ -2944,7 +3220,7 @@ std::optional<std::string> ModelManager::autoCompileForInference(
     std::filesystem::path effectiveOnnxPath;
     std::filesystem::path manifestSourcePath = modelPath;
     std::string prepareErr;
-    if (!prepareOnnxForMiGraphX(*entry, onnxPath, manifestSourcePath,
+    if (!prepareOnnxForMiGraphX(entry, onnxPath, manifestSourcePath,
                                 impl_->preparedDir(),
                                 effectiveOnnxPath, manifestSourcePath,
                                 prepareErr)) {

@@ -2,6 +2,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
+#include <string>
 
 #include "ave/runtime_paths.hpp"
 
@@ -30,6 +32,30 @@ void unsetEnvVar(const char* name) {
     unsetenv(name);
 #endif
 }
+
+std::optional<std::string> getEnvVar(const char* name) {
+    if (const char* value = std::getenv(name); value != nullptr) {
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+class ScopedEnvVar {
+  public:
+    explicit ScopedEnvVar(const char* name) : name_(name), original_(getEnvVar(name)) {}
+
+    ~ScopedEnvVar() {
+        if (original_.has_value()) {
+            setEnvVar(name_, *original_);
+        } else {
+            unsetEnvVar(name_);
+        }
+    }
+
+  private:
+    const char* name_;
+    std::optional<std::string> original_;
+};
 
 void testBundledMiGraphXPrefixDoesNotRequireCompilerTool() {
     const auto tempDir =
@@ -143,6 +169,46 @@ void testBundledMiGraphXCompilerEnvOverridesPrependToolchainPaths() {
     std::filesystem::remove_all(tempDir, ec);
 }
 
+    void testDefaultWritableCacheDirHonorsOverride() {
+        ScopedEnvVar cacheDirGuard("AVE_CACHE_DIR");
+        const auto overrideDir = std::filesystem::temp_directory_path() / "ave_runtime_paths_cache_override";
+        setEnvVar("AVE_CACHE_DIR", overrideDir.string());
+
+        const auto resolved = ave::defaultWritableCacheDir();
+        check(resolved == overrideDir,
+            "defaultWritableCacheDir should honor AVE_CACHE_DIR");
+    }
+
+    void testDefaultWritablePathsFallbackToScopedTempRoot() {
+        ScopedEnvVar cacheDirGuard("AVE_CACHE_DIR");
+        ScopedEnvVar modelsDirGuard("AVE_MODELS_DIR");
+        ScopedEnvVar xdgCacheGuard("XDG_CACHE_HOME");
+        ScopedEnvVar xdgDataGuard("XDG_DATA_HOME");
+        ScopedEnvVar homeGuard("HOME");
+
+        unsetEnvVar("AVE_CACHE_DIR");
+        unsetEnvVar("AVE_MODELS_DIR");
+        unsetEnvVar("XDG_CACHE_HOME");
+        unsetEnvVar("XDG_DATA_HOME");
+        unsetEnvVar("HOME");
+
+        const auto cacheDir = ave::defaultWritableCacheDir();
+        const auto modelsDir = ave::defaultWritableModelsDir();
+
+        check(cacheDir.filename() == "cache",
+            "fallback cache directory should end with 'cache'");
+        check(modelsDir.filename() == "models",
+            "fallback models directory should end with 'models'");
+        check(cacheDir.parent_path() == modelsDir.parent_path(),
+            "fallback cache and models directories should share the same scoped temp root");
+        check(cacheDir.parent_path().filename().string().rfind("ave-", 0) == 0,
+            "fallback temp root should be user-scoped");
+        check(cacheDir.string().find("/tmp/ave_cache") == std::string::npos,
+            "fallback cache path should no longer use the legacy shared /tmp cache path");
+        check(modelsDir.string().find("/tmp/ave_models") == std::string::npos,
+            "fallback models path should no longer use the legacy shared /tmp models path");
+    }
+
 }  // namespace
 
 int main() {
@@ -150,5 +216,7 @@ int main() {
     testBundledMiGraphXDriverOverrideWins();
     testBundledMiGraphXDriverPrefersLauncherWrapper();
     testBundledMiGraphXCompilerEnvOverridesPrependToolchainPaths();
+        testDefaultWritableCacheDirHonorsOverride();
+        testDefaultWritablePathsFallbackToScopedTempRoot();
     return 0;
 }
