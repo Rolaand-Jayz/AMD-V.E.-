@@ -192,13 +192,18 @@ The native packages all carry the same private payload layout and differ only in
 
 Release packages install:
 
-- `LICENSE`
+- `LICENSE` under the app license directory
+- `README.md`
 - `CHANGELOG.md`
 - `SECURITY.md`
-- `README.md`
-- `docs/PACKAGING.md`
-- `docs/RELEASING.md`
 - `docs/BENCHMARKS.md`
+- `docs/BETA_TESTING_PROGRAM.md`
+- `docs/LIMITATIONS.md`
+- `docs/PACKAGING.md`
+- `docs/RELEASE_STATUS.md`
+- `docs/RELEASING.md`
+- `docs/SUPPORT_TIERS.md`
+- `docs/VALIDATION_AND_EVIDENCE.md`
 
 ## Verification
 
