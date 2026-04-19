@@ -81,7 +81,7 @@ void testManifestValidationTracksSourceFingerprint() {
     writeFile(sourcePath, "abcd");
 
     ave::obs::ArtifactManifestFields fields;
-    fields.manifestSchemaVersion = "2";
+    fields.manifestSchemaVersion = "3";
     fields.migraphxVersion = "migraphx";
     fields.rocmVersion = "rocm";
     fields.gpuGfxTarget = "gfx";
@@ -91,6 +91,7 @@ void testManifestValidationTracksSourceFingerprint() {
     fields.offloadCopy = "1";
     fields.precision = "fp16";
     fields.compileProfile = "balanced";
+    fields.skipBenchmarking = "0";
     fields.disableMlir = "0";
     fields.enableNhwc = "1";
     fields.enableCk = "1";

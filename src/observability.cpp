@@ -130,6 +130,7 @@ void logMiGraphXEnvironment() {
         "MIGRAPHX_GPU_DEBUG",
         "MIGRAPHX_DISABLE_MLIR",
         "MIGRAPHX_TRACE_MLIR",
+        "MIGRAPHX_SKIP_BENCHMARKING",
         "MIGRAPHX_ENABLE_NHWC",
         "MIGRAPHX_ENABLE_CK",
         "MIGRAPHX_PROBLEM_CACHE",
@@ -168,6 +169,7 @@ void logMiGraphXEnvironment(const ArtifactManifestFields& effective,
               << "  precision=" << effective.precision << '\n'
               << "  compile_profile=" << effective.compileProfile << '\n'
               << "  offload_copy=" << effective.offloadCopy << '\n'
+              << "  MIGRAPHX_SKIP_BENCHMARKING=" << effective.skipBenchmarking << '\n'
               << "  MIGRAPHX_DISABLE_MLIR=" << effective.disableMlir << '\n'
               << "  MIGRAPHX_ENABLE_NHWC=" << effective.enableNhwc << '\n'
               << "  MIGRAPHX_ENABLE_CK=" << effective.enableCk << '\n'
@@ -289,6 +291,7 @@ bool writeArtifactManifest(const std::string&            manifestPath,
         << "offload_copy="     << f.offloadCopy      << '\n'
         << "precision="        << f.precision        << '\n'
         << "compile_profile="  << f.compileProfile   << '\n'
+        << "skip_benchmarking=" << f.skipBenchmarking << '\n'
         << "disable_mlir="     << f.disableMlir      << '\n'
         << "enable_nhwc="      << f.enableNhwc       << '\n'
         << "enable_ck="        << f.enableCk         << '\n'
@@ -371,6 +374,7 @@ bool validateArtifactManifest(const std::string&            manifestPath,
         && check("offload_copy",     expected.offloadCopy)
         && check("precision",        expected.precision)
         && check("compile_profile",  expected.compileProfile)
+        && check("skip_benchmarking", expected.skipBenchmarking)
         && check("disable_mlir",     expected.disableMlir)
         && check("enable_nhwc",      expected.enableNhwc)
         && check("enable_ck",        expected.enableCk)
