@@ -131,6 +131,7 @@ struct ArtifactManifestFields {
     std::string offloadCopy;      // "0" or "1"
     std::string precision;        // "fp32" or "fp16"
     std::string compileProfile;   // compile/runtime tuning profile label
+    std::string skipBenchmarking; // MIGRAPHX_SKIP_BENCHMARKING env var value or "0"
     std::string disableMlir;      // MIGRAPHX_DISABLE_MLIR env var value or "0"
     std::string enableNhwc;       // MIGRAPHX_ENABLE_NHWC env var value or "0"
     std::string enableCk;         // MIGRAPHX_ENABLE_CK env var value or "0"

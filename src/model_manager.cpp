@@ -50,9 +50,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Small fixed-shape fallback used only for explicit "convert model" actions
-// where no real video dimensions are available yet. Runtime auto-compile still
-// waits for the actual input frame size before producing inference artifacts.
+// Small fixed-shape fallback used only when explicitly enabled. The default
+// runtime auto-compile path stays full-frame.
 constexpr int kDefaultBaselineCompileWidth = 192;
 constexpr int kDefaultBaselineCompileHeight = 192;
 constexpr int kDefaultStereoDepthResolution = 384;
@@ -63,7 +62,7 @@ constexpr int kStereoDepthResolutionStride = 14;
 constexpr int kDefaultMiopenCompileParallelCap = 16;
 constexpr int kMinimumMiGraphXTileFallbackExtent = 64;
 constexpr std::array<int, 4> kMiGraphXTileFallbackExtents = {192, 128, 96, 64};
-constexpr char kArtifactManifestSchemaVersion[] = "2";
+constexpr char kArtifactManifestSchemaVersion[] = "3";
 
 enum class MiGraphXCompileProfile {
     Fast,
@@ -76,6 +75,7 @@ struct MiGraphXDriverEnv {
     std::vector<std::pair<std::string, std::string>> overrides;
     MiGraphXCompileProfile profile = MiGraphXCompileProfile::Fast;
     std::string profileLabel;
+    std::string skipBenchmarking;
     std::string disableMlir;
     std::string enableNhwc;
     std::string enableCk;
@@ -1046,6 +1046,14 @@ bool migraphxOffloadCopyEnabled() {
     return readBoolEnv("AVE_MIGRAPHX_OFFLOAD_COPY", true);
 }
 
+bool automaticMiGraphXTileFallbackEnabled() {
+    return readBoolEnv("AVE_MIGRAPHX_ALLOW_TILE_FALLBACK", false);
+}
+
+bool automaticMiGraphXPrecisionFallbackEnabled() {
+    return readBoolEnv("AVE_MIGRAPHX_ALLOW_FP32_FALLBACK", false);
+}
+
 std::optional<int> preferredAmdDeviceIndexFromSettings() {
     return ::ave::preferredAmdDeviceIndexFromEnv();
 }
@@ -1137,6 +1145,7 @@ std::string buildMiGraphXRuntimeFingerprint(const std::string& profileLabel,
                                             const std::string& rocmVersion,
                                             const std::string& gfxTarget,
                                             const std::string& visibleDevices,
+                                            const std::string& skipBenchmarking,
                                             const std::string& disableMlir,
                                             const std::string& enableNhwc,
                                             const std::string& enableCk,
@@ -1147,6 +1156,7 @@ std::string buildMiGraphXRuntimeFingerprint(const std::string& profileLabel,
          << "|rocm=" << rocmVersion
          << "|gfx=" << gfxTarget
          << "|visible=" << visibleDevices
+         << "|skip_benchmarking=" << skipBenchmarking
          << "|disable_mlir=" << disableMlir
          << "|enable_nhwc=" << enableNhwc
          << "|enable_ck=" << enableCk
@@ -1185,7 +1195,7 @@ int defaultMiopenCompileParallelLevel() {
 MiGraphXCompileProfile defaultMiGraphXCompileProfile() {
     const auto rawProfile = readNonEmptyEnv("AVE_MIGRAPHX_COMPILE_PROFILE");
     if (!rawProfile.has_value()) {
-        return MiGraphXCompileProfile::Balanced;
+        return MiGraphXCompileProfile::Fast;
     }
 
     std::string value = *rawProfile;
@@ -1211,33 +1221,41 @@ std::string miGraphXCompileProfileLabel(MiGraphXCompileProfile profile) {
 
 std::string defaultMiopenFindMode(MiGraphXCompileProfile profile) {
     switch (profile) {
-        case MiGraphXCompileProfile::Fast: return "FAST";
+        case MiGraphXCompileProfile::Fast:
         case MiGraphXCompileProfile::Balanced: return "DYNAMIC_HYBRID";
         case MiGraphXCompileProfile::Exhaustive: return "NORMAL";
     }
-    return "FAST";
+    return "DYNAMIC_HYBRID";
+}
+
+std::string defaultMiGraphXSkipBenchmarking(MiGraphXCompileProfile profile) {
+    switch (profile) {
+        case MiGraphXCompileProfile::Fast: return "1";
+        case MiGraphXCompileProfile::Balanced:
+        case MiGraphXCompileProfile::Exhaustive:
+            return "0";
+    }
+    return "1";
 }
 
 std::string defaultMiGraphXEnableNhwc(MiGraphXCompileProfile profile) {
     switch (profile) {
+        case MiGraphXCompileProfile::Fast:
         case MiGraphXCompileProfile::Balanced:
         case MiGraphXCompileProfile::Exhaustive:
             return "1";
-        case MiGraphXCompileProfile::Fast:
-            return "0";
     }
-    return "0";
+    return "1";
 }
 
 std::string defaultMiGraphXEnableCk(MiGraphXCompileProfile profile) {
     switch (profile) {
+        case MiGraphXCompileProfile::Fast:
         case MiGraphXCompileProfile::Balanced:
         case MiGraphXCompileProfile::Exhaustive:
             return "1";
-        case MiGraphXCompileProfile::Fast:
-            return "0";
     }
-    return "0";
+    return "1";
 }
 
 void appendEffectiveEnv(MiGraphXDriverEnv& env,
@@ -1261,6 +1279,8 @@ MiGraphXDriverEnv buildMiGraphXDriverEnv() {
     env.gfxTarget = detectGfxTargetForIdentity();
     const std::string rocmVersion = env.rocmVersion;
     const std::string gfxTarget = env.gfxTarget;
+    env.skipBenchmarking = readNonEmptyEnv("MIGRAPHX_SKIP_BENCHMARKING")
+        .value_or(defaultMiGraphXSkipBenchmarking(env.profile));
     env.disableMlir = readNonEmptyEnv("MIGRAPHX_DISABLE_MLIR").value_or("0");
     env.enableNhwc = readNonEmptyEnv("MIGRAPHX_ENABLE_NHWC")
         .value_or(defaultMiGraphXEnableNhwc(env.profile));
@@ -1276,7 +1296,7 @@ MiGraphXDriverEnv buildMiGraphXDriverEnv() {
                       .value_or(std::to_string(defaultMiopenCompileParallelLevel())));
     env.runtimeFingerprint = buildMiGraphXRuntimeFingerprint(
         env.profileLabel, rocmVersion, gfxTarget, env.visibleDevices,
-        env.disableMlir, env.enableNhwc, env.enableCk,
+        env.skipBenchmarking, env.disableMlir, env.enableNhwc, env.enableCk,
         defaultFindMode, defaultParallelLevel);
 
     const std::string problemCache = readNonEmptyEnv("AVE_MIGRAPHX_PROBLEM_CACHE")
@@ -1305,6 +1325,7 @@ MiGraphXDriverEnv buildMiGraphXDriverEnv() {
     ensureDir(std::filesystem::path(miopenUserDb));
     ensureDir(std::filesystem::path(miopenCache));
 
+    appendEffectiveEnv(env, "MIGRAPHX_SKIP_BENCHMARKING", env.skipBenchmarking);
     appendEffectiveEnv(env, "MIGRAPHX_DISABLE_MLIR", env.disableMlir);
     appendEffectiveEnv(env, "MIGRAPHX_ENABLE_NHWC", env.enableNhwc);
     appendEffectiveEnv(env, "MIGRAPHX_ENABLE_CK", env.enableCk);
@@ -1346,6 +1367,7 @@ obs::ArtifactManifestFields buildArtifactManifestFields(const std::filesystem::p
     fields.offloadCopy = offloadCopy ? "1" : "0";
     fields.precision = compilePrecisionTag(precision);
     fields.compileProfile = env.profileLabel;
+    fields.skipBenchmarking = env.skipBenchmarking;
     fields.disableMlir = env.disableMlir;
     fields.enableNhwc = env.enableNhwc;
     fields.enableCk = env.enableCk;
@@ -2865,7 +2887,8 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
         ? compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision,
                                compileWidth, compileHeight, 1)
         : compiledArtifactPath(impl_->convertedDir(), modelId, compilePrecision);
-    const bool allowTileFallback = !defaultDims.has_value() &&
+    const bool allowTileFallback = automaticMiGraphXTileFallbackEnabled() &&
+        !defaultDims.has_value() &&
         canUseMiGraphXTileFallbackLadder(compileWidth, compileHeight);
     bool ok = migraphxCompile(effectiveOnnxPath, mxrPath, manifestSourcePath,
                               compileWidth, compileHeight,
@@ -2873,7 +2896,8 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
                               compilePrecision,
                               std::nullopt,
                               progressCb, modelId, error);
-    if (!ok && shouldRetryFp32AfterTimeout(compilePrecision, error)) {
+    if (!ok && automaticMiGraphXPrecisionFallbackEnabled() &&
+        shouldRetryFp32AfterTimeout(compilePrecision, error)) {
         const auto fp32Path = defaultDims.has_value()
             ? compiledArtifactPath(impl_->convertedDir(), modelId, ModelPrecision::Fp32,
                                    compileWidth, compileHeight, 1)
@@ -2932,7 +2956,10 @@ bool ModelManager::convertToMiGraphX(const std::string& modelId,
                               << formatCompileDimensions(fallbackExtent, fallbackExtent)
                               << ": " << validationDetail << std::endl;
                 }
-                ok = migraphxCompile(effectiveOnnxPath, mxrPath, manifestSourcePath,
+                const auto fallbackPath = compiledArtifactPath(
+                    impl_->convertedDir(), modelId, ModelPrecision::Fp32,
+                    fallbackExtent, fallbackExtent, 1);
+                ok = migraphxCompile(effectiveOnnxPath, fallbackPath, manifestSourcePath,
                                      fallbackExtent, fallbackExtent,
                                      1,
                                      ModelPrecision::Fp32,
@@ -3032,7 +3059,8 @@ std::optional<std::string> ModelManager::autoCompileForInference(
         !fixedCompileDims &&
         compileWidth == baselineCompileWidth() &&
         compileHeight == baselineCompileHeight();
-    const bool allowTileFallback = !fixedCompileDims &&
+    const bool allowTileFallback = automaticMiGraphXTileFallbackEnabled() &&
+        !fixedCompileDims &&
         canUseMiGraphXTileFallbackLadder(compileWidth, compileHeight);
     auto artifactPathFor = [&](ModelPrecision precision,
                                int width,
@@ -3287,7 +3315,8 @@ std::optional<std::string> ModelManager::autoCompileForInference(
             }
 
             bool exactFp32Attempted = false;
-            if (shouldRetryFp32AfterTimeout(compilePrecision, batchError)) {
+            if (automaticMiGraphXPrecisionFallbackEnabled() &&
+                shouldRetryFp32AfterTimeout(compilePrecision, batchError)) {
                 const auto fp32Path = customMxrPath(ModelPrecision::Fp32, batch);
                 std::cout << "[auto-compile] fp16 compilation timed out; retrying fp32 at "
                           << compileWidth << "x" << compileHeight

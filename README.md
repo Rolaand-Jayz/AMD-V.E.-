@@ -239,7 +239,7 @@ If you need to bundle a custom MiGraphX runtime/toolchain for packaging work, pa
 
 The first run of a MiGraphX-backed model may trigger model preparation or compilation. Compiled `.mxr` artifacts are cached and reused later when the runtime fingerprint still matches the current environment.
 
-That first-run path can take minutes on the reference stack. The app now emits compile progress while `migraphx-driver` is working, but some preparation phases are still coarser than a perfect progress bar. Treat first-run preparation as deliberate setup work, not as a sign that later runs will always be that slow.
+The default MiGraphX compile profile is `fast`. It keeps the balanced runtime-quality knobs, skips MiGraphX kernel benchmarking during first-run compilation, and gets users to cached inference sooner. Use `AVE_MIGRAPHX_COMPILE_PROFILE=balanced` or `exhaustive` when you are intentionally preparing tuned artifacts and can tolerate a slower compile.
 
 ## ROCm and MiGraphX customization
 
@@ -264,6 +264,9 @@ The best detailed references for that part of the project are:
 Useful runtime tuning variables include:
 
 - `AVE_MIGRAPHX_COMPILE_PROFILE=fast|balanced|exhaustive`
+- `MIGRAPHX_SKIP_BENCHMARKING=0|1`
+- `AVE_MIGRAPHX_ALLOW_FP32_FALLBACK=1` to opt into fp32 retries after fp16 compile timeouts
+- `AVE_MIGRAPHX_ALLOW_TILE_FALLBACK=1` to opt into smaller fp32 tile retries after full-frame compile timeouts
 - `AVE_MIGRAPHX_PROBLEM_CACHE=/path/to/problem_cache.json`
 - `AVE_MIGRAPHX_MIOPEN_FIND_MODE=FAST|DYNAMIC_HYBRID|NORMAL`
 - `AVE_MIGRAPHX_MIOPEN_COMPILE_PARALLEL_LEVEL=<n>`

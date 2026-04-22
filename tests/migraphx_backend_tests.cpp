@@ -76,9 +76,16 @@ void testOffloadCopyEnvOverride() {
 
     ave::MiGraphXBackend backend;
     const auto opts = backend.compileOptions();
+#ifdef AVE_HAVE_HIP
     check(!opts.offloadCopy, "AVE_MIGRAPHX_OFFLOAD_COPY=0 should disable implicit offload copy");
     check(opts.format().find("offload_copy=0") != std::string::npos,
           "compile option formatting should expose offload_copy=0");
+#else
+    check(opts.offloadCopy,
+          "AVE_MIGRAPHX_OFFLOAD_COPY=0 should fall back to offload_copy=1 without HIP");
+    check(opts.format().find("offload_copy=1") != std::string::npos,
+          "compile option formatting should expose non-HIP offload_copy fallback");
+#endif
 
     std::string error;
 #ifdef AVE_HAVE_HIP
@@ -86,8 +93,9 @@ void testOffloadCopyEnvOverride() {
           "offload_copy=0 should validate on HIP-enabled builds");
     check(error.empty(), "valid offload_copy=0 should not populate an error");
 #else
-    check(!opts.validate(error),
-          "offload_copy=0 should reject non-HIP builds");
+    check(opts.validate(error),
+          "offload_copy=0 should validate after non-HIP fallback to offload_copy=1");
+    check(error.empty(), "non-HIP offload_copy fallback should not populate an error");
 #endif
 }
 

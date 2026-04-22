@@ -292,7 +292,7 @@ std::optional<std::string> readNonEmptyEnvValue(const char* name) {
 }
 
 std::string currentCompileProfileLabel() {
-    std::string value = envOrDef("AVE_MIGRAPHX_COMPILE_PROFILE", "balanced");
+    std::string value = envOrDef("AVE_MIGRAPHX_COMPILE_PROFILE", "fast");
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
     });
@@ -412,14 +412,15 @@ std::string currentRuntimeFingerprint(const std::string& compileProfile,
                                       const std::string& rocmVersion,
                                       const std::string& gfxTarget,
                                       const std::string& visibleDevices,
+                                      const std::string& skipBenchmarking,
                                       const std::string& disableMlir,
                                       const std::string& enableNhwc,
                                       const std::string& enableCk,
                                       const std::string& miopenFindMode,
                                       const std::string& miopenParallel) {
     const std::string seed = compileProfile + "|" + rocmVersion + "|"
-        + gfxTarget + "|" + visibleDevices + "|" + disableMlir + "|"
-        + enableNhwc + "|" + enableCk + "|"
+        + gfxTarget + "|" + visibleDevices + "|" + skipBenchmarking + "|"
+        + disableMlir + "|" + enableNhwc + "|" + enableCk + "|"
         + miopenFindMode + "|" + miopenParallel;
     return std::to_string(std::hash<std::string>{}(seed));
 }
@@ -458,31 +459,29 @@ std::string defaultMiopenFindModeForProfile(const std::string& profile) {
     if (profile == "exhaustive") {
         return "NORMAL";
     }
-    if (profile == "balanced") {
-        return "DYNAMIC_HYBRID";
-    }
-    return "FAST";
+    return "DYNAMIC_HYBRID";
+}
+
+std::string defaultMiGraphXSkipBenchmarkingForProfile(const std::string& profile) {
+    return profile == "fast" ? "1" : "0";
 }
 
 std::string defaultMiGraphXEnableNhwcForProfile(const std::string& profile) {
-    if (profile == "balanced" || profile == "exhaustive") {
-        return "1";
-    }
-    return "0";
+    (void)profile;
+    return "1";
 }
 
 std::string defaultMiGraphXEnableCkForProfile(const std::string& profile) {
-    if (profile == "balanced" || profile == "exhaustive") {
-        return "1";
-    }
-    return "0";
+    (void)profile;
+    return "1";
 }
 
 bool setProcessEnv(const std::string& name, const std::string& value);
 
 bool applyDefaultMiGraphXProcessEnv(int deviceIdx, std::string& error) {
     const std::string profile = currentCompileProfileLabel();
-    const std::array<std::pair<const char*, std::string>, 2> defaults = {{
+    const std::array<std::pair<const char*, std::string>, 3> defaults = {{
+        {"MIGRAPHX_SKIP_BENCHMARKING", defaultMiGraphXSkipBenchmarkingForProfile(profile)},
         {"MIGRAPHX_ENABLE_NHWC", defaultMiGraphXEnableNhwcForProfile(profile)},
         {"MIGRAPHX_ENABLE_CK", defaultMiGraphXEnableCkForProfile(profile)},
     }};
@@ -918,7 +917,7 @@ std::size_t skipField(const std::uint8_t* buf, std::size_t len, std::uint32_t wi
         const std::string& onnxPath,
         const CompileOptions& opts) {
     obs::ArtifactManifestFields f;
-    f.manifestSchemaVersion = "2";
+    f.manifestSchemaVersion = "3";
     f.migraphxVersion = getMiGraphXVersion();
     f.rocmVersion     = getRocmVersion();
     f.gpuGfxTarget    = getGfxTarget();
@@ -940,6 +939,8 @@ std::size_t skipField(const std::uint8_t* buf, std::size_t len, std::uint32_t wi
     f.offloadCopy    = opts.offloadCopy ? "1" : "0";
     f.precision      = compilePrecisionTag(opts.precision);
     f.compileProfile = currentCompileProfileLabel();
+    f.skipBenchmarking = readNonEmptyEnvValue("MIGRAPHX_SKIP_BENCHMARKING")
+        .value_or(defaultMiGraphXSkipBenchmarkingForProfile(f.compileProfile));
     f.disableMlir    = readNonEmptyEnvValue("MIGRAPHX_DISABLE_MLIR").value_or("0");
     f.enableNhwc     = readNonEmptyEnvValue("MIGRAPHX_ENABLE_NHWC")
         .value_or(defaultMiGraphXEnableNhwcForProfile(f.compileProfile));
@@ -956,7 +957,7 @@ std::size_t skipField(const std::uint8_t* buf, std::size_t len, std::uint32_t wi
                           .value_or(std::to_string(defaultMiopenCompileParallelLevel())));
     f.runtimeFingerprint = currentRuntimeFingerprint(
         f.compileProfile, f.rocmVersion, f.gpuGfxTarget, f.visibleDevices,
-        f.disableMlir, f.enableNhwc, f.enableCk,
+        f.skipBenchmarking, f.disableMlir, f.enableNhwc, f.enableCk,
         f.miopenFindMode, f.miopenCompileParallelLevel);
     f.problemCachePath = readNonEmptyEnvValue("AVE_MIGRAPHX_PROBLEM_CACHE")
         .value_or(readNonEmptyEnvValue("MIGRAPHX_PROBLEM_CACHE")
@@ -979,6 +980,7 @@ RuntimeEnvConfig buildRuntimeEnvConfig(const std::string& sourcePath,
     ensureDir(std::filesystem::path(env.fields.miopenUserDbPath));
     ensureDir(std::filesystem::path(env.fields.miopenCustomCacheDir));
 
+    appendRuntimeEnvOverride(env, "MIGRAPHX_SKIP_BENCHMARKING", env.fields.skipBenchmarking);
     appendRuntimeEnvOverride(env, "MIGRAPHX_DISABLE_MLIR", env.fields.disableMlir);
     appendRuntimeEnvOverride(env, "MIGRAPHX_ENABLE_NHWC", env.fields.enableNhwc);
     appendRuntimeEnvOverride(env, "MIGRAPHX_ENABLE_CK", env.fields.enableCk);
@@ -4321,12 +4323,14 @@ struct MiGraphXBackend::Impl {
 // ─────────────────────────────────────────────────────────────────
 
 MiGraphXBackend::MiGraphXBackend()  : impl_(std::make_unique<Impl>()) {
+#ifdef AVE_HAVE_MIGRAPHX
     std::string initEnvError;
     const int defaultDeviceIdx = autoSelectedVisibleDeviceIndex().value_or(0);
     if (!applyDefaultMiGraphXProcessEnv(defaultDeviceIdx, initEnvError)) {
         std::cerr << "[migraphx] WARNING: failed to prime default MiGraphX environment: "
                   << initEnvError << std::endl;
     }
+#endif
     impl_->opts = compileOptionsFromEnv();
 }
 MiGraphXBackend::~MiGraphXBackend() = default;
@@ -4400,12 +4404,14 @@ bool MiGraphXBackend::initialize(std::string& error) {
 
     impl_->initialised = true;
 
+#ifdef AVE_HAVE_MIGRAPHX
     if (!applyDefaultMiGraphXProcessEnv(impl_->deviceIdx, error)) {
         error = InferenceError::runtimeFailure(
             "MiGraphX init: unable to apply default runtime tuning environment.",
             error).format();
         return false;
     }
+#endif
 
 #ifdef AVE_HAVE_HIP
     if (devCount > 1 && std::getenv("HIP_VISIBLE_DEVICES") == nullptr &&
@@ -4423,7 +4429,9 @@ bool MiGraphXBackend::initialize(std::string& error) {
     // ── G6: Log version tuple and MIGRAPHX_* env vars ───────────
     obs::logVersionTuple();
     obs::logMiGraphXEnvironment();
+#ifdef AVE_HAVE_MIGRAPHX
     impl_->interopBridge.logConfig();
+#endif
     if (!impl_->opts.offloadCopy) {
         std::cout << "[migraphx] experimental device tensor path enabled "
                      "(offload_copy=0). Host callers still use explicit HIP staging "
@@ -4636,16 +4644,12 @@ StageResult MiGraphXBackend::processVideoFile(
         stageHasTileParam("tile_width") ||
         stageHasTileParam("tile_height");
     if (!stereo3dStage && !selectedPathExplicit && !tileGeometryExplicit) {
-        tileConfig.width = std::min(inW, 4096);
-        tileConfig.height = std::min(inH, 4096);
+        tileConfig.width = inW;
+        tileConfig.height = inH;
         const int maxOverlap = std::max(0, (std::min(tileConfig.width, tileConfig.height) / 2) - 1);
         tileConfig.overlap = std::min(tileConfig.overlap, maxOverlap);
         std::cout << "[migraphx] full-frame compile preferred: requesting model input "
-                  << tileConfig.width << "x" << tileConfig.height;
-        if (tileConfig.width != inW || tileConfig.height != inH) {
-            std::cout << " (clamped from source " << inW << "x" << inH << ")";
-        }
-        std::cout << std::endl;
+                  << tileConfig.width << "x" << tileConfig.height << std::endl;
     }
     if (stereo3dStage) {
         bool limitedToSource = false;
@@ -4670,7 +4674,9 @@ StageResult MiGraphXBackend::processVideoFile(
             inW, inH, tileConfig.width, tileConfig.height, tileConfig.overlap);
         tileConfig.batch = desiredBatch;
         const auto compilePrecision = modelCompilePrecision(impl_->opts.precision);
-        std::vector<int> candidateBatches = {1, 2, 4, 8, 12, 16, desiredBatch};
+        std::vector<int> candidateBatches = desiredBatch == 1
+            ? std::vector<int>{1}
+            : std::vector<int>{1, 2, 4, 8, 12, 16, desiredBatch};
         std::sort(candidateBatches.begin(), candidateBatches.end());
         candidateBatches.erase(
             std::unique(candidateBatches.begin(), candidateBatches.end()),
@@ -4688,8 +4694,8 @@ StageResult MiGraphXBackend::processVideoFile(
             std::string validationDetail;
             const auto validatedArtifact = impl_->modelManager.validatedCompiledArtifactPath(
                 modelId, compilePrecision,
-                static_cast<std::int64_t>(inW),
-                static_cast<std::int64_t>(inH),
+                static_cast<std::int64_t>(tileConfig.width),
+                static_cast<std::int64_t>(tileConfig.height),
                 candidateBatch,
                 &validationDetail);
             if (validatedArtifact.has_value()) {
