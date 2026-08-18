@@ -2,8 +2,6 @@ name: CMake ROCm discovery
 
 on:
   push:
-    branches:
-      - agent/fix-ubuntu-rocm-discovery
   pull_request:
     paths:
       - CMakeLists.txt
@@ -12,25 +10,12 @@ on:
       - .github/workflows/cmake-rocm-discovery.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rocm-prefix-discovery:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-      - name: Apply guarded CMake wiring on the fix branch
-        if: github.event_name == 'push'
-        run: |
-          python3 tools/apply_rocm_discovery_patch.py
-          if ! git diff --quiet -- CMakeLists.txt; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add CMakeLists.txt
-            git commit -m "fix ROCm CMake package discovery"
-            git push
-          fi
       - name: Verify ROCm CONFIG-package discovery
         run: cmake -P tests/cmake/rocm_discovery_test.cmake
