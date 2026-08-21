@@ -1,0 +1,21 @@
+name: CMake ROCm discovery
+
+on:
+  push:
+  pull_request:
+    paths:
+      - CMakeLists.txt
+      - cmake/ave_rocm_discovery.cmake
+      - tests/cmake/rocm_discovery_test.cmake
+      - .github/workflows/cmake-rocm-discovery.yml
+
+permissions:
+  contents: read
+
+jobs:
+  rocm-prefix-discovery:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ROCm CONFIG-package discovery
+        run: cmake -P tests/cmake/rocm_discovery_test.cmake

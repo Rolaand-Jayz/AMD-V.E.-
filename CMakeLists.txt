@@ -3,6 +3,14 @@ cmake_minimum_required(VERSION 3.21)
 project(amd_video_enhancer_cpp LANGUAGES CXX)
 
 include(GNUInstallDirs)
+include(cmake/ave_rocm_discovery.cmake)
+
+set(AVE_ROCM_ROOT_HINTS "" CACHE STRING
+    "Additional ROCm installation prefixes to search (semicolon-separated)")
+ave_discover_rocm_prefixes()
+if(AVE_ROCM_DISCOVERED_PREFIXES)
+    message(STATUS "ROCm prefixes available to CMake: ${AVE_ROCM_DISCOVERED_PREFIXES}")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -111,8 +119,8 @@ endif()
 # ─────────────────────────────────────────────────────────────────
 if(AVE_HAVE_MIGRAPHX)
     # MiGraphX depends on hiprtc; load it first.
-    find_package(hiprtc QUIET)
-    find_package(migraphx QUIET)
+    find_package(hiprtc CONFIG QUIET)
+    find_package(migraphx CONFIG QUIET)
     if(NOT migraphx_FOUND)
         # Try pkg-config fallback
         find_package(PkgConfig QUIET)
@@ -130,7 +138,7 @@ endif()
 # Optional: HIP headers (supplied by ROCm)
 # ─────────────────────────────────────────────────────────────────
 if(AVE_HAVE_HIP)
-    find_package(hip QUIET)
+    find_package(hip CONFIG QUIET)
     if(NOT hip_FOUND)
         message(WARNING "AVE_HAVE_HIP=ON but HIP not found; disabling.")
         set(AVE_HAVE_HIP OFF)
